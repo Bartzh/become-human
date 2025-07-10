@@ -15,7 +15,7 @@ clone仓库或直接下载。
 安装deno，linux或mac使用 curl -fsSL https://deno.land/install.sh | sh
 windows可以直接用仓库里的脚本，稍微改了一下，只会下载deno.exe到根目录，不会添加环境变量。这样似乎就可以使用了。
 
-进入虚拟环境运行main.py或app.py即可
+uv run main.py/app.py即可或直接进入虚拟环境
 
 ---
 

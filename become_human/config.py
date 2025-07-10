@@ -90,7 +90,7 @@ def create_default_thread_configs_toml() -> TOMLDocument:
     doc = document()
     doc = _add_config_comments(doc)
 
-    doc.add('default', default_thread_toml)
+    doc.add('default_thread', default_thread_toml)
     return doc
 
 
@@ -137,7 +137,7 @@ def get_thread_configs() -> dict[str, ThreadConfig]:
 def get_thread_config(thread_id: str) -> ThreadConfig:
     thread_config = thread_configs.get(thread_id)
     if not thread_config:
-        warn(f'Thread "{thread_id}" not found, using default config.')
+        warn(f'Thread "{thread_id}" not found, using default thread config.')
         thread_config = default_thread_config
     return thread_config
 
