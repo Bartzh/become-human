@@ -35,7 +35,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from become_human.graph_base import BaseGraph
 from become_human.memory import MemoryManager
 from become_human.graph_retrieve import RetrieveGraph
-from become_human.utils import is_valid_json, parse_time, parse_messages
+from become_human.utils import is_valid_json, parse_time, parse_messages, extract_text_parts
 from become_human.config import get_thread_main_config, load_config
 
 from datetime import datetime, timezone
@@ -401,7 +401,7 @@ class MainGraph(BaseGraph):
                 messages.append(message)
             else:
                 break
-        search_string = "\n".join([message.text() for message in messages])
+        search_string = "\n\n".join(["\n".join(extract_text_parts(message.content)) for message in messages])
         result = await self.retrieve_graph.graph.ainvoke({"input": search_string, "type": "passive"}, config)
         content = result["output"]
         return {"messages": [AIMessage(f'以下是根据用户输入自动从你的记忆（数据库）中检索到的内容，可能会出现无关信息，如果需要进一步检索请调用工具 retrieve_memories：\n\n\n{content}')]}

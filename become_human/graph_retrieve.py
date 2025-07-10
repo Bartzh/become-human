@@ -27,7 +27,7 @@ from datetime import datetime
 import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from uuid import uuid4
+#from uuid import uuid4
 
 class RetrieveMemoriesInput(BaseModel):
     search_string: Optional[str] = Field(default=None, description="要检索的内容")
@@ -345,7 +345,8 @@ class RetrieveGraph(BaseGraph):
 def parse_documents(documents: list[Document]) -> str:
     """将文档列表转换为(AI)可读的字符串"""
     output = []
-    for doc in documents:
+    # 反过来从分数最低的开始读取
+    for doc in reversed(documents):
         content = doc.page_content
         memory_type = doc.metadata["type"]
         timestamp = doc.metadata.get("creation_timestamp")
@@ -357,4 +358,6 @@ def parse_documents(documents: list[Document]) -> str:
         else:
             readable_time = "未知时间"
         output.append(f"记忆类型：{memory_type}\n记忆创建时间: {readable_time}\n记忆内容: {content}")
+    if not output:
+        return "没有找到任何匹配的记忆。"
     return "\n\n".join(output)

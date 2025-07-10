@@ -167,7 +167,7 @@ class MemoryManager():
         """
         # 更新可检索性
         updated_metadata = self.update(metadata, current_timestamp)
-        if updated_metadata["forgot"]:
+        if updated_metadata.get("forgot"):
             return {"forgot": True}
 
         datetime_alpha = calculate_memory_datetime_alpha(datetime.fromtimestamp(current_timestamp))
@@ -176,15 +176,16 @@ class MemoryManager():
 
         retrievability = min(1.0, updated_metadata["retrievability"] + strength * datetime_alpha)
 
-        if metadata["difficulty"] < 1.0:
-            difficulty = min(1.0, metadata["difficulty"] + (stable_strength * 0.5))
-
         metadata_patch = {
             "last_accessed_timestamp": current_timestamp,
             "retrievability": retrievability,
-            "stable_time": stable_time,
-            "difficulty": difficulty,
+            "stable_time": stable_time
         }
+
+        if metadata["difficulty"] < 1.0:
+            difficulty = min(1.0, metadata["difficulty"] + (stable_strength * 0.5))
+            metadata_patch["difficulty"] = difficulty
+
         return metadata_patch
 
     async def update_memories(self, collection: dict[str, Any], memory_type: str, thread_id: str) -> None:
@@ -212,8 +213,8 @@ class MemoryManager():
         content: str = Field(description="The content of the memory")
         creation_timestamp: float = Field(description="The creation timestamp of the memory")
         type: Literal["original", "summary", "semantic"] = Field(description="The type of the memory")
-        id: str = Field(default_factory=uuid4(), description="The id of the memory")
-        stable_time: float = Field(default=1.0, description="The stable time base of the memory", gt=0.0)
+        id: str = Field(default_factory=lambda: str(uuid4()), description="The id of the memory")
+        stable_time: float = Field(description="The stable time base of the memory", gt=0.0)
 
     async def add_memories(self, memories: list[InitialMemory], thread_id: str) -> None:
         docs: dict[str, list[Document]] = {
@@ -242,7 +243,8 @@ class MemoryManager():
             )
             docs[memory.type].append(document)
         for t in docs.keys():
-            await self.aadd_documents(docs[t], thread_id, t)
+            if docs[t]:
+                await self.aadd_documents(docs[t], thread_id, t)
 
 
 
@@ -288,6 +290,7 @@ class MemoryManager():
 
         current_timestamp = datetime.now(timezone.utc).timestamp()
 
+        # 这里是纯时间过滤的检索
         if gets:
             for g in gets:
                 results = await self.aget(
@@ -403,6 +406,8 @@ class MemoryManager():
 
 
     def update_metadatas(self, ids: list[str], metadatas: list[dict], memory_type: str, thread_id: str) -> None:
+        if not ids:
+            return
         if len(ids) != len(metadatas):
             raise ValueError("ids and metadatas must have the same length")
         self.get_collection(thread_id, memory_type).update(ids=ids, metadatas=metadatas)
