@@ -123,7 +123,7 @@ key: (optional) specific key to get from state'''
     elif user_input.startswith("@set_role_prompt ") or user_input == "@set_role_prompt":
         if user_input == "@set_role_prompt":
             message = """Usage: @set_role_prompt <role_prompt>
-            role_prompt: The role prompt to set for the user"""
+role_prompt: The role prompt to set for the user"""
         else:
             splited_input = user_input.split(" ")
             role_prompt = " ".join(splited_input[1:]).strip()
