@@ -9,21 +9,11 @@ import os
 import json
 from typing import Annotated, Optional
 
-from langchain_core.tools import tool
-from langchain_community.embeddings import DashScopeEmbeddings
-from langchain_core.runnables import RunnableConfig
-#from langchain_community.chat_models.tongyi import ChatTongyi
-from langchain_qwq import ChatQwen
-
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.messages import AnyMessage, ToolMessage, BaseMessage, AIMessage, HumanMessage, RemoveMessage
 
-from become_human.graph_main import MainGraph
-from become_human.graph_recycle import RecycleGraph
-from become_human.graph_retrieve import RetrieveGraph
-from become_human.memory import MemoryManager
+from become_human import init_graphs, close_graphs, command_processing
 from become_human.utils import extract_text_parts
-from main import command_processing
 
 app = FastAPI()
 
@@ -42,10 +32,7 @@ from datetime import datetime, timedelta, timezone
 #)
 
 
-#config = {"configurable": {"thread_id": "1"}}
-
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
 
 
 # 用户数据文件路径
@@ -78,50 +65,6 @@ users_db = load_users_from_json()
 
 load_dotenv()
 private_key = os.getenv("APP_PRIVATE_KEY", "become-human")
-
-
-@tool(response_format="content_and_artifact")
-async def retrieve_memories(search_string: Annotated[str, "要检索的内容"], config: RunnableConfig) -> str:
-    """从数据库（大脑）中检索记忆"""
-    result = await retrieve_graph.graph.ainvoke({"input": search_string, "type": "active"}, config)
-    content = result["output"]
-    artifact = {"dont_store": True}
-    return content, artifact
-
-async def init():
-    global llm, embeddings, main_graph, recycle_graph, retrieve_graph, memory_manager
-
-    envs = ["CHAT_MODEL_NAME", "CHAT_MODEL_ENABLE_THINKING", "STRUCTURED_MODEL_NAME", "STRUCTURED_MODEL_ENABLE_THINKING"]
-    for e in envs:
-        if not os.getenv(e):
-            raise Exception(f"{e} is not set")
-
-    llm = ChatQwen(
-        #model="qwen-max-2025-01-25",
-        model=os.getenv("CHAT_MODEL_NAME"),
-        #top_p=0.8,
-        max_retries=2,
-        enable_thinking=True if os.getenv("CHAT_MODEL_ENABLE_THINKING") == "true" else False,
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        #parallel_tool_calls=True
-    )
-
-    llm_no_thinking = ChatQwen(
-        #model="qwen-max-2025-01-25",
-        model=os.getenv("STRUCTURED_MODEL_NAME"),
-        #top_p=0.8,
-        max_retries=2,
-        enable_thinking=True if os.getenv("STRUCTURED_MODEL_ENABLE_THINKING") == "true" else False,
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-    )
-
-    embeddings = DashScopeEmbeddings(model="text-embedding-v3")
-
-    memory_manager = await MemoryManager.create(embeddings)
-
-    retrieve_graph = await RetrieveGraph.create(llm_no_thinking, memory_manager)
-    main_graph = await MainGraph.create(llm, retrieve_graph, memory_manager, [retrieve_memories], llm_no_thinking)
-    recycle_graph = await RecycleGraph.create(llm_no_thinking, memory_manager)
 
 
 @app.get("/api/get_accessible_threads")
@@ -186,7 +129,7 @@ async def stream_endpoint(request: Request, token: str = Depends(oauth2_scheme))
     is_admin = users_db[user_id].get('is_admin')
     if extracted_message[0].startswith("@"):
         if is_admin:
-            log = await command_processing(thread_id, extracted_message[0], main_graph, recycle_graph, retrieve_graph)
+            log = await command_processing(thread_id, extracted_message[0])
             return Response(json.dumps(log, ensure_ascii=False) + '\n', media_type="application/json")
         else:
             return Response(json.dumps({"name": "log", "args": {"message": "无权限执行此命令"}}, ensure_ascii=False) + '\n', media_type="application/json")
@@ -265,14 +208,12 @@ async def verify_route(token: str = Depends(oauth2_scheme)):
     return {"username": payload['sub']}
 
 
+async def init():
+    global llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph
+    llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph = await init_graphs()
 
-async def exit():
-    await main_graph.conn.close()
-    await recycle_graph.conn.close()
-    await retrieve_graph.conn.close()
-    print('app exited')
 
 if __name__ == '__main__':
     asyncio.run(init())
-    uvicorn.run(app, host='localhost', port=36262, workers=1)
-    asyncio.run(exit())
+    uvicorn.run(app, host=os.getenv('APP_HOST', 'localhost'), port=int(os.getenv('APP_PORT', 36262)), workers=1)
+    asyncio.run(close_graphs())

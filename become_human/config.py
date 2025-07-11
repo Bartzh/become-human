@@ -94,24 +94,24 @@ def create_default_thread_configs_toml() -> TOMLDocument:
     return doc
 
 
-def _merge_tomls(override: Union[TOMLDocument, Table], default: Optional[Table] = None) -> Union[TOMLDocument, Table]:
-    if isinstance(override, TOMLDocument):
-        default = default_thread_toml.copy()
-        doc = document()
-        doc = _add_config_comments(doc)
-        for key, value in override.items():
-            doc.add(nl())
-            doc.add(key, _merge_tomls(value, default))
-            doc.add(nl())
-            doc.add(nl())
-        return doc
-    else:
-        for key, value in override.items():
-            if key in default.keys() and isinstance(value, Table) and isinstance(default[key], Table):
-                default[key] = loads(_merge_tomls(default[key], value).as_string().strip())
-            elif key not in default.keys():
-                default[key] = value
-        return default
+def verify_toml(override: TOMLDocument) -> TOMLDocument:
+    default = default_thread_toml.copy()
+    doc = document()
+    doc = _add_config_comments(doc)
+    for key, value in override.items():
+        doc.add(nl())
+        doc.add(key, _merge_tomls(value, default))
+        doc.add(nl())
+        doc.add(nl())
+    return doc
+
+def _merge_tomls(override: Table, default: Table) -> Table:
+    for key, value in override.items():
+        if key in default.keys() and isinstance(value, Table) and isinstance(default[key], Table):
+            default[key] = loads(_merge_tomls(default[key], value).as_string().strip())
+        elif key not in default.keys():
+            default[key] = value
+    return default
 
 def load_config() -> dict[str, ThreadConfig]:
     global thread_configs_toml, thread_configs
@@ -120,16 +120,26 @@ def load_config() -> dict[str, ThreadConfig]:
     else:
         with open(THREADS_FILE, "r", encoding='utf-8') as f:
             thread_configs_toml = load(f)
-            thread_configs_toml = _merge_tomls(thread_configs_toml)
+            thread_configs_toml = verify_toml(thread_configs_toml)
     thread_configs = {key: ThreadConfig.model_validate(value) for key, value in thread_configs_toml.items()}
     with open(THREADS_FILE, 'w', encoding='utf-8') as f:
-            dump(thread_configs_toml, f)
+        dump(thread_configs_toml, f)
+    return thread_configs
+
+def set_config(override: TOMLDocument) -> dict[str, ThreadConfig]:
+    global thread_configs_toml, thread_configs
+    thread_configs_toml = verify_toml(override)
+    thread_configs = {key: ThreadConfig.model_validate(value) for key, value in thread_configs_toml.items()}
+    with open(THREADS_FILE, 'w', encoding='utf-8') as f:
+        dump(thread_configs_toml, f)
     return thread_configs
 
 
 load_config()
 
 
+def get_thread_configs_toml() -> TOMLDocument:
+    return thread_configs_toml
 
 def get_thread_configs() -> dict[str, ThreadConfig]:
     return thread_configs
