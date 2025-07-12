@@ -128,9 +128,6 @@ role_prompt: The role prompt to set for the user"""
             if role_prompt:
                 configs_toml = get_thread_configs_toml()
                 configs_toml[thread_id]['main']['role_prompt'] = role_prompt
-                configs_toml[thread_id]['retrieve']['active_retrieve_config']['k'] = 2333
-                configs_toml[thread_id]['recycle']['recycle_trigger_threshold'] = 2333
-                print(configs_toml)
                 set_config(configs_toml)
                 message = "Role prompt set successfully"
             else:

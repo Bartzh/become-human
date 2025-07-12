@@ -97,9 +97,6 @@ def create_default_thread_configs_toml() -> TOMLDocument:
 
 def verify_toml(override: TOMLDocument) -> TOMLDocument:
     default = deepcopy(default_thread_toml)
-    #default = table()
-    #for key, value in ThreadConfig().model_dump().items():
-    #    default.add(key, value)
     doc = document()
     doc = _add_config_comments(doc)
     for key, value in override.items():
