@@ -182,8 +182,7 @@ def add_messages(
         for m in convert_to_messages(right)
     ]
 
-    left_ids = [m.id for m in left]
-    right = messages_post_processing([m for m in right if m.id not in left_ids])
+    right = messages_post_processing(right, left)
 
     # assign missing ids
     for m in left:
@@ -230,7 +229,15 @@ def add_messages(
     return merged
 
 
-def messages_post_processing(messages: list[BaseMessage]):
+def messages_post_processing(messages: list[BaseMessage], existing_messages: Optional[Union[list[BaseMessage], list[str]]] = None):
+    if existing_messages:
+        if isinstance(existing_messages[0], BaseMessage):
+            existing_messages_ids = [m.id for m in existing_messages]
+        elif isinstance(existing_messages[0], str):
+            existing_messages_ids = existing_messages
+        else:
+            raise ValueError("Unrecognized type for existing_messages")
+        messages = [m for m in messages if m.id not in existing_messages_ids or isinstance(m, RemoveMessage)]
     current_timestamp = datetime.now(timezone.utc).timestamp()
     #parsed_time = parse_time(current_timestamp)
     for m in messages:
@@ -643,7 +650,7 @@ class MainGraph(BaseGraph):
                                 new_message = tool_calls[tool_index]['args'].get('message')
 
                                 if new_message:
-                                    yield {"name": "send_message", "args": {"message": new_message.replace(last_message, '', 1)}, "isCompleted": False}
+                                    yield {"name": "send_message", "args": {"message": new_message.replace(last_message, '', 1)}, "not_completed": True}
                                     #print(new_message.replace(last_message, '', 1), end="", flush=True)
                                     last_message = new_message
 

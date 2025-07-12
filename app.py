@@ -71,7 +71,6 @@ private_key = os.getenv("APP_PRIVATE_KEY", "become-human")
 async def get_accessible_threads(token: str = Depends(oauth2_scheme)):
     payload = verify_token(token)
     user_id = payload["sub"]
-    print(users_db[user_id]['accessible_threads'])
     return {'accessible_threads': users_db[user_id]['accessible_threads']}
 
 
@@ -82,7 +81,6 @@ async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
     thread_id = api_input.get("thread_id")
     user_id = payload['sub']
     await verify_thread_accessible(user_id, thread_id)
-    #print(thread_id)
     await memory_manager.init_thread(thread_id)
     config = {"configurable": {"thread_id": thread_id}}
     main_state = await main_graph.graph.aget_state(config)
@@ -127,7 +125,7 @@ async def stream_endpoint(request: Request, token: str = Depends(oauth2_scheme))
     config = {"configurable": {"thread_id": thread_id}}
 
     is_admin = users_db[user_id].get('is_admin')
-    if extracted_message[0].startswith("@"):
+    if extracted_message[0].startswith("/"):
         if is_admin:
             log = await command_processing(thread_id, extracted_message[0])
             return Response(json.dumps(log, ensure_ascii=False) + '\n', media_type="application/json")

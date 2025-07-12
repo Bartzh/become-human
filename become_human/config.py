@@ -5,6 +5,7 @@ import os
 from typing import Optional, Literal, Type, Union
 from pydantic import BaseModel, Field
 from warnings import warn
+from copy import deepcopy
 
 class MainConfig(BaseModel):
     role_prompt: str = Field(default="你是一个友善且富有同理心的助手，用简洁自然的语言为用户提供帮助。", description="角色提示词")
@@ -95,12 +96,15 @@ def create_default_thread_configs_toml() -> TOMLDocument:
 
 
 def verify_toml(override: TOMLDocument) -> TOMLDocument:
-    default = default_thread_toml.copy()
+    default = deepcopy(default_thread_toml)
+    #default = table()
+    #for key, value in ThreadConfig().model_dump().items():
+    #    default.add(key, value)
     doc = document()
     doc = _add_config_comments(doc)
     for key, value in override.items():
         doc.add(nl())
-        doc.add(key, _merge_tomls(value, default))
+        doc.add(key, _merge_tomls(value, deepcopy(default)))
         doc.add(nl())
         doc.add(nl())
     return doc
@@ -108,7 +112,16 @@ def verify_toml(override: TOMLDocument) -> TOMLDocument:
 def _merge_tomls(override: Table, default: Table) -> Table:
     for key, value in override.items():
         if key in default.keys() and isinstance(value, Table) and isinstance(default[key], Table):
-            default[key] = loads(_merge_tomls(default[key], value).as_string().strip())
+            default[key] = loads(__merge_tomls(default[key], value).as_string().strip())
+        elif key not in default.keys():
+            default[key] = value
+    return default
+
+def __merge_tomls(override: Table, default: Table) -> Table:
+    for key, value in override.items():
+        if key in default.keys() and isinstance(value, Table) and isinstance(default[key], Table):
+            __merge_tomls(value, default[key])
+            default[key] = loads(default[key].as_string().strip())
         elif key not in default.keys():
             default[key] = value
     return default
