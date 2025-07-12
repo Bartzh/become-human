@@ -7,7 +7,7 @@ import bcrypt
 from dotenv import load_dotenv
 import os
 import json
-from typing import Annotated, Optional
+from typing import Optional
 
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.messages import AnyMessage, ToolMessage, BaseMessage, AIMessage, HumanMessage, RemoveMessage
