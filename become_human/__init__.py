@@ -18,7 +18,7 @@ async def retrieve_memories(search_string: Annotated[str, "要检索的内容"],
     """从数据库（大脑）中检索记忆"""
     result = await retrieve_graph.graph.ainvoke({"input": search_string, "type": "active"}, config)
     content = result["output"]
-    artifact = {"dont_store": True}
+    artifact = {"do_not_store": True}
     return content, artifact
 
 

@@ -286,7 +286,7 @@ async def get_current_time() -> str:
 async def send_message(message: Annotated[str, '要发送的消息'], messages: Annotated[list[AnyMessage], InjectedState('messages')]) -> str:
     """「即时工具」发送一条消息（不支持Markdown）"""
     content = "消息发送成功。"
-    artifact = {"dont_store": True, "streaming": True}
+    artifact = {"do_not_store": True, "streaming": True}
     return content, artifact
 
 @tool

@@ -179,7 +179,7 @@ class RecycleGraph(BaseGraph):
         for message in messages:
             if isinstance(message, ToolMessage):
                 if message.artifact and isinstance(message.artifact, dict):
-                    if not message.artifact.get("dont_store"):
+                    if not message.artifact.get("do_not_store"):
                         stable_mult = random.uniform(0.0, 3.0)#TODO:这个值应该由文本的情感强烈程度来决定
                     else:
                         continue
