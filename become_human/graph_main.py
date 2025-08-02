@@ -611,7 +611,7 @@ class MainGraph(BaseGraph):
     async def chatbot(self, state: State, config: RunnableConfig) -> Command[Literal['tools', 'final']]:
         thread_id = config["configurable"]["thread_id"]
         llm_with_tools = self.llm.bind_tools(self.tools)
-        unicode_prompt = '- 不要使用 Unicode 编码，所有程序均支持中文及其他语言直接输入，使用 Unicode 编码会导致输出速度下降。'
+        unicode_prompt = '- 不要使用 Unicode 编码，所有工具均支持中文及其他语言直接输入，使用 Unicode 编码会导致输出速度下降。'
         role_prompt = get_thread_main_config(thread_id).role_prompt
         role_prompt_with_state = f'''<setting>
 {role_prompt}
