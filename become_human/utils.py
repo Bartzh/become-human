@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Union
 import os
 
@@ -14,17 +14,39 @@ def is_valid_json(json_string: str) -> bool:
         return False
 
 
-def parse_time(time: Union[dict, datetime, float]) -> str:
+def parse_time(time: Union[dict, datetime, float, int]) -> str:
     if isinstance(time, dict):
         time = time.get("creation_timestamp", None)
         if time is None:
             return "未知时间"
     try:
-        if isinstance(time, float):
+        if isinstance(time, (float, int)):
             time = datetime.fromtimestamp(time)
         return time.strftime("%Y-%m-%d %H:%M:%S")
     except (OverflowError, OSError, ValueError):
         return "时间信息损坏"
+
+def parse_seconds(seconds: Union[datetime, float, int, timedelta]) -> str:
+    decrease_one = False
+    if isinstance(seconds, (float, int)):
+        delta = timedelta(seconds=seconds)
+        seconds = datetime.fromordinal(1) + delta
+        decrease_one = True
+    elif isinstance(seconds, timedelta):
+        seconds = datetime.fromordinal(1) + seconds
+        decrease_one = True
+    year = seconds.year
+    month = seconds.month
+    day = seconds.day
+    hour = seconds.hour
+    minute = seconds.minute
+    second = seconds.second
+    if decrease_one:
+        year -= 1
+        month -= 1
+        day -= 1
+    result = f'{f'{str(year)}年' if year > 0 else ''}{f'{str(month)}个月' if month > 0 else ''}{f'{str(day)}天' if day > 0 else ''}{f'{str(hour)}小时' if hour > 0 else ''}{f'{str(minute)}分' if minute > 0 else ''}{f'{str(second)}秒' if second > 0 else ''}'
+    return result
 
 def parse_human_message(message: HumanMessage) -> str:
     return "\n".join(extract_text_parts(message.content))

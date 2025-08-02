@@ -1,48 +1,50 @@
-from become_human import init_graphs, close_graphs, command_processing
-
+from become_human import init_graphs, close_graphs, command_processing, init_thread, event_queue, stream_graph_updates
+import os
 import asyncio
 
-config = {"configurable": {"thread_id": "default_thread"}}
+thread_id = "default_thread"
+config = {"configurable": {"thread_id": thread_id}}
+user_name = os.getenv('USER_NAME')
 
+last_message = ''
 def _print(item: dict):
+    global last_message
     if item['name'] == 'send_message' or item['name'] == 'log':
-        if item['args'].get('not_completed'):
-            print(item['args']['message'], end='', flush=True)
+        if item.get('not_completed'):
+            print(item['args']['message'].replace(last_message, '', 1), end='', flush=True)
+            last_message = item['args']['message']
         else:
-            print(item['args']['message'], flush=True)
-
-from langchain_core.messages.utils import count_tokens_approximately
+            print(item['args']['message'].replace(last_message, '', 1), flush=True)
+            last_message = ''
 
 async def main():
     global llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph
-    llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph = await init_graphs()
+    llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph = await init_graphs(30)
 
-    await memory_manager.init_thread(config['configurable']['thread_id'])
+    await init_thread(config['configurable']['thread_id'])
+
+    task = asyncio.create_task(event_listener())
 
     while True:
-        user_input = input("User: ")
+        user_input = await asyncio.to_thread(input)
         if user_input.lower() in ["quit", "exit", "q"]:
             print("Goodbye!")
             break
 
-        # 添加指令检测
         elif user_input.startswith("/"):
-            log = await command_processing('default_thread', user_input)
-            _print(log)
+            await command_processing(thread_id, user_input)
             continue
 
-        async for item in main_graph.stream_graph_updates(user_input, config, user_name="Bart"):
-            #print(item)
-            _print(item)
-        main_state = await main_graph.graph.aget_state(config)
-        main_messages = main_state.values["messages"]
-        print(f'{count_tokens_approximately(main_messages)} tokens')
-        recycle_response = await recycle_graph.graph.ainvoke({"input_messages": main_messages}, config)
-        if recycle_response.get("success"):
-            print(recycle_response)
-            await main_graph.graph.aupdate_state(config, {"messages": recycle_response["remove_messages"]})
+        asyncio.create_task(stream_graph_updates(user_input, thread_id, user_name=user_name))
 
+    task.cancel()
     await close_graphs()
+
+async def event_listener():
+    while True:
+        event = await event_queue.get()
+        _print(event)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

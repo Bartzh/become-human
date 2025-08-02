@@ -9,10 +9,20 @@ from copy import deepcopy
 
 class MainConfig(BaseModel):
     role_prompt: str = Field(default="你是一个友善且富有同理心的助手，用简洁自然的语言为用户提供帮助。", description="角色提示词")
+    active_time_range: tuple[float, float] = Field(default=(1800.0, 7200.0), description="活跃时间随机范围（最小值和最大值），在这之后进入休眠状态")
+    temporary_active_time_range: tuple[float, float] = Field(default=(30.0, 600.0), description="在无新消息时self_call后agent获得的临时活跃时间的随机范围（最小值和最大值），单位为秒。")
+    self_call_time_ranges: list[tuple[float, float]] = Field(default_factory=lambda: [
+        (1800.0, 10800.0),
+        (5400.0, 32400.0),
+        (16200.0, 97200.0),
+        (97200.0, 388800.0)
+    ], description="在活跃状态之后的休眠状态时self_call时间随机范围（最小值和最大值），单位为秒，睡觉期间不算时间")
+    wakeup_time_range: tuple[float, float] = Field(default=(1.0, 61201.0), description="在进入休眠状态后（也算作self_call），通过发送消息唤醒agent需要的时间随机范围（最小值和最大值），单位为秒")
+    sleep_time_range: tuple[float, float] = Field(default=(79200.0, 18000.0), description="agent进入睡眠的时间段，单位为秒。目前的作用是self_call的时间生成会跳过这个时间段。")
 
 class RecycleConfig(BaseModel):
-    recycle_trigger_threshold: float = Field(default=2000.0, ge=0.0, description="触发回收的阈值，单位为Tokens")
-    recycle_target_size: float = Field(default=1500.0, ge=0.0, description="回收后目标大小，单位为Tokens")
+    recycle_trigger_threshold: int = Field(default=5000, ge=0.0, description="触发回收的阈值，单位为Tokens")
+    recycle_target_size: int = Field(default=3000, ge=0.0, description="回收后目标大小，单位为Tokens")
     base_stable_time: float = Field(default=43200.0, ge=0.0, description="记忆初始化时stable_time的初始值，单位为秒。目前会乘以一个0~3的随机数")
 
 class RetrieveMemoriesConfig(BaseModel):

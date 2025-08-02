@@ -6,13 +6,11 @@ import aiosqlite
 from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
 from datetime import datetime, timezone
-import asyncio
 from typing import Any, Literal, Union, Optional
 from pydantic import BaseModel, Field
 from uuid import uuid4
 import numpy as np
 import json
-import atexit
 import jieba
 
 
@@ -23,33 +21,20 @@ from langchain_core.runnables.config import run_in_executor
 class MemoryManager():
     vector_store_client: chromadb.ClientAPI
     embeddings: Embeddings
-    task: Optional[asyncio.Task]
     db_path: str
     timer_db_path: str
-    thread_ids: set[str]
 
     def __init__(self, embeddings: Embeddings, db_path: str = './data/aimemory_chroma_db') -> None:
-        self.task = None
-        self.thread_ids = set()
-
         self.db_path = db_path
         self.timer_db_path = f'{db_path}/memory_manager_timers.sqlite'
         self.embeddings = embeddings
         self.vector_store_client = chromadb.PersistentClient(db_path, settings=Settings(anonymized_telemetry=False))
 
-        atexit.register(self.close)
-
-
     @classmethod
     async def create(cls, embeddings: Embeddings, db_path: str = './data/aimemory_chroma_db'):
         instance = cls(embeddings, db_path)
         await instance.init_db()
-        instance.start_periodic_task()
         return instance
-
-
-    def close(self):
-        self.stop_periodic_task()
 
 
     async def init_db(self):
@@ -62,10 +47,6 @@ class MemoryManager():
                 )
             ''')
             await db.commit()
-
-    async def init_thread(self, thread_id: str):
-        self.thread_ids.add(thread_id)
-        await self.update_timers([thread_id])
 
     async def get_timer_from_db(self, thread_id: str) -> dict:
         async with aiosqlite.connect(self.timer_db_path) as db:
@@ -85,10 +66,12 @@ class MemoryManager():
                     return {
                         "thread_id": thread_id,
                         "update_timers": [
-                            {'left': 0.0, 'threshold': 60.0, 'stable_time_range': [{'$gte': 0.0}, {'$lt': 86400.0}]},
-                            {'left': 0.0, 'threshold': 600.0, 'stable_time_range': [{'$gte': 86400.0}, {'$lt': 864000.0}]},
-                            {'left': 0.0, 'threshold': 3600.0, 'stable_time_range': [{'$gte': 864000.0}]},
-                        ],#TODO: 优化更新频率
+                            {'left': 0.0, 'threshold': 5.0, 'stable_time_range': [{'$gte': 0.0}, {'$lt': 43200.0}]},
+                            {'left': 0.0, 'threshold': 30.0, 'stable_time_range': [{'$gte': 43200.0}, {'$lt': 86400.0}]},
+                            {'left': 0.0, 'threshold': 60.0, 'stable_time_range': [{'$gte': 86400.0}, {'$lt': 864000.0}]},
+                            {'left': 0.0, 'threshold': 500.0, 'stable_time_range': [{'$gte': 864000.0}, {'$lt': 8640000.0}]},
+                            {'left': 0.0, 'threshold': 3600.0, 'stable_time_range': [{'$gte': 8640000.0}]},
+                        ],
                         "last_update_timestamp": datetime.now(timezone.utc).timestamp()
                     }
 
@@ -101,51 +84,33 @@ class MemoryManager():
             await db.commit()
 
 
-    def start_periodic_task(self):
-        if self.task is None:
-            self.task = asyncio.create_task(self._run_periodic_task())
-
-    async def _run_periodic_task(self):
-        while True:
-            await self.update_timers(self.thread_ids)
-            await asyncio.sleep(60)
-
-
-    async def update_timers(self, thread_ids: list[str]):
+    async def update_timer(self, thread_id: str):
         types = ['original', 'summary', 'semantic']
 
-        for thread_id in thread_ids:
-            update_count = 0
-            data = await self.get_timer_from_db(thread_id)
+        update_count = 0
+        data = await self.get_timer_from_db(thread_id)
 
-            current_timestamp = datetime.now(timezone.utc).timestamp()
-            time_diff = current_timestamp - data['last_update_timestamp']
-            data['last_update_timestamp'] = current_timestamp
-            for timer in data['update_timers']:
-                timer['left'] += time_diff
-                if timer['left'] >= timer['threshold']:
-                    timer['left'] = 0
-                    for t in types:
-                        where = validate_where({'$and': [{'stable_time': item} for item in timer['stable_time_range']]})
-                        result = await self.aget(
-                            thread_id=thread_id,
-                            memory_type=t,
-                            where=where,
-                            include=['metadatas']
-                        )
-                        if result['ids']:
-                            await self.update_memories(result, t, thread_id)
-                            update_count += len(result['ids'][0])
+        current_timestamp = datetime.now(timezone.utc).timestamp()
+        time_diff = current_timestamp - data['last_update_timestamp']
+        data['last_update_timestamp'] = current_timestamp
+        for timer in data['update_timers']:
+            timer['left'] += time_diff
+            if timer['left'] >= timer['threshold']:
+                timer['left'] = 0
+                for t in types:
+                    where = validate_where({'$and': [{'stable_time': item} for item in timer['stable_time_range']]})
+                    result = await self.aget(
+                        thread_id=thread_id,
+                        memory_type=t,
+                        where=where,
+                        include=['metadatas']
+                    )
+                    if result['ids']:
+                        await self.update_memories(result, t, thread_id)
+                        update_count += len(result['ids'][0])
 
-            await self.set_timer_to_db(data['thread_id'], data['update_timers'], data['last_update_timestamp'])
-            print(f'updated {update_count} memories for thread "{data['thread_id']}".')
-
-
-    def stop_periodic_task(self):
-        if self.task:
-            self.task.cancel()
-            self.task = None
-        print("MemoryManager stopped")
+        await self.set_timer_to_db(data['thread_id'], data['update_timers'], data['last_update_timestamp'])
+        print(f'updated {update_count} memories for thread "{data['thread_id']}".')
 
 
     def update(self, metadata: dict, current_timestamp: float) -> dict:
@@ -222,26 +187,31 @@ class MemoryManager():
             "summary": [],
             "semantic": []
         }
+        current_timestamp = datetime.now(timezone.utc).timestamp()
         for memory in memories:
             # 使用jieba对memory.content进行分词并过滤掉重复词
             words = set(jieba.cut(memory.content))
             max_words_length = 200
             difficulty = 1 - min(1.0, (len(words) / max_words_length) ** 3)
             datetime_alpha = calculate_memory_datetime_alpha(datetime.fromtimestamp(memory.creation_timestamp))
-
-            document = Document(
-                page_content=memory.content,
-                metadata={
-                    "creation_timestamp": memory.creation_timestamp,
-                    "stable_time": memory.stable_time * difficulty * datetime_alpha, # 稳定性，决定了可检索性的衰减速度
-                    "retrievability": 1.0, # 可检索性，决定了检索的概率
-                    "difficulty": difficulty, # 难度，决定了稳定性基数增长的多少。可能会出现无法长期保留的记忆，如整本书的内容。
-                    "last_accessed_timestamp": memory.creation_timestamp,
-                    "type": memory.type
-                },
-                id=memory.id
-            )
-            docs[memory.type].append(document)
+            stable_time = memory.stable_time * difficulty * datetime_alpha # 稳定性，决定了可检索性的衰减速度
+            metadata = {
+                "creation_timestamp": memory.creation_timestamp,
+                "stable_time": stable_time,
+                "retrievability": 1.0, # 可检索性，决定了检索的概率
+                "difficulty": difficulty, # 难度，决定了稳定性基数增长的多少。可能会出现无法长期保留的记忆，如整本书的内容。
+                "last_accessed_timestamp": memory.creation_timestamp,
+                "type": memory.type
+            }
+            r = self.update(metadata, current_timestamp)
+            if not r.get("forgot"):
+                metadata["retrievability"] = r["retrievability"]
+                document = Document(
+                    page_content=memory.content,
+                    metadata=metadata,
+                    id=memory.id
+                )
+                docs[memory.type].append(document)
         for t in docs.keys():
             if docs[t]:
                 await self.aadd_documents(docs[t], thread_id, t)
@@ -787,7 +757,6 @@ class MemoryManager():
         thread_id: str,
         memory_type: Literal["original", "semantic", "summary"],
     ) -> Collection:
-        self.thread_ids.add(thread_id)
         return self.vector_store_client.get_or_create_collection(
             name=f"{thread_id}_{memory_type}",
             configuration={

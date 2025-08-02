@@ -128,7 +128,7 @@ class RecycleGraph(BaseGraph):
 
 
     async def begin(self, state: RecycleState):
-        return {"success": False}
+        return {"success": False, "remove_messages": [], "old_messages": [], "new_messages": [], "extracted_memories": None}
 
     def recycle_condition(self, state: RecycleState, config: RunnableConfig):
         if count_tokens_approximately(state.input_messages) > get_thread_recycle_config(config["configurable"]["thread_id"]).recycle_trigger_threshold:
@@ -179,12 +179,14 @@ class RecycleGraph(BaseGraph):
         for message in messages:
             if isinstance(message, ToolMessage):
                 if message.artifact and isinstance(message.artifact, dict):
-                    if not message.artifact.get("do_not_store"):
+                    if not message.artifact.get("bh_do_not_store"):
                         stable_mult = random.uniform(0.0, 3.0)#TODO:这个值应该由文本的情感强烈程度来决定
                     else:
                         continue
                 else:
                     continue
+            elif message.additional_kwargs.get("bh_do_not_store"):
+                continue
             else:
                 stable_mult = random.uniform(0.0, 3.0)
             trimmed_messages.append(message)
@@ -197,13 +199,13 @@ class RecycleGraph(BaseGraph):
                 stable_time=stable_mult * base_stable_time,
                 type="original",
                 creation_timestamp=bh_creation_timestamp,
-                id=str(uuid4())
+                id=message.id or str(uuid4())
             ))
 
         # 临时方案，对于总结和语义记忆的creation_timestamp直接使用原始记录的平均时间戳
         creation_timestamp_average = sum(creation_timestamps) / len(creation_timestamps)
 
-        llm_with_structure = self.llm.with_structured_output(ExtractedMemoryInfo)
+        llm_with_structure = self.llm.with_structured_output(ExtractedMemoryInfo, method="function_calling")
         extracted_memory_info = await llm_with_structure.ainvoke(f"""以下是用户的生活记录：
 <history>
 {parse_messages(trimmed_messages)}

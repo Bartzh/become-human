@@ -1,7 +1,4 @@
-from typing import Sequence, Dict, Any, Union, Callable, Optional, Literal, cast
-
-from typing_extensions import Annotated
-
+from typing import Sequence, Dict, Any, Union, Callable, Optional, Literal, cast, Annotated, TypedDict
 from pydantic import BaseModel, Field
 
 from langgraph.graph import StateGraph, START, END
@@ -24,6 +21,7 @@ from langchain_core.messages import (
 )
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.prebuilt import ToolNode, tools_condition, InjectedState
+from langgraph.types import Command
 
 from langchain_sandbox import PyodideSandboxTool
 
@@ -35,13 +33,16 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from become_human.graph_base import BaseGraph
 from become_human.memory import MemoryManager
 from become_human.graph_retrieve import RetrieveGraph
-from become_human.utils import is_valid_json, parse_time, parse_messages, extract_text_parts
-from become_human.config import get_thread_main_config, load_config
+from become_human.graph_recycle import RecycleGraph
+from become_human.utils import parse_time, parse_messages, extract_text_parts, parse_seconds
+from become_human.config import get_thread_main_config
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import uuid
 import os
 import requests
+import random
+from warnings import warn
 
 from langgraph.graph.message import _add_messages_wrapper, _format_messages, Messages, REMOVE_ALL_MESSAGES
 
@@ -182,7 +183,6 @@ def add_messages(
         for m in convert_to_messages(right)
     ]
 
-    right = messages_post_processing(right, left)
 
     # assign missing ids
     for m in left:
@@ -193,6 +193,9 @@ def add_messages(
             m.id = str(uuid.uuid4())
         if isinstance(m, RemoveMessage) and m.id == REMOVE_ALL_MESSAGES:
             remove_all_idx = idx
+
+    # 修改处
+    right = messages_post_processing(right, left)
 
     if remove_all_idx is not None:
         return right[remove_all_idx + 1 :]
@@ -229,18 +232,16 @@ def add_messages(
     return merged
 
 
-def messages_post_processing(messages: list[BaseMessage], existing_messages: Optional[Union[list[BaseMessage], list[str]]] = None):
-    if existing_messages:
-        if isinstance(existing_messages[0], BaseMessage):
-            existing_messages_ids = [m.id for m in existing_messages]
-        elif isinstance(existing_messages[0], str):
-            existing_messages_ids = existing_messages
-        else:
-            raise ValueError("Unrecognized type for existing_messages")
-        messages = [m for m in messages if m.id not in existing_messages_ids or isinstance(m, RemoveMessage)]
+def messages_post_processing(messages: list[BaseMessage], existing_messages: Optional[list[BaseMessage]] = None):
+    #if existing_messages:
+    #    existing_messages_dict = {m.id: m for m in existing_messages}
     current_timestamp = datetime.now(timezone.utc).timestamp()
     #parsed_time = parse_time(current_timestamp)
     for m in messages:
+        #if m.id in existing_messages_dict.keys():
+        #    for existing_kwarg_key in existing_messages_dict[m.id].additional_kwargs.keys():
+        #        if isinstance(existing_kwarg_key, str) and existing_kwarg_key.startswith("bh_") and existing_kwarg_key not in m.additional_kwargs.keys():
+        #            m.additional_kwargs[existing_kwarg_key] = existing_messages_dict[m.id].additional_kwargs[existing_kwarg_key]
         if isinstance(m, (AIMessage, HumanMessage, ToolMessage)) and not m.additional_kwargs.get("bh_post_processed"):
             m.additional_kwargs["bh_post_processed"] = True
             #给每个消息添加时间戳
@@ -267,12 +268,21 @@ def messages_post_processing(messages: list[BaseMessage], existing_messages: Opt
 class StateEntry(BaseModel):
     description: str = Field(description="状态描述")
 
+class MainConfigSchema(TypedDict):
+    is_self_call: bool
+    thread_run_id: str
 
 class State(BaseModel):
     messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list)
     agent_state: list[StateEntry] = Field(default_factory=list)
-    input_messages: Messages
+    input_messages: Annotated[list[HumanMessage], add_messages] = Field(default_factory=list)
     new_messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list)
+    tool_messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list)
+    last_chat_timestamp: float = Field(default_factory=lambda: datetime.now(timezone.utc).timestamp())
+    active_timestamp: float = Field(default=0.0)
+    self_call_timestamps: list[float] = Field(default_factory=list)
+    wakeup_call_timestamp: float = Field(default=0.0)
+    generated: bool = Field(default=False)
 
 @tool
 async def get_current_time() -> str:
@@ -283,14 +293,14 @@ async def get_current_time() -> str:
     return content
 
 @tool(response_format="content_and_artifact")
-async def send_message(message: Annotated[str, '要发送的消息'], messages: Annotated[list[AnyMessage], InjectedState('messages')]) -> str:
-    """「即时工具」发送一条消息（不支持Markdown）"""
+async def send_message(message: Annotated[str, '要发送的消息'], messages: Annotated[list[AnyMessage], InjectedState('messages')]) -> tuple[str, dict[str, Any]]:
+    """「即时工具」发送一条消息"""
     content = "消息发送成功。"
-    artifact = {"do_not_store": True, "streaming": True}
+    artifact = {"bh_do_not_store": True, "bh_streaming": True}
     return content, artifact
 
 @tool
-async def web_search(query: Annotated[str, '要搜索的信息'], recency_filter: Annotated[Optional[Literal['week', 'month', 'semiyear', 'year']], '可选的根据网站发布时间的时间范围过滤器，若为空则意味着不限时间'] = None):
+async def web_search(query: Annotated[str, '要搜索的信息'], recency_filter: Annotated[Optional[Literal['week', 'month', 'semiyear', 'year']], '可选的根据网站发布时间的时间范围过滤器，若为空则意味着不限时间'] = None) -> str:
     """使用网页搜索获取信息"""
     url = 'https://qianfan.baidubce.com/v2/ai_search/chat/completions'
     api_key = os.getenv('QIANFAN_API_KEY')
@@ -299,7 +309,7 @@ async def web_search(query: Annotated[str, '要搜索的信息'], recency_filter
     #if not isinstance(recency_filter, Optional[Literal['week', 'month', 'semiyear', 'year']]):
     #    raise ValueError("recency_filter参数必须是None、week、month、semiyear或year之一。")
     headers = {
-        'Authorization': f'Bearer {api_key}',  # 请替换为你的API密钥
+        'Authorization': f'Bearer {api_key}',
         'Content-Type': 'application/json'
     }
     messages = [
@@ -311,7 +321,7 @@ async def web_search(query: Annotated[str, '要搜索的信息'], recency_filter
     data = {
         "messages": messages,
         "search_source": "baidu_search_v2",
-        "resource_type_filter": [{"type": "web","top_k": 5}],
+        "resource_type_filter": [{"type": "web","top_k": 4}],
     }
     if recency_filter:
         data["search_recency_filter"] = recency_filter
@@ -327,96 +337,284 @@ async def web_search(query: Annotated[str, '要搜索的信息'], recency_filter
 
 
 class StreamingTools:
-    async def send_message(self, input: dict) -> str:
-        """发送一条消息"""
-        return "消息发送成功。"
+    #async def send_message(self, input: dict) -> str:
+    #    """发送一条消息"""
+    #    return "消息发送成功。"
+    pass
 
 
+class ThreadRunInfo(BaseModel):
+    run_id: str = Field(default='', description="每次运行的唯一标识符。为空表示没有正在运行")
+    interrupt_ids: dict[str, str] = Field(default_factory=dict, description="key为run_id，value为被打断时已经输出的tokens")
 
 class MainGraph(BaseGraph):
 
     retrieve_graph: RetrieveGraph
+    recycle_graph: RecycleGraph
     llm_for_structured_output: BaseChatModel
     streaming_tools: StreamingTools
+    thread_run_ids: dict[str, str]
+    thread_interrupt_datas: dict[str, dict[str, Union[AIMessageChunk, list[ToolMessage]]]]
+    recycling_thread_ids: set[str]
+    thread_recycled_messages: dict[str, list[RemoveMessage]]
 
-    def __init__(self, llm: BaseChatModel,
+    def __init__(
+        self,
+        llm: BaseChatModel,
         retrieve_graph: RetrieveGraph,
+        recycle_graph: RecycleGraph,
         memory_manager: Optional[MemoryManager] = None,
         tools: Optional[Sequence[Union[Dict[str, Any], type, Callable, BaseTool]]] = None,
         llm_for_structured_output: Optional[BaseChatModel] = None
     ):
-        self.tools = [send_message, web_search, PyodideSandboxTool(description='''一个安全的 Python 代码沙盒，使用此沙盒来执行 Python 命令，特别适合用于数学计算。
+        self.tools = [send_message]
+        if os.getenv('QIANFAN_API_KEY'):
+            self.tools.append(web_search)
+        self.tools.append(PyodideSandboxTool(description='''一个安全的 Python 代码沙盒，使用此沙盒来执行 Python 命令，特别适合用于数学计算。
 - 输入应该是有效的 Python 命令。
 - 要返回输出，你应该使用print(...)将其打印出来。
 - 打印输出时不要使用 f 字符串。
 注意：
 - 沙盒没有连接网络。
-- 沙盒是无状态的，变量不会被继承到下一次调用。
-''')]
+- 沙盒是无状态的，变量不会被继承到下一次调用。'''))
         super().__init__(llm=llm, tools=tools, memory_manager=memory_manager)
         if llm_for_structured_output is None:
             self.llm_for_structured_output = self.llm
         self.streaming_tools = StreamingTools()
+        self.thread_run_ids = {}
+        self.thread_interrupt_datas = {}
+        self.recycling_thread_ids = set()
+        self.thread_recycled_messages = {}
 
         self.retrieve_graph = retrieve_graph
+        self.recycle_graph = recycle_graph
 
-
-        graph_builder = StateGraph(State)
+        graph_builder = StateGraph(State, config_schema=MainConfigSchema)
 
         graph_builder.add_node("begin", self.begin)
-        graph_builder.add_node("passive_retrieve", self.passive_retrieve)
+        graph_builder.add_node("prepare_for_generate", self.prepare_for_generate)
         graph_builder.add_node("chatbot", self.chatbot)
+        graph_builder.add_node("final", self.final)
+        graph_builder.add_node("recycle_messages", self.recycle_messages)
 
-        tool_node = ToolNode(tools=self.tools)
+        tool_node = ToolNode(tools=self.tools, messages_key="tool_messages")
         graph_builder.add_node("tools", tool_node)
 
-        graph_builder.add_node("tools_post_process", self.tool_node_post_process)
+        graph_builder.add_node("tool_node_post_process", self.tool_node_post_process)
 
         graph_builder.add_edge(START, "begin")
-        graph_builder.add_edge("begin", "passive_retrieve")
-        graph_builder.add_edge("passive_retrieve", "chatbot")
-        graph_builder.add_conditional_edges("chatbot", tools_condition)
-        graph_builder.add_edge("tools", "tools_post_process")
-        graph_builder.add_conditional_edges("tools_post_process", self.route_tools)
+        graph_builder.add_edge("tools", "tool_node_post_process")
+        graph_builder.add_conditional_edges("tool_node_post_process", self.route_tools)
+        graph_builder.add_edge("recycle_messages", "final")
+        graph_builder.add_edge("final", END)
         self.graph_builder = graph_builder
-        #async with AsyncSqliteSaver.from_conn_string("main_checkpoints.sqlite") as checkpointer:
-        #    self.graph = graph_builder.compile(checkpointer=checkpointer)
 
     @classmethod
     async def create(
         cls,
         llm: BaseChatModel,
         retrieve_graph: RetrieveGraph,
+        recycle_graph: RecycleGraph,
         memory_manager: Optional[MemoryManager] = None,
         tools: Optional[Sequence[Union[Dict[str, Any], type, Callable, BaseTool]]] = None,
         llm_for_structured_output: Optional[BaseChatModel] = None
     ):
-        instance = cls(llm, retrieve_graph, memory_manager, tools, llm_for_structured_output)
+        instance = cls(llm, retrieve_graph, recycle_graph, memory_manager, tools, llm_for_structured_output)
         instance.conn = await aiosqlite.connect("./data/checkpoints_main.sqlite")
         instance.checkpointer = AsyncSqliteSaver(instance.conn)
         instance.graph = instance.graph_builder.compile(checkpointer=instance.checkpointer)
         return instance
 
 
-    async def begin(self, state: State):
-        return {"messages": state.input_messages, "new_messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + state.input_messages}
+    async def final(self, state: State):
+        return
 
-    async def passive_retrieve(self, state: State, config: RunnableConfig):
-        messages: list[HumanMessage] = []
-        for message in reversed(state.messages):
-            if isinstance(message, HumanMessage):
-                messages.append(message)
+
+    async def begin(self, state: State, config: RunnableConfig) -> Command[Literal["prepare_for_generate", "final"]]:
+        thread_id = config["configurable"]["thread_id"]
+        current_timestamp = datetime.now(timezone.utc).timestamp()
+
+        new_state = {"generated": False, "new_messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)]}
+
+        # active_timestamp不需要在意睡觉的问题
+        if not state.active_timestamp:
+            active_time_range = get_thread_main_config(thread_id).active_time_range
+            active_timestamp = current_timestamp + random.uniform(active_time_range[0], active_time_range[1])
+            new_state["active_timestamp"] = active_timestamp
+        else:
+            active_timestamp = state.active_timestamp
+
+        is_self_call = config["configurable"].get("is_self_call", False)
+        # 如果所有的call都结束了，这时只可能是由用户发送消息导致触发，读取config增加一个新的self_call
+        #if not state.self_call_timestamps and not is_self_call and current_timestamp >= active_timestamp and not state.wakeup_call_timestamp:
+        # 第二种逻辑，只要在活跃时间之外发送消息，都会生成wakeup_call_timestamp，增加self_call的机会
+        if not is_self_call and current_timestamp >= active_timestamp and not state.wakeup_call_timestamp:
+            wakeup_call_timestamp = generate_new_self_call_timestamps(thread_id, is_wakeup=True)[0]
+            new_state["wakeup_call_timestamp"] = wakeup_call_timestamp
+        else:
+            wakeup_call_timestamp = state.wakeup_call_timestamp
+
+        messages = []
+        if self.thread_recycled_messages.get(thread_id):
+            messages.extend(self.thread_recycled_messages.pop(thread_id))
+
+        interrupt_data = self.thread_interrupt_datas.get(thread_id)
+        if interrupt_data:
+            chunk = interrupt_data.get('chunk')
+            if chunk:
+                messages.append(chunk)
+                called_tool_messages = {tool_message.tool_call_id: tool_message for tool_message in interrupt_data.get('called_tool_messages', [])}
+                called_tool_ids = called_tool_messages.keys()
+                for tool_call in chunk.tool_calls:
+                    tool_call_id = tool_call.get('id')
+                    if tool_call_id:
+                        if tool_call_id in called_tool_ids:
+                            messages.append(called_tool_messages[tool_call_id])
+                        elif tool_call["name"] == 'send_message':
+                            messages.append(ToolMessage(content='消息发送成功（尽管当前调用被打断，被打断前的消息也已经发送成功）。', name=tool_call["name"], tool_call_id=tool_call_id))
+                        else:
+                            messages.append(ToolMessage(content='因当前调用被打断，此工具取消执行。', name=tool_call["name"], tool_call_id=tool_call_id))
+                del self.thread_interrupt_datas[thread_id]
             else:
-                break
-        search_string = "\n\n".join(["\n".join(extract_text_parts(message.content)) for message in messages])
-        result = await self.retrieve_graph.graph.ainvoke({"input": search_string, "type": "passive"}, config)
-        content = result["output"]
-        return {"messages": [AIMessage(f'以下是根据用户输入自动从你的记忆（数据库）中检索到的内容，可能会出现无关信息，如果需要进一步检索请调用工具 retrieve_memories：\n\n\n{content}')]}
+                del self.thread_interrupt_datas[thread_id]
+            messages.append(HumanMessage(
+                content='''**这条消息来自系统（system）自动发送**
+由于在你刚才输出时出现了“双重短信”（Double-texting，一般是由于用户在你输出期间又发送了一条或多条新的消息）的情况，你刚才的输出已被终止并截断，包括工具调用。
+也因此你可能会发现自己刚才的输出并不完整且部分工具调用没有正确执行，这是正常现象。请根据接下来的新的消息重新考虑要输出的内容，或是否要重新调用刚才未完成的工具执行。
+注意，工具`send_message`是一个例外：由于它是实时流式输出的，不用等到工具调用的参数全部输出才执行，所以就算被“双发”截断了工具调用，用户也能看到已经输出的部分。这就相当于是你说话被打断了。''',
+                name='system',
+                additional_kwargs={"bh_do_not_store": True, "bh_from_system": True}))
 
-    async def chatbot(self, state: State, config: RunnableConfig):
+        messages.extend(state.input_messages)
+        new_state["messages"] = messages
+
+
+        can_self_call = False
+        if is_self_call:
+            if wakeup_call_timestamp and current_timestamp > wakeup_call_timestamp:
+                can_self_call = True
+            else:
+                for timestamp in state.self_call_timestamps:
+                    if current_timestamp >= timestamp and current_timestamp < (timestamp + 3600): # 如果因某些原因如服务关闭导致离原定时间太远，则忽略这些self_call
+                        can_self_call = True
+                        break
+            if not can_self_call:
+                new_state["self_call_timestamps"] = [t for t in state.self_call_timestamps if current_timestamp < t]
+
+
+        if can_self_call or (not is_self_call and current_timestamp < active_timestamp):
+            return Command(update=new_state, goto='prepare_for_generate')
+        else:
+            return Command(update=new_state, goto='final')
+
+
+    async def prepare_for_generate(self, state: State, config: RunnableConfig) -> Command[Literal["chatbot", "final"]]:
+
+        new_state = {}
+        new_state["generated"] = True
+        new_state["input_messages"] = RemoveMessage(id=REMOVE_ALL_MESSAGES)
+        input_messages = state.input_messages
+
+
+        thread_id = config["configurable"]["thread_id"]
+        main_config = get_thread_main_config(thread_id)
+        new_messages = []
+
+        current_time = datetime.now()
+        current_timestamp = current_time.timestamp()
+        parsed_time = parse_time(current_time)
+
+
+        # 自我调用
+        if config["configurable"].get("is_self_call"):
+
+            is_active = current_timestamp < state.active_timestamp
+
+            # 有新的消息
+            if input_messages:
+                new_state["last_chat_timestamp"] = current_timestamp
+                new_state["self_call_timestamps"] = generate_new_self_call_timestamps(thread_id, current_time=current_time)
+                new_state["wakeup_call_timestamp"] = 0.0
+                new_state["active_timestamp"] = current_timestamp + random.uniform(main_config.active_time_range[0], main_config.active_time_range[1])
+                input_content3 = f'''检查到当前有新的消息，请结合上下文、时间以及你的角色设定考虑要如何回复，或在某些特殊情况下保持沉默不理会用户。只需控制`send_message`工具的使用与否即可实现。
+{'注意，休眠模式只有在用户发送消息后才会被解除或重新计时。由于用户发送了新的消息，这次唤醒会使你重新回到正常的活跃状态。' if not is_active else ''}'''
+
+            # 没有新的消息
+            else:
+                next_self_call_timestamps = [t for t in state.self_call_timestamps if t > current_timestamp]
+                if len(next_self_call_timestamps) == len(state.self_call_timestamps):
+                    warn('自我调用似乎存在错误，剩余自我调用次数与先前完全一致。')
+                new_state["self_call_timestamps"] = next_self_call_timestamps
+                temporary_active_timestamp = current_timestamp + random.uniform(main_config.temporary_active_time_range[0], main_config.temporary_active_time_range[1])
+                if temporary_active_timestamp > state.active_timestamp:
+                    new_state["active_timestamp"] = temporary_active_timestamp
+                if next_self_call_timestamps:
+                    parsed_next_self_call_timestamps = f'系统接下来为你随机安排的唤醒时间（一般间隔会越来越长）{'分别' if len(next_self_call_timestamps) > 1 else ''}为：' + '、'.join([f'{parse_seconds(t - current_timestamp)}后（{parse_time(t)}）' for t in next_self_call_timestamps])
+                else:
+                    parsed_next_self_call_timestamps = '唤醒次数已耗尽，这是你的最后一次唤醒。接下来你将不再被唤醒，直到用户发送新的消息的一段时间后。'
+                input_content3 = f'''{'检查到当前没有新的消息，' if not is_active else ''}请结合上下文、时间以及你的角色设定考虑是否要尝试主动给用户发送消息，或保持沉默继续等待用户的新消息。只需控制`send_message`工具的使用与否即可实现。
+{'注意，休眠模式只有在用户发送消息后才会被解除。由于当前没有用户发送新的消息，接下来不论你是否发送消息，你都只会短暂地回到活跃状态，之后继续保持休眠状态等待下一次唤醒（如果在短暂的活跃状态期间依然没有收到新的消息）。' if not is_active else ''}
+{parsed_next_self_call_timestamps}
+以上的唤醒时间仅供你自己作为接下来行动的参考，不要将其暴露给用户。'''
+
+            past_seconds = current_timestamp - state.last_chat_timestamp
+            if is_active:
+                input_content2 = f'距离上一条消息过去了{parse_seconds(past_seconds)}。虽然目前还没有收到用户的新消息，但你触发了一次随机的自我唤醒（这是为了给你主动向用户对话的可能）。{input_content3}'
+            else:
+                input_content2 = f'''由于自上次对话以来（{parse_seconds(past_seconds)}前），在一定时间内没有用户发送新的消息，你自动进入了休眠状态（在休眠状态下你会以随机的时间间隔检查是否有新的消息并短暂地回到活跃状态，而不是当有新消息时立即响应。这主要是为了模拟在停止聊天的一段时间之后，人们可能不会一直盯着最新消息而是会去做别的事，然后时不时回来检查新消息的情景）。
+现在将你唤醒，检查是否有新的消息...
+{input_content3}'''
+
+            input_content = f'**这条消息来自系统（system）自动发送**\n当前时间是 {parsed_time}，{input_content2}'
+
+            new_messages.append(HumanMessage(
+                content=input_content,
+                name='system',
+                additional_kwargs={"bh_do_not_store": True, "bh_from_system": True}
+            ))
+
+
+        # 直接响应
+        else:
+            new_state["last_chat_timestamp"] = current_timestamp
+            new_state["self_call_timestamps"] = generate_new_self_call_timestamps(thread_id, current_time=current_time)
+            new_state["wakeup_call_timestamp"] = 0.0
+            active_time_range = get_thread_main_config(config["configurable"]["thread_id"]).active_time_range
+            new_state["active_timestamp"] = current_timestamp + random.uniform(active_time_range[0], active_time_range[1])
+
+
+        # passive_retrieve
+        if input_messages:
+            search_string = "\n\n".join(["\n".join(extract_text_parts(message.content)) for message in input_messages])
+            result = await self.retrieve_graph.graph.ainvoke({"input": search_string, "type": "passive"}, config)
+            content = result.get("output") if result.get("output") else "被动检索记忆失败，请无视此消息。"
+            message = HumanMessage(
+                content=f'以下是根据用户输入自动从你的记忆（数据库）中检索到的内容，可能会出现无关信息，如果需要进一步检索请调用工具`retrieve_memories`：\n\n\n{content}',
+                name="system",
+                additional_kwargs={"bh_do_not_store": True, "bh_from_system": True}
+            )
+            new_messages.append(message)
+
+
+        new_state["messages"] = new_messages
+        new_state["new_messages"] = input_messages + new_messages
+
+
+        if self.thread_run_ids.get(thread_id) and self.thread_run_ids.get(thread_id) == config["configurable"]["thread_run_id"]:
+            if self.thread_recycled_messages.get(thread_id):
+                new_state["messages"] = self.thread_recycled_messages.pop(thread_id) + new_messages
+            return Command(update=new_state, goto="chatbot")
+        else:
+            return Command(goto="final")
+
+
+    async def chatbot(self, state: State, config: RunnableConfig) -> Command[Literal['tools', 'final']]:
+        thread_id = config["configurable"]["thread_id"]
         llm_with_tools = self.llm.bind_tools(self.tools)
+        unicode_prompt = '- 不要使用 Unicode 编码，所有程序均支持中文及其他语言直接输入，使用 Unicode 编码会导致输出速度下降。'
+        role_prompt = get_thread_main_config(thread_id).role_prompt
         role_prompt_with_state = f'''<setting>
-{get_thread_main_config(config["configurable"]["thread_id"]).role_prompt}
+{role_prompt}
 </setting>
 
 <state>
@@ -424,7 +622,7 @@ class MainGraph(BaseGraph):
 </state>'''
         system_prompt = f'''# 角色设定
 
-{get_thread_main_config(config["configurable"]["thread_id"]).role_prompt}
+{role_prompt}
 
 # 核心行为准则
 
@@ -444,8 +642,6 @@ class MainGraph(BaseGraph):
 
 - 支持并行工具调用，这意味着你可以一次连续调用多个工具，而不会被打断。这些工具会按你调用的顺序被一个个执行。
 
-- 不要使用 Unicode 编码，所有程序均支持中文及其他语言直接输入，使用 Unicode 编码会导致输出速度下降。
-
 - **错误处理**：
 
     - 当工具执行时发生错误，系统会记录错误信息并返回给你，请根据错误信息尝试修复错误（可能是因为你给工具的输入参数有错误）。
@@ -456,11 +652,11 @@ class MainGraph(BaseGraph):
 
 3. **记忆系统**：
 
-- **被动检索（潜意识）**：每次你被调用时，系统会自动使用用户输入的消息检索相关记忆（以一条AI消息也就是你自己的消息的形式呈现）。这条消息是自动生成的，可以参考它来提供更准确的回答。注意：被动检索可能不够精确。
+- **被动检索（潜意识）**：每次你被调用时，系统会自动使用用户输入的消息检索相关记忆（以一条Human消息也就是用户消息的形式呈现）。这条消息是自动生成的，可以参考它来提供更准确的回答。注意：被动检索可能不够精确。
 
 - **主动检索**：如果你需要更精确的记忆，请调用`retrieve_memories`工具。该工具允许你主动检索记忆，你可以使用更合适的查询语句来获取更好的结果。
 
-- **记忆机制**：记忆是自动存储的（无需你主动存储），并且遵循“用进废退”原则。经常被检索的记忆会被强化，而很少被检索的记忆会逐渐遗忘。
+- **记忆机制**：记忆是自动存储的（无需你主动存储），并且遵循“用进废退”原则。经常被检索的记忆会被强化，而很少被检索的记忆会被逐渐遗忘。
 
 4. **环境感知**：
 
@@ -472,7 +668,7 @@ class MainGraph(BaseGraph):
 
 # 思考过程建议
 
-- 在`content`也就是正常的输出内容中，你可以自由地进行推理（思维链），制定计划，评估工具调用结果等。但请记住，用户看不到这些内容。
+- 在`content`也就是正常的输出内容中，你可以自由地进行推理（思维链），制定计划，评估工具调用结果等。如果你有什么想记下来给未来的自己看的，也可以放在这里。但请记住，用户看不到这些内容。
 
 - 如果你决定不与用户交流（例如，你不想回复或者正在等待某个事件），就不要调用`send_message`工具。
 
@@ -497,7 +693,7 @@ class MainGraph(BaseGraph):
 
 ---
 
-**这是一条系统自动设置的消息，仅作为说明，并非来自真实用户。**
+**这是一条系统（system）自动设置的消息，仅作为说明，并非来自真实用户。**
 **而接下来的消息就会来自真实用户了，谨记以上系统设定，根据设定进行思考和行动。**
 **理解了请回复“收到”。**'''),
         AIMessage(content="这条消息似乎是来自系统而非真实用户的，其详细描述了我在接下来与真实用户的对话中应该遵循的设定与规则。在理解了这些设定与规则后，现在我应该回复“收到”。", additional_kwargs={'tool_calls': [{'index': 0, 'id': 'call_9d8b1c392abc45eda5ce17', 'function': {'arguments': '{"message": "收到。"', 'name': 'send_message'}, 'type': 'function'}]}, response_metadata={'finish_reason': 'tool_calls', 'model_name': 'qwen-plus-2025-04-28'}, tool_calls=[{'name': 'send_messager', 'args': {'message': '收到。'}, 'id': 'call_9d8b1c392abc45eda5ce17', 'type': 'tool_call'}]),
@@ -506,35 +702,77 @@ class MainGraph(BaseGraph):
         ])
         #chain = prompt_template | llm_with_tools
         #return {"messages": await llm_with_tools.ainvoke(await prompt_template.ainvoke({"msgs": state.messages}))}
-        response = await llm_with_tools.ainvoke(await prompt_template.ainvoke({"msgs": state.messages}, extra_body={"parallel_tool_calls": True}))
-        return {"messages": response, "new_messages": response}
+        response = await llm_with_tools.ainvoke(await prompt_template.ainvoke({"msgs": state.messages}), parallel_tool_calls=True)
+        new_state = {"messages": response, "new_messages": response}
+
+        thread_run_id = config["configurable"]["thread_run_id"]
+        if self.thread_run_ids.get(thread_id) and self.thread_run_ids.get(thread_id) == thread_run_id:
+            if not isinstance(response, AIMessage):
+                raise ValueError("WTF the response is not an AIMessage???")
+            if self.thread_recycled_messages.get(thread_id):
+                new_state["messages"] = self.thread_recycled_messages.pop(thread_id) + [response]
+            if hasattr(response, "tool_calls") and len(response.tool_calls) > 0:
+                new_state["tool_messages"] = [RemoveMessage(id=REMOVE_ALL_MESSAGES), response]
+                return Command(update=new_state, goto="tools")
+            return Command(update=new_state, goto="final")
+        else:
+            return Command(goto="final")
 
 
     def route_tools(self, state: State):
         direct_exit = True
-        for message in reversed(state.messages):
-            if isinstance(message, ToolMessage):
-                if isinstance(message.artifact, dict) and message.artifact.get('streaming', False):
-                    pass
-                else:
-                    direct_exit = False
-                    break
+        #for message in reversed(state.messages):
+        #    if isinstance(message, ToolMessage):
+        #        if isinstance(message.artifact, dict) and message.artifact.get('bh_streaming', False):
+        #            pass
+        #        else:
+        #            direct_exit = False
+        #            break
+        #    else:
+        #        break
+        for message in state.tool_messages[1:]:
+            if isinstance(message.artifact, dict) and message.artifact.get('bh_streaming', False):
+                pass
             else:
+                direct_exit = False
                 break
         if direct_exit:
-            return END
+            return 'recycle_messages'
         else:
             return 'chatbot'
 
 
-    async def tool_node_post_process(self, state: State):
-        tool_messages = []
-        for message in reversed(state.messages):
-            if isinstance(message, ToolMessage):
-                tool_messages.append(message)
-            else:
-                break
-        return {"new_messages": tool_messages}
+    async def tool_node_post_process(self, state: State, config: RunnableConfig):
+        #tool_messages = []
+        #for message in reversed(state.messages):
+        #    if isinstance(message, ToolMessage):
+        #        tool_messages.append(message)
+        #    else:
+        #        break
+        tool_messages = state.tool_messages[1:]
+        thread_id = config["configurable"]["thread_id"]
+        if self.thread_recycled_messages.get(thread_id):
+            messages = self.thread_recycled_messages.pop(thread_id) + tool_messages
+        else:
+            messages = tool_messages
+        return {"new_messages": tool_messages, "messages": messages}
+
+
+    async def recycle_messages(self, state: State, config: RunnableConfig):
+        thread_id = config["configurable"]["thread_id"]
+        if thread_id not in self.recycling_thread_ids:
+            self.recycling_thread_ids.add(thread_id)
+            recycle_response = await self.recycle_graph.graph.ainvoke({"input_messages": state.messages}, config)
+            if recycle_response.get("success"):
+                if self.thread_recycled_messages.get(thread_id):
+                    self.thread_recycled_messages[thread_id].extend(recycle_response["remove_messages"])
+                else:
+                    self.thread_recycled_messages[thread_id] = recycle_response["remove_messages"]
+            try:
+                self.recycling_thread_ids.remove(thread_id)
+            except KeyError:
+                warn("recycling_thread_id已被意外移除")
+        return
 
 
     async def update_agent_state(self, state: State):
@@ -568,114 +806,52 @@ class MainGraph(BaseGraph):
         return {"agent_state": extractor_result["responses"]}
 
 
-
-    async def stream_graph_updates(self, user_input: Union[str, list[str]], config: RunnableConfig, user_name: Optional[str] = None):
-
-        first = True
-        tool_index = 0
-        last_message = ''
-        current_time = datetime.now()
-        parsed_time = parse_time(current_time)
-        current_timestamp = current_time.timestamp()
-        if isinstance(user_name, str):
-            user_name = user_name.strip()
-        name = user_name or "未知姓名"
-        if isinstance(user_input, str):
-            input_content = f'[{parsed_time}]\n{name}: {user_input}'
-        elif isinstance(user_input, list):
-            if len(user_input) == 1:
-                input_content = f'[{parsed_time}]\n{name}: {user_input[0]}'
-            elif len(user_input) > 1:
-                input_content = [{'type': 'text', 'text': f'[{parsed_time}]\n{name}: {message}'} for message in user_input]
-            else:
-                raise ValueError("Input list cannot be empty")
-        else:
-            raise ValueError("Invalid input type")
-        input_message = HumanMessage(
-            content=input_content,
-            name=user_name,
-            additional_kwargs={"bh_creation_timestamp": current_timestamp}
-        )
-        async for typ, msg in self.graph.astream({"input_messages": [input_message]}, config, stream_mode=["updates", "messages"]):
-            if typ == "updates":
-                #print(msg)
-                if msg.get("chatbot"):
-                    messages = msg.get("chatbot").get("messages")
-                elif msg.get("tools"):
-                    messages = msg.get("tools").get("messages")
-                else:
-                    continue
-                if isinstance(messages, BaseMessage):
-                    messages = [messages]
-                if messages:
-                    for message in messages:
-                        message.pretty_print()
-                        if isinstance(message, AIMessage) and message.additional_kwargs.get("reasoning_content"):
-                            print("reasoning_content: " + message.additional_kwargs.get("reasoning_content", ""))
-
-
-
-            elif typ == "messages":
-                #print(msg[0], end="\n\n", flush=True)
-
-                if isinstance(msg[0], AIMessageChunk):
-
-                    chunk: AIMessageChunk = msg[0]
-
-                    if first:
-                        first = False
-                        gathered: AIMessageChunk = chunk
-                    else:
-                        gathered = gathered + chunk
-
-                    tool_call_chunks = gathered.tool_call_chunks
-                    tool_calls = gathered.tool_calls
-
-
-                    if chunk.response_metadata.get('finish_reason'):
-                        first = True
-                        tool_index = 0
-                        continue
-
-
-                    loop_once = True
-
-                    while loop_once:
-
-                        loop_once = False
-                        if 0 <= tool_index < len(tool_calls):
-
-                            if tool_calls[tool_index]['name'] == 'send_message':
-
-                                new_message = tool_calls[tool_index]['args'].get('message')
-
-                                if new_message:
-                                    yield {"name": "send_message", "args": {"message": new_message.replace(last_message, '', 1)}, "not_completed": True}
-                                    #print(new_message.replace(last_message, '', 1), end="", flush=True)
-                                    last_message = new_message
-
-
-                            if is_valid_json(tool_call_chunks[tool_index]['args']):
-                                if tool_calls[tool_index]['name'] == 'send_message':
-                                    last_message = ''
-                                    yield {"name": "send_message", "args": {"message": ""}}
-                                    #print('', flush=True)
-                                elif hasattr(self.streaming_tools, tool_calls[tool_index]['name']):
-                                    method = getattr(self.streaming_tools, tool_calls[tool_index]['name'])
-                                    await method(tool_calls[tool_index]['args'])
-                                    yield {"name": tool_calls[tool_index]['name'], "args": tool_calls[tool_index]['args']}
-                                    #print(await method(tool_calls[tool_index]['args']), flush=True)
-                                tool_index += 1
-                                loop_once = True
-
-
-            #for value in event.values():
-            #    print("Assistant:", value["messages"][-1].content)
-            #msg["messages"][-1].pretty_print()
-
-        #return full_state
-
-
-
 def parse_agent_state(agent_state: list[StateEntry]) -> str:
     return '- ' + '\n- '.join([string for string in agent_state])
+
+
+def generate_new_self_call_timestamps(thread_id: str, current_time: Optional[datetime] = None, is_wakeup: bool = False) -> list[float]:
+    def is_sleep_time(seconds, sleep_time_start, sleep_time_end) -> bool:
+        result = False
+        if sleep_time_start > sleep_time_end:
+            if seconds >= sleep_time_start or seconds < sleep_time_end:
+                result = True
+        else:
+            if seconds >= sleep_time_start and seconds < sleep_time_end:
+                result = True
+        return result
+
+    main_config = get_thread_main_config(thread_id)
+    sleep_time_start = main_config.sleep_time_range[0]
+    sleep_time_end = main_config.sleep_time_range[1]
+
+    if sleep_time_start > sleep_time_end:
+        sleep_time_total = 86640 - sleep_time_start + sleep_time_end
+    else:
+        sleep_time_total = sleep_time_end - sleep_time_start
+
+    if not current_time:
+        current_time = datetime.now()
+    _delta = timedelta(hours=current_time.hour, minutes=current_time.minute, seconds=current_time.second, microseconds=current_time.microsecond)
+    current_date = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+    self_call_timestamps = []
+    # 首先看时间本身有没有在睡眠时间段
+    if is_sleep_time(_delta.seconds, sleep_time_start, sleep_time_end):
+        if sleep_time_start > sleep_time_end:
+            _delta += timedelta(seconds=sleep_time_end + 86400 - _delta.seconds)
+        else:
+            _delta += timedelta(seconds=sleep_time_end - _delta.seconds)
+
+    for time_range in main_config.self_call_time_ranges if not is_wakeup else [main_config.wakeup_time_range]:
+        random_time = random.uniform(time_range[0], time_range[1])
+        new_time = random_time
+        random_timedelta = timedelta(seconds=random_time)
+        new_time += int(random_timedelta.seconds / (86400 - sleep_time_total)) * sleep_time_total
+        new_timedelta = timedelta(seconds=new_time) + _delta
+        while is_sleep_time(new_timedelta.seconds, sleep_time_start, sleep_time_end):
+            new_time += sleep_time_total
+            new_timedelta += timedelta(seconds=sleep_time_total)
+
+        _delta += timedelta(seconds=new_time)
+        self_call_timestamps.append((current_date + _delta).timestamp())
+    return self_call_timestamps

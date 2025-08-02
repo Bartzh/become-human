@@ -6,22 +6,37 @@ import asyncio, uvicorn
 import bcrypt
 from dotenv import load_dotenv
 import os
+import re
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+from contextlib import asynccontextmanager
+from warnings import warn
 
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.messages import AnyMessage, ToolMessage, BaseMessage, AIMessage, HumanMessage, RemoveMessage
 
-from become_human import init_graphs, close_graphs, command_processing
+from become_human import init_graphs, close_graphs, command_processing, init_thread, event_queue, stream_graph_updates
 from become_human.utils import extract_text_parts
 
-app = FastAPI()
+#from fastapi.middleware.cors import CORSMiddleware
 
-from fastapi.middleware.cors import CORSMiddleware
 
-import json, re
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph
+    llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph = await init_graphs()
+    event_listener_task = asyncio.create_task(event_listener())
+    yield
+    event_listener_task.cancel()
+    try:
+        await event_listener_task
+    except asyncio.CancelledError:
+        pass
+    await close_graphs()
 
-from datetime import datetime, timedelta, timezone
+app = FastAPI(lifespan=lifespan)
+
 
 #app.add_middleware(
 #    CORSMiddleware,
@@ -67,6 +82,16 @@ load_dotenv()
 private_key = os.getenv("APP_PRIVATE_KEY", "become-human")
 
 
+user_queues: dict[str, asyncio.Queue] = {}
+
+async def event_listener():
+    while True:
+        event = await event_queue.get()
+        for user_id in user_queues.keys():
+            if event["thread_id"] in users_db[user_id]['accessible_threads']:
+                await user_queues[user_id].put(event)
+
+
 @app.get("/api/get_accessible_threads")
 async def get_accessible_threads(token: str = Depends(oauth2_scheme)):
     payload = verify_token(token)
@@ -81,17 +106,23 @@ async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
     thread_id = api_input.get("thread_id")
     user_id = payload['sub']
     await verify_thread_accessible(user_id, thread_id)
-    await memory_manager.init_thread(thread_id)
+    user_queues[user_id] = asyncio.Queue()
+    await init_thread(thread_id)
     config = {"configurable": {"thread_id": thread_id}}
     main_state = await main_graph.graph.aget_state(config)
     main_messages: list[AnyMessage] = main_state.values.get("messages", [])
     human_message_pattern = re.compile(r'^\[.*?\]\n.*?: ')
     messages = []
     for message in main_messages:
-        if isinstance(message, AIMessage):
+        if message.additional_kwargs.get("bh_from_system"):
+            continue
+        elif isinstance(message, AIMessage):
             for tool_call in message.tool_calls:
                 if tool_call["name"] == "send_message":
-                    messages.append({"role": "ai", "content": tool_call["args"]["message"], "id": f'{message.id}.{tool_call["id"]}', "name": None})
+                    if tool_call["args"].get("message"):
+                        messages.append({"role": "ai", "content": tool_call["args"]["message"], "id": f'{message.id}.{tool_call["id"]}', "name": None})
+                    else:
+                        warn('send_message意外的没有参数，也可能是打断导致的概率问题')
         elif isinstance(message, HumanMessage):
             if isinstance(message.content, str):
                 content = human_message_pattern.sub('', message.text())
@@ -111,8 +142,8 @@ async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
             messages.append({"role": message.type, "content": message.text(), "id": message.id, "name": message.name})
     return {"messages": messages}
 
-@app.post("/api/stream")
-async def stream_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
+@app.post("/api/input")
+async def input_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
     payload = verify_token(token)
     user_input: dict = await request.json()
     message = user_input.get("message")
@@ -127,28 +158,68 @@ async def stream_endpoint(request: Request, token: str = Depends(oauth2_scheme))
     is_admin = users_db[user_id].get('is_admin')
     if extracted_message[0].startswith("/"):
         if is_admin:
-            log = await command_processing(thread_id, extracted_message[0])
-            return Response(json.dumps(log, ensure_ascii=False) + '\n', media_type="application/json")
+            await command_processing(thread_id, extracted_message[0])
+            return Response()
         else:
-            return Response(json.dumps({"name": "log", "args": {"message": "无权限执行此命令"}}, ensure_ascii=False) + '\n', media_type="application/json")
+            if user_queues.get(thread_id):
+                await user_queues[thread_id].put({"name": "log", "args": {"message": "无权限执行此命令"}})
+            return Response()
 
-    async def generate():
-        async for item in main_graph.stream_graph_updates(extracted_message, config, user_name=user_input.get("user_name")):
-            yield json.dumps(item, ensure_ascii=False) + '\n'
-            #yield json.dumps(item)
+    await stream_graph_updates(extracted_message, thread_id, user_name=user_input.get("user_name"))
+    # 处理回收逻辑
+    main_state = await main_graph.graph.aget_state(config)
+    main_messages = main_state.values["messages"]
+    new_messages = main_state.values["new_messages"]
+    print(new_messages)
+    print(f'{count_tokens_approximately(main_messages)} tokens')
+    #recycle_response = await recycle_graph.graph.ainvoke({"input_messages": main_messages}, config)
+    #if recycle_response.get("success"):
+    #    await main_graph.graph.aupdate_state(config, {"messages": recycle_response["remove_messages"]})
 
-        # 处理回收逻辑
-        main_state = await main_graph.graph.aget_state(config)
-        main_messages = main_state.values["messages"]
-        new_messages = main_state.values["new_messages"]
-        print(new_messages)
-        print(f'{count_tokens_approximately(main_messages)} tokens')
-        recycle_response = await recycle_graph.graph.ainvoke({"input_messages": main_messages}, config)
-        if recycle_response.get("success"):
-            await main_graph.graph.aupdate_state(config, {"messages": recycle_response["remove_messages"]})
+    return Response()
 
-    return StreamingResponse(generate(), media_type="application/json")
+    #async def generate():
+    #    async for item in main_graph.stream_graph_updates(extracted_message, thread_id, user_name=user_input.get("user_name")):
+    #        yield json.dumps(item, ensure_ascii=False) + '\n'
 
+    #    # 处理回收逻辑
+    #    main_state = await main_graph.graph.aget_state(config)
+    #    main_messages = main_state.values["messages"]
+    #    new_messages = main_state.values["new_messages"]
+    #    print(new_messages)
+    #    print(f'{count_tokens_approximately(main_messages)} tokens')
+    #    recycle_response = await recycle_graph.graph.ainvoke({"input_messages": main_messages}, config)
+    #    if recycle_response.get("success"):
+    #        await main_graph.graph.aupdate_state(config, {"messages": recycle_response["remove_messages"]})
+
+    #return StreamingResponse(generate(), media_type="application/json")
+
+@app.get("/api/sse")
+async def sse(token: str = Depends(oauth2_scheme)):
+    payload = verify_token(token)
+    user_id = payload['sub']
+    sse_heartbeat_string = "event: heartbeat\ndata: feelmyheartbeat\n\n"
+    async def event_generator():
+        first_time = True
+        while True:
+            # 从事件队列中获取消息，设置超时时间
+            queue = user_queues.get(user_id)
+            if queue:
+                try:
+                    # 使用 asyncio.wait_for 设置超时，避免长时间阻塞
+                    event = await asyncio.wait_for(queue.get(), timeout=0.1 if first_time else 25.0)# 第一次get会卡住
+                    yield f"event: message\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"  # 按照 SSE 格式发送消息
+                except asyncio.TimeoutError:
+                    # 发送心跳消息防止连接超时
+                    if first_time:
+                        first_time = False
+                    yield sse_heartbeat_string
+            else:
+                # 如果没有队列，也发送心跳防止连接超时
+                await asyncio.sleep(1)
+                yield sse_heartbeat_string
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 # 生成 JWT 的函数
@@ -181,7 +252,6 @@ async def verify_thread_accessible(user_id: Optional[str] = None, thread_id: Opt
         raise HTTPException(status_code=400, detail="thread is not accessible")
 
 
-
 @app.post("/api/login")
 async def login(request: Request):
     r: dict = await request.json()
@@ -206,12 +276,5 @@ async def verify_route(token: str = Depends(oauth2_scheme)):
     return {"username": payload['sub']}
 
 
-async def init():
-    global llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph
-    llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph = await init_graphs()
-
-
 if __name__ == '__main__':
-    asyncio.run(init())
     uvicorn.run(app, host=os.getenv('APP_HOST', 'localhost'), port=int(os.getenv('APP_PORT', 36262)), workers=1)
-    asyncio.run(close_graphs())

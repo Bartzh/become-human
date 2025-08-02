@@ -1,6 +1,7 @@
 from become_human.graph_base import BaseGraph
 from become_human.memory import MemoryManager
 from become_human.config import get_thread_retrieve_config, RetrieveMemoriesConfig
+from become_human.utils import parse_seconds
 
 from typing import Any, Callable, Dict, Optional, Sequence, Union, Annotated, Literal
 from pydantic import BaseModel, Field
@@ -88,7 +89,7 @@ class RetrieveGraph(BaseGraph):
         return instance
 
     async def begin(self, state: RetrieveState):
-        return {"messages": [RemoveMessage(id="__remove_all__")]}
+        return {"messages": [RemoveMessage(id="__remove_all__")], "output": ""}
 
     def route_input_type(self, state: RetrieveState):
         # 根据input_type字段的值路由到不同的节点
@@ -97,7 +98,7 @@ class RetrieveGraph(BaseGraph):
     async def active_processing(self, state: RetrieveState, config: RunnableConfig):
         # 主动输入的处理逻辑
         # 可以在这里添加特定于主动输入的处理代码
-        llm_with_structure = self.llm.with_structured_output(RetrieveMemoriesInputs)
+        llm_with_structure = self.llm.with_structured_output(RetrieveMemoriesInputs, method="function_calling")
         retrieve_prompt = f'''你是一个高级记忆检索优化器（RetrieverPrompter），你的核心目标是负责分析用户输入并将其转换为更优的记忆检索工具的输入参数（RetrieveMemoriesInput），使得检索工具能够获得比使用原始输入直接检索更好的准确性和相关性。
 **以下是输出要求：**
 <rules>
@@ -184,6 +185,8 @@ class RetrieveGraph(BaseGraph):
 </user_input>'''
         max_retries = 3
         retry_count = 0
+        memories = None
+        before_time = datetime.now()
         while retry_count < max_retries:
             try:
                 retrieve_inputs = await llm_with_structure.ainvoke(retrieve_prompt)
@@ -203,6 +206,10 @@ class RetrieveGraph(BaseGraph):
 
 你的原输出内容：
 {retrieve_inputs.model_dump_json(indent=4)}'''
+
+        if not memories:
+            after_time = datetime.now()
+            memories = f'主动检索记忆失败，这很少见。操作耗时{parse_seconds(after_time - before_time)}，请考虑是否要重新尝试。'
 
         return {"output": memories}
 
