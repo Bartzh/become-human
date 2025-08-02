@@ -219,8 +219,7 @@ async def sse(token: str = Depends(oauth2_scheme)):
                 await asyncio.sleep(1)
                 yield sse_heartbeat_string
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
 
 # 生成 JWT 的函数
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
