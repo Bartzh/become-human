@@ -289,7 +289,7 @@ class HeartbeatManager:
             if current_timestamp >= wakeup_call_timestamp:
                 await stream_graph_updates('', thread_id, is_self_call=True)
         else:
-            if current_timestamp > (self.thread_ids[thread_id]["created_at"] + 259200):
+            if current_timestamp > (self.thread_ids[thread_id]["created_at"] + 1209600):
                 close_thread(thread_id)
 
 
