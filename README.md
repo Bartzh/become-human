@@ -33,6 +33,8 @@ uv run main.py/app.py即可或直接进入虚拟环境
 已实现记忆管理（如果用RWKV会如何？）、打断（double-texting）、自我调用
 
 TODO:
+- 显示时间
+- 推送通知（或手动获取）
 - 目前的回收机制有问题，太滞后
 - agent自己的时间，自己的时区，自己的时间膨胀
 - 使用模型计算初始stable_time

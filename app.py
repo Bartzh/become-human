@@ -201,25 +201,46 @@ async def sse(token: str = Depends(oauth2_scheme)):
     sse_heartbeat_string = "event: heartbeat\ndata: feelmyheartbeat\n\n"
     async def event_generator():
         first_time = True
-        while True:
-            # 从事件队列中获取消息，设置超时时间
-            queue = user_queues.get(user_id)
-            if queue:
-                try:
-                    # 使用 asyncio.wait_for 设置超时，避免长时间阻塞
-                    event = await asyncio.wait_for(queue.get(), timeout=0.1 if first_time else 25.0)# 第一次get会卡住
-                    yield f"event: message\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"  # 按照 SSE 格式发送消息
-                except asyncio.TimeoutError:
-                    # 发送心跳消息防止连接超时
-                    if first_time:
-                        first_time = False
+        connection_id = user_id + str(id(asyncio.current_task()))
+        try:
+            while True:
+                # 从事件队列中获取消息，设置超时时间
+                queue = user_queues.get(user_id)
+                if queue:
+                    try:
+                        # 使用 asyncio.wait_for 设置超时，避免长时间阻塞
+                        event = await asyncio.wait_for(queue.get(), timeout=0.1 if first_time else 25.0)# 第一次get会卡住
+                        yield f"event: message\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"  # 按照 SSE 格式发送消息
+                    except asyncio.TimeoutError:
+                        # 发送心跳消息防止连接超时
+                        if first_time:
+                            first_time = False
+                        yield sse_heartbeat_string
+                else:
+                    # 如果没有队列，也发送心跳防止连接超时
+                    await asyncio.sleep(1)
                     yield sse_heartbeat_string
-            else:
-                # 如果没有队列，也发送心跳防止连接超时
-                await asyncio.sleep(1)
-                yield sse_heartbeat_string
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
+        except asyncio.CancelledError:
+            print(f"SSE连接被取消: {connection_id}")
+            raise
+        except Exception as e:
+            print(f"SSE连接异常: {connection_id}, 错误: {str(e)}")
+            raise
+        finally:
+            print(f"SSE连接已关闭: {connection_id}")
+    
+    # 添加更多防止缓存的头部
+    return StreamingResponse(
+        event_generator(), 
+        media_type="text/event-stream", 
+        headers={
+            "X-Accel-Buffering": "no", 
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Content-Type-Options": "nosniff"
+        }
+    )
 
 # 生成 JWT 的函数
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
