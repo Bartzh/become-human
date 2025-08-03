@@ -125,7 +125,7 @@ async def stream_graph_updates(user_input: Union[str, list[str]], thread_id: str
         if typ == "updates":
             #print(msg)
 
-            if main_graph.thread_run_ids[thread_id] != thread_run_id:
+            if not main_graph.thread_run_ids.get(thread_id) or main_graph.thread_run_ids.get(thread_id) != thread_run_id:
                 canceled = True
 
             if not canceled and msg.get("chatbot"):
@@ -159,7 +159,7 @@ async def stream_graph_updates(user_input: Union[str, list[str]], thread_id: str
             if canceled:
                 continue
 
-            if main_graph.thread_run_ids[thread_id] != thread_run_id:
+            if not main_graph.thread_run_ids.get(thread_id) or main_graph.thread_run_ids.get(thread_id) != thread_run_id:
                 canceled = True
                 continue
 
@@ -236,7 +236,7 @@ async def stream_graph_updates(user_input: Union[str, list[str]], thread_id: str
                             loop_once = True
 
 
-    if main_graph.thread_run_ids[thread_id] == thread_run_id:
+    if main_graph.thread_run_ids.get(thread_id) and main_graph.thread_run_ids.get(thread_id) == thread_run_id:
         del main_graph.thread_run_ids[thread_id]
     return
 
