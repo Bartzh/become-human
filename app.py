@@ -210,7 +210,7 @@ async def sse(token: str = Depends(oauth2_scheme)):
                     try:
                         # 使用 asyncio.wait_for 设置超时，避免长时间阻塞
                         event = await asyncio.wait_for(queue.get(), timeout=0.1 if first_time else 25.0)# 第一次get会卡住
-                        yield f"event: message\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"  # 按照 SSE 格式发送消息
+                        yield f"event: message\ndata: {json.dumps(event)}\n\n"  # 按照 SSE 格式发送消息
                     except asyncio.TimeoutError:
                         # 发送心跳消息防止连接超时
                         if first_time:
