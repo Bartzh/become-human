@@ -8,6 +8,9 @@
 
 ## 目前已实现的大致架构
 
+<details>
+<summary>mermaid流程图</summary>
+
 ```mermaid
 flowchart TD
     A[主图流程（完全支持被打断）] --> B{调用类型}
@@ -52,13 +55,15 @@ flowchart TD
     C1 --> D1[生成三种记忆: original, summary, semantic]
     D1 --> E1[计算初始稳定时长和记忆难度]
     E1 --> F1[生成向量存入数据库] --> A1
-
-    subgraph CoreTools [核心工具]
-        SendMessageTool[send_message] --> messageInfo[agent只能使用该工具来与用户交流]
-        RetrieveMemoriesTool[retrieve_memories] --> retrieveInfo[通过自然语言检索记忆中的内容（作为主动检索）]
-    end
 ```
-
+```mermaid
+flowchart TD
+    A[核心工具] --> SendMessageTool
+    A --> RetrieveMemoriesTool
+    SendMessageTool[send_message] --> messageInfo[agent只能使用该工具来与用户交流]
+    RetrieveMemoriesTool[retrieve_memories] --> retrieveInfo[通过自然语言检索记忆中的内容（作为主动检索）]
+```
+---
 ```mermaid
 flowchart TD
     A1[记忆检索流程] --> H1{主动/被动检索}
@@ -71,7 +76,7 @@ flowchart TD
     L1 --> M1[更新记忆可检索性、稳定时长与难度]
     M1 --> N1[返回记忆内容]
 ```
-
+---
 ```mermaid
 flowchart TD
     AQ[heartbeat机制] --> O1[每x秒触发]
@@ -81,6 +86,8 @@ flowchart TD
     O1 --> CheckSelfInvoke{检查自我调用组与苏醒调用}
     CheckSelfInvoke --> |有到期调用| TriggerSelfInvoke[触发自我调用]
 ```
+
+</details>
 
 **目前的进入流程方式：**
 
