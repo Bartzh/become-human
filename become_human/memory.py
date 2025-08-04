@@ -136,8 +136,11 @@ class MemoryManager():
             return {"forgot": True}
 
         datetime_alpha = calculate_memory_datetime_alpha(datetime.fromtimestamp(current_timestamp))
-        stable_strength = calculate_stability_curve(updated_metadata["retrievability"]) * metadata["difficulty"] * strength * datetime_alpha
-        stable_time = metadata["stable_time"] * (1 + stable_strength)
+        stable_strength = calculate_stability_curve(updated_metadata["retrievability"])
+        stable_time_diff = metadata["stable_time"] * stable_strength - metadata["stable_time"]
+        if stable_time_diff >= 0:
+            stable_time_diff = stable_time_diff * metadata["difficulty"] * strength * datetime_alpha
+        stable_time = metadata["stable_time"] + stable_time_diff
 
         retrievability = min(1.0, updated_metadata["retrievability"] + strength * datetime_alpha)
 
@@ -148,7 +151,7 @@ class MemoryManager():
         }
 
         if metadata["difficulty"] < 1.0:
-            difficulty = min(1.0, metadata["difficulty"] + (stable_strength * 0.5))
+            difficulty = min(1.0, metadata["difficulty"] + stable_strength * metadata["difficulty"] * strength * datetime_alpha * 0.5)
             metadata_patch["difficulty"] = difficulty
 
         return metadata_patch
