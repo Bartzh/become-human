@@ -1,15 +1,15 @@
 # become-human
 
-尝试让AI以类人的方式行动。
+尝试让AI以类人的方式行动，拥有类人记忆。
 
 原本叫aimemory。
 
-[虽然不是同一个理想。](https://www.bilibili.com/video/BV1xH8oz8Eda)
+**[虽然不是同一个理想。](https://www.bilibili.com/video/BV1xH8oz8Eda)**
 
-## 目前已实现的大致架构
+## 目前已实现的大致流程
 
 <details>
-<summary>mermaid流程图</summary>
+<summary>主图流程图</summary>
 
 ```mermaid
 flowchart TD
@@ -56,6 +56,12 @@ flowchart TD
     D1 --> E1[计算初始稳定时长和记忆难度]
     E1 --> F1[生成向量存入数据库] --> A1
 ```
+
+</details>
+
+<details>
+<summary>核心工具图</summary>
+
 ```mermaid
 flowchart TD
     A[核心工具] --> SendMessageTool
@@ -63,7 +69,12 @@ flowchart TD
     SendMessageTool[send_message] --> messageInfo[agent只能使用该工具来与用户交流]
     RetrieveMemoriesTool[retrieve_memories] --> retrieveInfo[通过自然语言检索记忆中的内容（作为主动检索）]
 ```
----
+
+</details>
+
+<details>
+<summary>记忆检索流程图</summary>
+
 ```mermaid
 flowchart TD
     A1[记忆检索流程] --> H1{主动/被动检索}
@@ -76,7 +87,12 @@ flowchart TD
     L1 --> M1[更新记忆可检索性、稳定时长与难度]
     M1 --> N1[返回记忆内容]
 ```
----
+
+</details>
+
+<details>
+<summary>heartbeat机制图</summary>
+
 ```mermaid
 flowchart TD
     AQ[heartbeat机制] --> O1[每x秒触发]
@@ -89,7 +105,9 @@ flowchart TD
 
 </details>
 
-**目前的进入流程方式：**
+---
+
+**目前进入流程的方式：**
 
 1. 用户直接调用
 2. 自我调用
@@ -172,11 +190,11 @@ flowchart TD
 
 ## 安装使用
 
-clone仓库或直接下载。
+clone仓库或直接下载zip。
 
-使用uv sync
+使用`uv sync`
 
-设置.env
+设置`.env`
 
 安装deno，linux或mac使用：
 
@@ -186,9 +204,10 @@ curl -fsSL https://deno.land/install.sh | sh
 
 windows可以直接用仓库里的脚本，稍微改了一下，只会下载deno.exe到根目录，不会添加环境变量。这样似乎就够了。
 
-uv run main.py/app.py即可或直接进入虚拟环境
+`uv run main.py/app.py`即可，或直接进入虚拟环境
 
-网页服务（app.py）可以搭配 [become-human-app-assistant-ui](https://github.com/Bartzh/become-human-app-assistant-ui) 使用。
+网页服务`app.py`可以搭配 [become-human-app-assistant-ui](https://github.com/Bartzh/become-human-app-assistant-ui) 使用。
+还需设置`config/app_users.json`
 
 ---
 
