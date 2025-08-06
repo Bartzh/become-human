@@ -178,21 +178,6 @@ async def input_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
 
     return Response()
 
-    #async def generate():
-    #    async for item in main_graph.stream_graph_updates(extracted_message, thread_id, user_name=user_input.get("user_name")):
-    #        yield json.dumps(item, ensure_ascii=False) + '\n'
-
-    #    # 处理回收逻辑
-    #    main_state = await main_graph.graph.aget_state(config)
-    #    main_messages = main_state.values["messages"]
-    #    new_messages = main_state.values["new_messages"]
-    #    print(new_messages)
-    #    print(f'{count_tokens_approximately(main_messages)} tokens')
-    #    recycle_response = await recycle_graph.graph.ainvoke({"input_messages": main_messages}, config)
-    #    if recycle_response.get("success"):
-    #        await main_graph.graph.aupdate_state(config, {"messages": recycle_response["remove_messages"]})
-
-    #return StreamingResponse(generate(), media_type="application/json")
 
 @app.get("/api/sse")
 async def sse(token: str = Depends(oauth2_scheme)):

@@ -100,7 +100,7 @@ flowchart TD
     P1 --> Q1{可检索性低于0？}
     Q1 -->|是| R1[遗忘记忆]
     O1 --> CheckSelfInvoke{检查自我调用组与苏醒调用}
-    CheckSelfInvoke --> |有到期调用| TriggerSelfInvoke[触发自我调用]
+    CheckSelfInvoke -->|有到期调用| TriggerSelfInvoke[触发自我调用]
 ```
 
 </details>

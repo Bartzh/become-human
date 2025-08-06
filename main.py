@@ -18,8 +18,7 @@ def _print(item: dict):
             last_message = ''
 
 async def main():
-    global llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph
-    llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph = await init_graphs(30)
+    await init_graphs(30)
 
     await init_thread(config['configurable']['thread_id'])
 
