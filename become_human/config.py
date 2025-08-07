@@ -142,7 +142,7 @@ def load_config() -> dict[str, ThreadConfig]:
         with open(THREADS_FILE, "r", encoding='utf-8') as f:
             thread_configs_toml = load(f)
             thread_configs_toml = verify_toml(thread_configs_toml)
-    thread_configs = {key: ThreadConfig.model_validate(value) for key, value in thread_configs_toml.items()}
+    thread_configs = {key: ThreadConfig.model_validate(value) for key, value in thread_configs_toml.unwrap().items()}
     with open(THREADS_FILE, 'w', encoding='utf-8') as f:
         dump(thread_configs_toml, f)
     return thread_configs
@@ -150,7 +150,7 @@ def load_config() -> dict[str, ThreadConfig]:
 def set_config(override: TOMLDocument) -> dict[str, ThreadConfig]:
     global thread_configs_toml, thread_configs
     thread_configs_toml = verify_toml(override)
-    thread_configs = {key: ThreadConfig.model_validate(value) for key, value in thread_configs_toml.items()}
+    thread_configs = {key: ThreadConfig.model_validate(value) for key, value in thread_configs_toml.unwrap().items()}
     with open(THREADS_FILE, 'w', encoding='utf-8') as f:
         dump(thread_configs_toml, f)
     return thread_configs

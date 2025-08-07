@@ -232,7 +232,6 @@ class RecycleGraph(BaseGraph):
                 id=str(uuid4())
             ))
 
-
         return {"extracted_memories": extracted_memories}
 
 
