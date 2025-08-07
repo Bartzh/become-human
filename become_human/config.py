@@ -55,10 +55,10 @@ class RetrieveConfig(BaseModel):
     ), description="被动检索配置")
 
 class ThreadConfig(BaseModel):
+    init_on_startup: bool = Field(default=False, description="是否在程序启动时自动初始化该线程")
     main: MainConfig = Field(default_factory=lambda: MainConfig(), description="main_graph配置")
     recycle: RecycleConfig = Field(default_factory=lambda: RecycleConfig(), description="recycle_graph配置")
     retrieve: RetrieveConfig = Field(default_factory=lambda: RetrieveConfig(), description="retrieve_graph配置")
-    init_on_startup: bool = Field(default=False, description="是否在程序启动时自动初始化该线程")
 
 
 thread_configs_toml = document()
