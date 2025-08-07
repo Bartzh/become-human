@@ -11,7 +11,7 @@ from become_human.graph_main import MainGraph
 from become_human.graph_recycle import RecycleGraph
 from become_human.graph_retrieve import RetrieveGraph
 from become_human.memory import MemoryManager
-from become_human.config import load_config, get_thread_configs_toml, set_config
+from become_human.config import load_config, get_thread_configs_toml, set_config, get_thread_configs
 from become_human.utils import parse_time, is_valid_json, parse_messages
 
 from typing import Annotated, Optional, Union, Any
@@ -253,10 +253,18 @@ class HeartbeatManager:
         self.thread_ids = {}
         self.is_running = False
         self.task = None
-        self.start()
         atexit.register(self.stop)
 
-    def start(self):
+    @classmethod
+    async def create(cls, interval: float = 5.0):
+        instance = cls(interval)
+        await instance.start()
+        return instance
+
+    async def start(self):
+        for key, value in get_thread_configs().items():
+            if value.init_on_startup:
+                await init_thread(key)
         if self.task is None:
             self.task = asyncio.create_task(self.heartbeat_task())
 
@@ -353,7 +361,7 @@ async def init_graphs(heartbeat_interval: float = 5.0) -> tuple[BaseChatModel, B
     recycle_graph = await RecycleGraph.create(llm_for_structured, memory_manager)
     main_graph = await MainGraph.create(llm_for_chat, retrieve_graph, recycle_graph, memory_manager, [retrieve_memories], llm_for_structured)
 
-    heartbeat_manager = HeartbeatManager(heartbeat_interval)
+    heartbeat_manager = await HeartbeatManager.create(heartbeat_interval)
 
     return llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph
 
