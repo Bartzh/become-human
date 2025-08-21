@@ -48,10 +48,11 @@ flowchart TD
     X -->|是| Q
     X -->|否| S
 
+	S --> Z1[将未被回收的消息作为original记忆存储]
     S --> Z{总token是否达到阈值?}
     Z -->|否| A1[结束]
     Z -->|是| B1[回收消息至token低于目标值]
-    B1 --> C1[记忆分析并存储]
+    B1 --> C1[记忆解析并存储]
 ```
 
 </details>
@@ -116,8 +117,8 @@ flowchart TD
     Q1 -->|是| R1[遗忘记忆]
     O1 --> CheckSelfInvoke{检查自我调用组与苏醒调用}
     CheckSelfInvoke -->|有到期调用| TriggerSelfInvoke[触发自我调用]
-    O1 --> CheckActive{检查当前组是否处于活跃状态}
-    CheckActive -->|否| TriggerRecycle[触发上下文记忆分析回收]
+    O1 --> CheckActive{检查当前是否处于活跃状态}
+    CheckActive -->|否，且有可解析的人类消息| TriggerRecycle[触发上下文记忆解析回收]
 ```
 
 </details>
@@ -210,7 +211,7 @@ flowchart TD
 	1. 可检索性 = 1 - (上一次访问以来经过的时间 / 稳定时长) ** 0.4
 	2. 如果 上一次访问以来经过的时间 >= 稳定时长，记忆将被遗忘
 2. 获取agent的自我调用组与苏醒调用，只要有任何一个调用时间小于当前时间就触发自我调用
-3. 获取agent的活跃状态时间，若处于非活跃状态执行上下文分析并存储记忆
+3. 获取agent的活跃状态时间，若处于非活跃状态执行上下文解析并存储记忆
 
 ## 安装使用
 
