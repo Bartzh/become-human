@@ -6,13 +6,15 @@ from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage,
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.embeddings import Embeddings
 from langchain_core.messages.utils import count_tokens_approximately
+from langchain_core.documents import Document
+from langgraph.prebuilt import InjectedState
 
 from become_human.graph_main import MainGraph
 from become_human.graph_recycle import RecycleGraph
 from become_human.graph_retrieve import RetrieveGraph
 from become_human.memory import MemoryManager
-from become_human.config import load_config, get_thread_configs_toml, set_config, get_thread_configs
-from become_human.utils import parse_time, is_valid_json, parse_messages
+from become_human.config import load_config, get_thread_configs_toml, set_config, get_thread_configs, get_thread_recycle_config
+from become_human.utils import parse_time, is_valid_json, parse_messages, parse_documents
 
 from typing import Annotated, Optional, Union, Any
 import os
@@ -25,12 +27,19 @@ from uuid import uuid4
 event_queue = asyncio.Queue()
 
 @tool(response_format="content_and_artifact")
-async def retrieve_memories(search_string: Annotated[str, "要检索的内容"], config: RunnableConfig) -> tuple[str, dict[str, Any]]:
+async def retrieve_memories(search_string: Annotated[str, "要检索的内容"], messages: Annotated[list[AnyMessage], InjectedState('messages')], config: RunnableConfig) -> tuple[str, dict[str, Any]]:
     """从数据库（大脑）中检索记忆"""
     result = await retrieve_graph.graph.ainvoke({"input": search_string, "type": "active"}, config)
-    content = result["output"]
+    if result.get("error"):
+        content = result.get("error")
+    else:
+        docs: list[Document] = result.get("output", [])
+        message_ids = [m.id for m in messages if m.id]
+        docs = [doc for doc in docs if doc.id not in message_ids]
+        content = parse_documents(docs)
     artifact = {"bh_do_not_store": True}
     return content, artifact
+
 
 # 缓冲用于当双发但还没调用graph时，最后一次调用可以连上之前的输入给agent，而前面的调用直接取消即可。
 thread_user_input_buffers: dict[str, list[str]] = {}
@@ -72,7 +81,7 @@ async def stream_graph_updates(user_input: Union[str, list[str]], thread_id: str
     main_graph_state = await main_graph.graph.aget_state(config)
     if main_graph_state.next:
         current_node = main_graph_state.next[0]
-        while current_node == "tools" or current_node == "tool_node_post_process" or current_node == "begin":
+        while current_node == "tools" or current_node == "tool_node_post_process" or current_node == "prepare_to_recycle" or current_node == "begin":
             await asyncio.sleep(0.2)
             # 如果在等待期间又有新的调用，则取消这次调用
             if main_graph.thread_run_ids.get(thread_id, '') != thread_run_id:
@@ -278,27 +287,51 @@ class HeartbeatManager:
         print("Heartbeat task stopped.")
 
     async def trigger_threads(self):
-        for thread_id in self.thread_ids.keys():
-            await self.trigger_thread(thread_id)
+        #for thread_id in self.thread_ids.keys():
+        #    await self.trigger_thread(thread_id)
+        tasks = [self.trigger_thread(thread_id) for thread_id in self.thread_ids.keys()]
+        await asyncio.gather(*tasks)
 
     async def trigger_thread(self, thread_id: str):
         config = {"configurable": {"thread_id": thread_id}}
+        # 更新记忆
         await memory_manager.update_timer(thread_id)
+
+        # 处理自我调用
         main_graph_state = await main_graph.graph.aget_state(config)
         current_timestamp = datetime.now(timezone.utc).timestamp()
         self_call_timestamps = main_graph_state.values.get("self_call_timestamps", [])
         wakeup_call_timestamp = main_graph_state.values.get("wakeup_call_timestamp")
+        can_call = False
         if self_call_timestamps:
             for timestamp in self_call_timestamps:
                 if current_timestamp >= timestamp:
-                    await stream_graph_updates('', thread_id, is_self_call=True) #TODO task
+                    can_call = True
                     break
-        if wakeup_call_timestamp:
+        if wakeup_call_timestamp and not can_call:
             if current_timestamp >= wakeup_call_timestamp:
-                await stream_graph_updates('', thread_id, is_self_call=True)
-        else:
-            if current_timestamp > (self.thread_ids[thread_id]["created_at"] + 1209600):
-                close_thread(thread_id)
+                can_call = True
+        if can_call:
+            await stream_graph_updates('', thread_id, is_self_call=True)
+
+        # 自动回收闲置上下文
+        elif main_graph_state.values.get("active_timestamp") and current_timestamp > main_graph_state.values.get("active_timestamp"):# 已超出活跃时间
+            messages = await main_graph.get_messages(thread_id)
+            messages = [m for m in messages if not m.additional_kwargs.get("bh_extracted")]
+            if [m for m in messages if isinstance(m, HumanMessage) and not m.additional_kwargs.get("bh_from_system")]: # 有来自用户的消息
+                await recycle_graph.graph.ainvoke({"input_messages": messages, "recycle_type": "extract"}, config)
+                is_cleanup = get_thread_recycle_config(thread_id).cleanup_on_non_active_recycle
+                if is_cleanup:
+                    await main_graph.update_messages(thread_id, [RemoveMessage(id=m.id) for m in messages])
+                else:
+                    for m in messages:
+                        if not m.additional_kwargs.get("bh_extracted"):
+                            m.additional_kwargs["bh_extracted"] = True
+                    await main_graph.update_messages(thread_id, messages)
+
+        # 闲置过久则关闭线程
+        elif current_timestamp > (self.thread_ids[thread_id]["created_at"] + 1209600):
+            close_thread(thread_id)
 
 
     async def init_thread(self, thread_id: str):
@@ -414,12 +447,11 @@ key: (optional) specific key to get from state'''
             splited_input = user_input.split(" ")
             message_count = int(splited_input[1])
             if message_count > 0:
-                _main_state = await main_graph.graph.aget_state(config)
-                _main_messages: list[AnyMessage] = _main_state.values.get('messages')
+                _main_messages = await main_graph.get_messages(thread_id)
                 if _main_messages:
                     _last_messages = _main_messages[-message_count:]
-                    remove_messages = [RemoveMessage(id=_message.id) for _message in _last_messages]
-                    await main_graph.graph.aupdate_state(config, {"messages": remove_messages, "input_messages": remove_messages})
+                    remove_messages = [RemoveMessage(id=_message.id) for _message in _last_messages if _message.id]
+                    await main_graph.update_messages(thread_id, remove_messages)
                     message = f"Last {len(remove_messages)} messages deleted."
                 else:
                     message = "No messages found"
@@ -446,10 +478,10 @@ role_prompt: The role prompt to set for the user"""
     elif user_input == "/wakeup":
         await main_graph.graph.aupdate_state(config, {"active_timestamp": 0.0, "self_call_timestamps": [], "wakeup_call_timestamp": 0.0})
         message = "已唤醒agent（重置自我调用相关状态），这可能导致agent对prompt有些误解。"
-    
+
     elif user_input == "/messages":
-        main_state = await main_graph.graph.aget_state(config)
-        if main_messages := main_state.values.get("messages"):
+        main_messages = await main_graph.get_messages(thread_id)
+        if main_messages:
             message = parse_messages(main_messages)
         else:
             message = "消息为空。"

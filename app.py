@@ -108,9 +108,7 @@ async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
     await verify_thread_accessible(user_id, thread_id)
     user_queues[user_id] = asyncio.Queue()
     await init_thread(thread_id)
-    config = {"configurable": {"thread_id": thread_id}}
-    main_state = await main_graph.graph.aget_state(config)
-    main_messages: list[AnyMessage] = main_state.values.get("messages", [])
+    main_messages = await main_graph.get_messages(thread_id)
     human_message_pattern = re.compile(r'^\[.*?\]\n.*?: ')
     messages = []
     for message in main_messages:
@@ -186,7 +184,7 @@ async def sse(token: str = Depends(oauth2_scheme)):
     sse_heartbeat_string = "event: heartbeat\ndata: feelmyheartbeat\n\n"
     async def event_generator():
         first_time = True
-        connection_id = user_id + str(id(asyncio.current_task()))
+        connection_id = user_id + '_' + str(id(asyncio.current_task()))
         try:
             while True:
                 # 从事件队列中获取消息，设置超时时间

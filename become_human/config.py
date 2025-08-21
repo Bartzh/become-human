@@ -21,6 +21,7 @@ class MainConfig(BaseModel):
     sleep_time_range: tuple[float, float] = Field(default=(79200.0, 18000.0), description="agent进入睡眠的时间段，单位为秒。目前的作用是self_call的时间生成会跳过这个时间段。")
 
 class RecycleConfig(BaseModel):
+    cleanup_on_non_active_recycle: bool = Field(default=False, description="是否在非活跃自动回收的同时清理回收的消息")
     recycle_trigger_threshold: int = Field(default=5000, ge=0.0, description="触发回收的阈值，单位为Tokens")
     recycle_target_size: int = Field(default=3000, ge=0.0, description="回收后目标大小，单位为Tokens")
     base_stable_time: float = Field(default=43200.0, ge=0.0, description="记忆初始化时stable_time的初始值，单位为秒。目前会乘以一个0~3的随机数")
@@ -39,9 +40,9 @@ class RetrieveConfig(BaseModel):
         k=8,
         fetch_k=24,
         search_method='mmr',
-        similarity_weight=0.4,
-        retrievability_weight=0.3,
-        diversity_weight=0.3,
+        similarity_weight=0.5,
+        retrievability_weight=0.25,
+        diversity_weight=0.25,
         strength=1.0
     ), description="主动检索配置")
     passive_retrieve_config: RetrieveMemoriesConfig = Field(default_factory=lambda: RetrieveMemoriesConfig(

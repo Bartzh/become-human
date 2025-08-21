@@ -4,6 +4,7 @@ from typing import Union
 import os
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, AnyMessage, BaseMessage
+from langchain_core.documents import Document
 
 
 def is_valid_json(json_string: str) -> bool:
@@ -76,6 +77,27 @@ def parse_messages(messages: list[AnyMessage]) -> str:
     for message in messages:
         messages_string += parse_message(message) + "\n\n\n"
     return messages_string
+
+
+def parse_documents(documents: list[Document]) -> str:
+    """将文档列表转换为(AI)可读的字符串"""
+    output = []
+    # 反过来从分数最低的开始读取
+    for doc in reversed(documents):
+        content = doc.page_content
+        memory_type = doc.metadata["type"]
+        timestamp = doc.metadata.get("creation_timestamp")
+        if timestamp is not None:
+            try:
+                readable_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+            except (OverflowError, OSError, ValueError):
+                readable_time = "时间戳解析失败"
+        else:
+            readable_time = "未知时间"
+        output.append(f"记忆类型：{memory_type}\n记忆创建时间: {readable_time}\n记忆内容: {content}")
+    if not output:
+        return "没有找到任何匹配的记忆。"
+    return "\n\n".join(output)
 
 
 def extract_text_parts(content) -> list[str]:

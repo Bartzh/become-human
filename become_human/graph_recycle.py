@@ -83,12 +83,13 @@ class ExtractedMemories(BaseModel):
 class RecycleState(BaseModel):
     #输入
     input_messages: list[AnyMessage] = Field(description="输入消息列表")
+    recycle_type: Literal['extract', 'original'] = Field(description="回收类型")
+    checking_messages: list[AnyMessage] = Field(default=list, description="用于检查是否溢出")
     #输出及临时状态
     remove_messages: list[RemoveMessage] = Field(default_factory=list)
     old_messages: list[AnyMessage] = Field(default_factory=list)
     new_messages: list[AnyMessage] = Field(default_factory=list)
-    extracted_memories: Optional[list[MemoryEntry]] = Field(default=None)
-    success: bool = Field(default=False)
+    extracted_memories: list[MemoryEntry] = Field(default_factory=list)
 
 
 class RecycleGraph(BaseGraph):
@@ -104,18 +105,21 @@ class RecycleGraph(BaseGraph):
         recycleGraph_builder = StateGraph(RecycleState)
 
         recycleGraph_builder.add_node("begin", self.begin)
-        recycleGraph_builder.add_node("recycle", self.recycle_messages)
+        #recycleGraph_builder.add_node("recycle", self.recycle_messages)
         recycleGraph_builder.add_node("extract", self.extract_messages)
+        recycleGraph_builder.add_node("original", self.original_process)
+        recycleGraph_builder.add_node("extract_process", self.extract_process)
         recycleGraph_builder.add_node("store", self.store_memories)
 
         recycleGraph_builder.set_entry_point("begin")
-        recycleGraph_builder.add_conditional_edges("begin", self.recycle_condition)
-        recycleGraph_builder.add_edge("recycle", "extract")
+        recycleGraph_builder.add_conditional_edges("begin", self.type_condition)
+        #recycleGraph_builder.add_conditional_edges("original", self.original_condition)
+        recycleGraph_builder.add_edge("original", "store")
+        #recycleGraph_builder.add_edge("recycle", "extract")
+        recycleGraph_builder.add_edge("extract_process", "extract")
         recycleGraph_builder.add_edge("extract", "store")
         recycleGraph_builder.add_edge("store", END)
         self.graph_builder = recycleGraph_builder
-        #async with AsyncSqliteSaver.from_conn_string("recycle_graph.sqlite") as checkpointer:
-        #    self.graph = recycleGraph_builder.compile(checkpointer=checkpointer)
 
     @classmethod
     async def create(cls, llm: BaseChatModel, memory_manager: MemoryManager, tools: Optional[Sequence[Union[Dict[str, Any], type, Callable, BaseTool]]] = None):
@@ -126,24 +130,23 @@ class RecycleGraph(BaseGraph):
         return instance
 
 
-
     async def begin(self, state: RecycleState):
-        return {"success": False, "remove_messages": [], "old_messages": [], "new_messages": [], "extracted_memories": None}
+        return {"remove_messages": [], "old_messages": [], "new_messages": [], "extracted_memories": []}
 
-    def recycle_condition(self, state: RecycleState, config: RunnableConfig):
-        if count_tokens_approximately(state.input_messages) > get_thread_recycle_config(config["configurable"]["thread_id"]).recycle_trigger_threshold:
-            return 'recycle'
-        else:
-            return END
-
+    def type_condition(self, state: RecycleState):
+        if state.input_messages:
+            if state.recycle_type == 'original':
+                return 'original'
+            elif state.recycle_type == 'extract':
+                return 'extract_process'
+        return END
 
     # 回收溢出的消息
 
     async def recycle_messages(self, state: RecycleState, config: RunnableConfig):
         # 获取当前消息列表
-        messages = state.input_messages
+        messages = state.checking_messages
         max_tokens = get_thread_recycle_config(config["configurable"]["thread_id"]).recycle_target_size
-
         new_messages = trim_messages(
             messages=messages,
             max_tokens=max_tokens,
@@ -157,42 +160,32 @@ class RecycleGraph(BaseGraph):
             raise Exception("Trim messages failed.")
         excess_count = len(messages) - len(new_messages)
         old_messages = messages[:excess_count]
-        remove_messages = []
-        for old_message in old_messages:
-            remove_messages.append(RemoveMessage(id=old_message.id))
+        remove_messages = [RemoveMessage(id=message.id) for message in old_messages]
 
         return {"remove_messages": remove_messages, "new_messages": new_messages, "old_messages": old_messages}
 
-
-    async def extract_messages(self, state: RecycleState, config: RunnableConfig):
-        messages = state.old_messages
-
-        trimmed_messages = []
+    async def original_process(self, state: RecycleState, config: RunnableConfig):
+        messages = state.input_messages
 
         extracted_memories: list[MemoryEntry] = []
 
         current_timestamp = datetime.now(timezone.utc).timestamp()
         base_stable_time = get_thread_recycle_config(config["configurable"]["thread_id"]).base_stable_time
 
-        creation_timestamps = []
-
         for message in messages:
             if isinstance(message, ToolMessage):
                 if message.artifact and isinstance(message.artifact, dict):
-                    if not message.artifact.get("bh_do_not_store"):
-                        stable_mult = random.uniform(0.0, 3.0)#TODO:这个值应该由文本的情感强烈程度来决定
-                    else:
+                    if message.artifact.get("bh_do_not_store"):
                         continue
+                    else:
+                        stable_mult = random.uniform(0.0, 3.0)#TODO:这个值应该由文本的情感强烈程度来决定
                 else:
-                    continue
+                    stable_mult = random.uniform(0.0, 3.0)
             elif message.additional_kwargs.get("bh_do_not_store"):
                 continue
             else:
                 stable_mult = random.uniform(0.0, 3.0)
-            trimmed_messages.append(message)
             bh_creation_timestamp = message.additional_kwargs.get("bh_creation_timestamp", current_timestamp)
-
-            creation_timestamps.append(int(bh_creation_timestamp))
 
             extracted_memories.append(MemoryEntry(
                 content=parse_message(message),
@@ -202,35 +195,71 @@ class RecycleGraph(BaseGraph):
                 id=message.id or str(uuid4())
             ))
 
-        # 临时方案，对于总结和语义记忆的creation_timestamp直接使用原始记录的平均时间戳
-        creation_timestamp_average = sum(creation_timestamps) / len(creation_timestamps)
+        return {"extracted_memories": extracted_memories}
 
-        llm_with_structure = self.llm.with_structured_output(ExtractedMemoryInfo, method="function_calling")
-        extracted_memory_info = await llm_with_structure.ainvoke(f"""以下是用户的生活记录：
+    def original_condition(self, state: RecycleState, config: RunnableConfig):
+        if state.checking_messages:
+            if count_tokens_approximately(state.checking_messages) > get_thread_recycle_config(config["configurable"]["thread_id"]).recycle_trigger_threshold:
+                return 'recycle'
+            else:
+                return 'store'
+
+    async def extract_process(self, state: RecycleState, config: RunnableConfig):
+        return {"old_messages": state.input_messages, "remove_messages": [RemoveMessage(id=message.id) for message in state.input_messages]}
+
+    async def extract_messages(self, state: RecycleState, config: RunnableConfig):
+        messages = state.old_messages
+
+        trimmed_messages = []
+
+        extracted_memories = []
+
+        current_timestamp = datetime.now(timezone.utc).timestamp()
+        base_stable_time = get_thread_recycle_config(config["configurable"]["thread_id"]).base_stable_time
+
+        creation_timestamps = []
+
+        for message in messages:
+            if isinstance(message, ToolMessage) and message.artifact and isinstance(message.artifact, dict) and message.artifact.get("bh_do_not_store"):
+                continue
+            elif message.additional_kwargs.get("bh_do_not_store"):
+                continue
+            elif message.additional_kwargs.get("bh_extracted"):
+                continue
+            trimmed_messages.append(message)
+            bh_creation_timestamp = message.additional_kwargs.get("bh_creation_timestamp", current_timestamp)
+            creation_timestamps.append(int(bh_creation_timestamp))
+
+        if trimmed_messages:
+            # 临时方案，对于总结和语义记忆的creation_timestamp直接使用原始记录的平均时间戳
+            creation_timestamp_average = sum(creation_timestamps) / len(creation_timestamps)
+
+            llm_with_structure = self.llm.with_structured_output(ExtractedMemoryInfo, method="function_calling")
+            extracted_memory_info = await llm_with_structure.ainvoke(f"""以下是用户的生活记录：
 <history>
 {parse_messages(trimmed_messages)}
 </history>
 请你根据这些记录，提取出 ExtractedMemoryInfo 需要的记忆信息并返回。"""
-        )
+            )
 
-        extracted_memory_info_dict = extracted_memory_info.model_dump()
+            extracted_memory_info_dict = extracted_memory_info.model_dump()
 
-        extracted_memories.append(MemoryEntry(
-            content=extracted_memory_info_dict["summary"],
-            stable_time=random.uniform(0.0, 3.0) * base_stable_time,
-            type="summary",
-            creation_timestamp=creation_timestamp_average,
-            id=str(uuid4())
-        ))
-
-        for semantic_memory in extracted_memory_info_dict["semantic_memories"]:
             extracted_memories.append(MemoryEntry(
-                content=semantic_memory,
+                content=extracted_memory_info_dict["summary"],
                 stable_time=random.uniform(0.0, 3.0) * base_stable_time,
-                type="semantic",
+                type="summary",
                 creation_timestamp=creation_timestamp_average,
                 id=str(uuid4())
             ))
+
+            for semantic_memory in extracted_memory_info_dict["semantic_memories"]:
+                extracted_memories.append(MemoryEntry(
+                    content=semantic_memory,
+                    stable_time=random.uniform(0.0, 3.0) * base_stable_time,
+                    type="semantic",
+                    creation_timestamp=creation_timestamp_average,
+                    id=str(uuid4())
+                ))
 
         return {"extracted_memories": extracted_memories}
 
@@ -238,7 +267,7 @@ class RecycleGraph(BaseGraph):
     async def store_memories(self, state: RecycleState, config: RunnableConfig):
         memory_entries = state.extracted_memories
         if not memory_entries:
-            return {"success": False}
+            return {"input_messages": []}
         docs = []
         for memory_entry in memory_entries:
             docs.append(self.memory_manager.InitialMemory(
@@ -249,4 +278,4 @@ class RecycleGraph(BaseGraph):
                 stable_time=memory_entry.stable_time
             ))
         await self.memory_manager.add_memories(docs, config["configurable"]["thread_id"])
-        return {"success": True}
+        return {"input_messages": []}

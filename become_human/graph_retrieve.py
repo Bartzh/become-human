@@ -24,6 +24,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition, InjectedState
 
 from datetime import datetime
+import random
 
 import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -48,7 +49,8 @@ class RetrieveState(BaseModel):
     type: Literal['passive', 'active'] = Field(description="检索类型：主动或被动['passive', 'active']")
     #临时
     messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list, description="检索过程中产生的消息")
-    output: str = Field(default="", description="检索结果")
+    output: list[Document] = Field(default_factory=list, description="检索结果")
+    error: str = Field(default="", description="错误信息")
 
 class RetrieveGraph(BaseGraph):
 
@@ -89,7 +91,7 @@ class RetrieveGraph(BaseGraph):
         return instance
 
     async def begin(self, state: RetrieveState):
-        return {"messages": [RemoveMessage(id="__remove_all__")], "output": ""}
+        return {"messages": [RemoveMessage(id="__remove_all__")], "output": [], "error": ""}
 
     def route_input_type(self, state: RetrieveState):
         # 根据input_type字段的值路由到不同的节点
@@ -207,11 +209,11 @@ class RetrieveGraph(BaseGraph):
 你的原输出内容：
 {retrieve_inputs.model_dump_json(indent=4)}'''
 
-        if not memories:
+        if retry_count >= max_retries:
             after_time = datetime.now()
-            memories = f'主动检索记忆失败，这很少见。操作耗时{parse_seconds(after_time - before_time)}，请考虑是否要重新尝试。'
-
-        return {"output": memories}
+            return {'error': f'主动检索记忆失败，这很少见。操作耗时{parse_seconds(after_time - before_time)}，请考虑是否要重新尝试。'}
+        else:
+            return {"output": memories}
 
 
     async def passive_processing(self, state: RetrieveState, config: RunnableConfig):
@@ -229,13 +231,14 @@ class RetrieveGraph(BaseGraph):
         except ValueError as e:
             memories = "被动检索记忆失败，请无视此消息。"
             print('被动检索报错：' + str(e))
+            return {"error": memories}
         return {"output": memories}
 
     async def final(self, state: RetrieveState):
         return
 
 
-    async def retrieve_memories(self, retrieve_inputs: RetrieveMemoriesInputs, retrieve_config: RetrieveMemoriesConfig, thread_id: str) -> str:
+    async def retrieve_memories(self, retrieve_inputs: RetrieveMemoriesInputs, retrieve_config: RetrieveMemoriesConfig, thread_id: str) -> list[Document]:
 
         total_k = retrieve_config.k
         fetch_k = retrieve_config.fetch_k
@@ -310,7 +313,7 @@ class RetrieveGraph(BaseGraph):
                 retrieve["filter"] = [{"stable_time": {"$gte": retrieve["start_time"].timestamp()}}, {"stable_time": {"$lte": retrieve["end_time"].timestamp()}}]
 
 
-        docs = await self.memory_manager.retrieve_memories(
+        docs_and_scores = await self.memory_manager.retrieve_memories(
             inputs=[
                 self.memory_manager.RetrieveInput(
                     search_string=retrieve["search_string"],
@@ -331,7 +334,29 @@ class RetrieveGraph(BaseGraph):
         #docs = [doc for doc, _ in docs_and_scores]
 
 
-        return parse_documents(docs)
+        for doc, score in docs_and_scores:
+            if score >= 0.35:
+                continue
+            # 计算要替换的字符比例，score从0.35到0对应替换比例从0到1
+            replacement_ratio = min(1 - (score / 0.35), 0.8)  # 0.35->0, 0->1
+            content = doc.page_content
+            content_length = len(content)
+            # 计算要替换的字符数量
+            num_chars_to_replace = int(content_length * replacement_ratio)
+            
+            # 将字符串转换为列表以便修改
+            content_list = list(content)
+            # 随机选择要替换的字符位置
+            chars_to_replace = random.sample(range(content_length), num_chars_to_replace)
+            # 将选中的字符替换为星号
+            for i in chars_to_replace:
+                content_list[i] = '*'
+            # 重新组合成字符串
+            doc.page_content = '「模糊的记忆（`*`星号意味着暂时没想起来的细节）」' + ''.join(content_list)
+
+        docs = [doc for doc, score in docs_and_scores]
+
+        return docs
 
 
     def route_tools(self, state: RetrieveState):
@@ -347,24 +372,3 @@ class RetrieveGraph(BaseGraph):
             return 'final'
         else:
             return 'active_processing'
-
-
-def parse_documents(documents: list[Document]) -> str:
-    """将文档列表转换为(AI)可读的字符串"""
-    output = []
-    # 反过来从分数最低的开始读取
-    for doc in reversed(documents):
-        content = doc.page_content
-        memory_type = doc.metadata["type"]
-        timestamp = doc.metadata.get("creation_timestamp")
-        if timestamp is not None:
-            try:
-                readable_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-            except (OverflowError, OSError, ValueError):
-                readable_time = "时间戳解析失败"
-        else:
-            readable_time = "未知时间"
-        output.append(f"记忆类型：{memory_type}\n记忆创建时间: {readable_time}\n记忆内容: {content}")
-    if not output:
-        return "没有找到任何匹配的记忆。"
-    return "\n\n".join(output)

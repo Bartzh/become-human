@@ -19,7 +19,10 @@ from langchain_core.messages import (
     BaseMessageChunk,
     AIMessageChunk
 )
+from langchain_core.documents import Document
+from langchain_core.messages.utils import trim_messages, count_tokens_approximately
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.prebuilt import ToolNode, tools_condition, InjectedState
 from langgraph.types import Command
 
@@ -34,15 +37,16 @@ from become_human.graph_base import BaseGraph
 from become_human.memory import MemoryManager
 from become_human.graph_retrieve import RetrieveGraph
 from become_human.graph_recycle import RecycleGraph
-from become_human.utils import parse_time, parse_messages, extract_text_parts, parse_seconds
-from become_human.config import get_thread_main_config
+from become_human.utils import parse_time, parse_messages, extract_text_parts, parse_seconds, parse_documents
+from become_human.config import get_thread_main_config, get_thread_recycle_config
 
 from datetime import datetime, timezone, timedelta
 import uuid
 import os
-import requests
 import random
 from warnings import warn
+
+import aiohttp
 
 from langgraph.graph.message import _add_messages_wrapper, _format_messages, Messages, REMOVE_ALL_MESSAGES
 
@@ -278,6 +282,8 @@ class State(BaseModel):
     input_messages: Annotated[list[HumanMessage], add_messages] = Field(default_factory=list)
     new_messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list)
     tool_messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list)
+    recycle_messages: list[AnyMessage] = Field(default_factory=list)
+    overflow_messages: list[AnyMessage] = Field(default_factory=list)
     last_chat_timestamp: float = Field(default_factory=lambda: datetime.now(timezone.utc).timestamp())
     active_timestamp: float = Field(default=0.0)
     self_call_timestamps: list[float] = Field(default_factory=list)
@@ -326,13 +332,15 @@ async def web_search(query: Annotated[str, '要搜索的信息'], recency_filter
     if recency_filter:
         data["search_recency_filter"] = recency_filter
  
-    response = requests.post(url, headers=headers, json=data, timeout=20)
- 
-    if response.status_code == 200:
-        references = response.json()["references"]
-        parsed_references = '以下是搜索到的网页信息：\n\n' + '\n\n'.join([f'- date: {reference["date"]}, title: {reference["title"]}, content: {reference["content"]}' for reference in references])
-    else:
-        raise Exception(f"网页搜索API请求失败，状态码: {response.status_code}, 错误信息: {response.text}")
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=20)) as response:
+            if response.status == 200:
+                response_json = await response.json()
+                references = response_json["references"]
+                parsed_references = '以下是搜索到的网页信息：\n\n' + '\n\n'.join([f'- date: {reference["date"]}, title: {reference["title"]}, content: {reference["content"]}' for reference in references])
+            else:
+                error_text = await response.text()
+                raise Exception(f"网页搜索API请求失败，状态码: {response.status}, 错误信息: {error_text}")
     return parsed_references
 
 
@@ -355,8 +363,7 @@ class MainGraph(BaseGraph):
     streaming_tools: StreamingTools
     thread_run_ids: dict[str, str]
     thread_interrupt_datas: dict[str, dict[str, Union[AIMessageChunk, list[ToolMessage]]]]
-    recycling_thread_ids: set[str]
-    thread_recycled_messages: dict[str, list[RemoveMessage]]
+    thread_messages_to_update: dict[str, list[BaseMessage]]
 
     def __init__(
         self,
@@ -383,8 +390,7 @@ class MainGraph(BaseGraph):
         self.streaming_tools = StreamingTools()
         self.thread_run_ids = {}
         self.thread_interrupt_datas = {}
-        self.recycling_thread_ids = set()
-        self.thread_recycled_messages = {}
+        self.thread_messages_to_update = {}
 
         self.retrieve_graph = retrieve_graph
         self.recycle_graph = recycle_graph
@@ -392,10 +398,11 @@ class MainGraph(BaseGraph):
         graph_builder = StateGraph(State, config_schema=MainConfigSchema)
 
         graph_builder.add_node("begin", self.begin)
-        graph_builder.add_node("prepare_for_generate", self.prepare_for_generate)
+        graph_builder.add_node("prepare_to_generate", self.prepare_to_generate)
         graph_builder.add_node("chatbot", self.chatbot)
         graph_builder.add_node("final", self.final)
         graph_builder.add_node("recycle_messages", self.recycle_messages)
+        graph_builder.add_node("prepare_to_recycle", self.prepare_to_recycle)
 
         tool_node = ToolNode(tools=self.tools, messages_key="tool_messages")
         graph_builder.add_node("tools", tool_node)
@@ -404,7 +411,7 @@ class MainGraph(BaseGraph):
 
         graph_builder.add_edge(START, "begin")
         graph_builder.add_edge("tools", "tool_node_post_process")
-        graph_builder.add_conditional_edges("tool_node_post_process", self.route_tools)
+        graph_builder.add_edge("prepare_to_recycle", "recycle_messages")
         graph_builder.add_edge("recycle_messages", "final")
         graph_builder.add_edge("final", END)
         self.graph_builder = graph_builder
@@ -426,15 +433,21 @@ class MainGraph(BaseGraph):
         return instance
 
 
-    async def final(self, state: State):
-        return
+    async def final(self, state: State, config: RunnableConfig):
+        thread_run_id = config["configurable"]["thread_run_id"]
+        thread_id = config["configurable"]["thread_id"]
+        messages_to_update, new_messages_to_update = self.pop_messages_to_update(thread_id, thread_run_id, state.messages, state.new_messages)
+        if messages_to_update:
+            return {"messages": messages_to_update, "new_messages": new_messages_to_update}
+        else:
+            return
 
 
-    async def begin(self, state: State, config: RunnableConfig) -> Command[Literal["prepare_for_generate", "final"]]:
+    async def begin(self, state: State, config: RunnableConfig) -> Command[Literal["prepare_to_generate", "final"]]:
         thread_id = config["configurable"]["thread_id"]
         current_timestamp = datetime.now(timezone.utc).timestamp()
 
-        new_state = {"generated": False, "new_messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)]}
+        new_state = {"generated": False, "new_messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)], "recycle_messages": [], "overflow_messages": []}
 
         # active_timestamp不需要在意睡觉的问题
         if not state.active_timestamp:
@@ -455,8 +468,14 @@ class MainGraph(BaseGraph):
             wakeup_call_timestamp = state.wakeup_call_timestamp
 
         messages = []
-        if self.thread_recycled_messages.get(thread_id):
-            messages.extend(self.thread_recycled_messages.pop(thread_id))
+        thread_run_id = config["configurable"]["thread_run_id"]
+        update_messages = self.pop_messages_to_update(thread_id, thread_run_id)[0]
+        if update_messages:
+            messages.extend(update_messages)
+            input_message_ids = [message.id for message in state.input_messages if message.id]
+            update_input_messages = [message for message in update_messages if message.id in input_message_ids]
+            if update_input_messages:
+                new_state["input_messages"] = update_input_messages
 
         interrupt_data = self.thread_interrupt_datas.get(thread_id)
         if interrupt_data:
@@ -503,12 +522,12 @@ class MainGraph(BaseGraph):
 
 
         if can_self_call or (not is_self_call and current_timestamp < active_timestamp):
-            return Command(update=new_state, goto='prepare_for_generate')
+            return Command(update=new_state, goto='prepare_to_generate')
         else:
             return Command(update=new_state, goto='final')
 
 
-    async def prepare_for_generate(self, state: State, config: RunnableConfig) -> Command[Literal["chatbot", "final"]]:
+    async def prepare_to_generate(self, state: State, config: RunnableConfig) -> Command[Literal["chatbot", "final"]]:
 
         new_state = {}
         new_state["generated"] = True
@@ -587,7 +606,16 @@ class MainGraph(BaseGraph):
         if input_messages:
             search_string = "\n\n".join(["\n".join(extract_text_parts(message.content)) for message in input_messages])
             result = await self.retrieve_graph.graph.ainvoke({"input": search_string, "type": "passive"}, config)
-            content = result.get("output") if result.get("output") else "被动检索记忆失败，请无视此消息。"
+            if result.get("error"):
+                content = result.get("error")
+            else:
+                docs: list[Document] = result.get("output", [])
+                if docs:
+                    message_ids = [m.id for m in state.messages if m.id]
+                    docs = [doc for doc in docs if doc.id not in message_ids]
+                    content = parse_documents(docs)
+                else:
+                    content = "未检索到任何记忆，请无视此消息。"
             message = HumanMessage(
                 content=f'以下是根据用户输入自动从你的记忆（数据库）中检索到的内容，可能会出现无关信息，如果需要进一步检索请调用工具`retrieve_memories`：\n\n\n{content}',
                 name="system",
@@ -600,9 +628,12 @@ class MainGraph(BaseGraph):
         new_state["new_messages"] = input_messages + new_messages
 
 
-        if self.thread_run_ids.get(thread_id) and self.thread_run_ids.get(thread_id) == config["configurable"]["thread_run_id"]:
-            if self.thread_recycled_messages.get(thread_id):
-                new_state["messages"] = self.thread_recycled_messages.pop(thread_id) + new_messages
+        thread_run_id = config["configurable"]["thread_run_id"]
+        if self.thread_run_ids.get(thread_id) and self.thread_run_ids.get(thread_id) == thread_run_id:
+            update_messages, update_new_messages = self.pop_messages_to_update(thread_id, thread_run_id, state.messages, state.new_messages)
+            if update_messages:
+                new_state["messages"] = update_messages + new_messages
+                new_state["new_messages"] = input_messages + update_new_messages + new_messages
             return Command(update=new_state, goto="chatbot")
         else:
             return Command(goto="final")
@@ -711,8 +742,10 @@ class MainGraph(BaseGraph):
         if self.thread_run_ids.get(thread_id) and self.thread_run_ids.get(thread_id) == thread_run_id:
             if not isinstance(response, AIMessage):
                 raise ValueError("WTF the response is not an AIMessage???")
-            if self.thread_recycled_messages.get(thread_id):
-                new_state["messages"] = self.thread_recycled_messages.pop(thread_id) + [response]
+            update_messages, update_new_messages = self.pop_messages_to_update(thread_id, thread_run_id, state.messages, state.new_messages)
+            if update_messages:
+                new_state["messages"] = update_messages + [response]
+                new_state["new_messages"] = update_new_messages + [response]
             if hasattr(response, "tool_calls") and len(response.tool_calls) > 0:
                 new_state["tool_messages"] = [RemoveMessage(id=REMOVE_ALL_MESSAGES), response]
                 return Command(update=new_state, goto="tools")
@@ -721,30 +754,7 @@ class MainGraph(BaseGraph):
             return Command(goto="final")
 
 
-    def route_tools(self, state: State):
-        direct_exit = True
-        #for message in reversed(state.messages):
-        #    if isinstance(message, ToolMessage):
-        #        if isinstance(message.artifact, dict) and message.artifact.get('bh_streaming', False):
-        #            pass
-        #        else:
-        #            direct_exit = False
-        #            break
-        #    else:
-        #        break
-        for message in state.tool_messages[1:]:
-            if isinstance(message.artifact, dict) and message.artifact.get('bh_streaming', False):
-                pass
-            else:
-                direct_exit = False
-                break
-        if direct_exit:
-            return 'recycle_messages'
-        else:
-            return 'chatbot'
-
-
-    async def tool_node_post_process(self, state: State, config: RunnableConfig):
+    async def tool_node_post_process(self, state: State, config: RunnableConfig) -> Command[Literal['chatbot', 'prepare_to_recycle']]:
         #tool_messages = []
         #for message in reversed(state.messages):
         #    if isinstance(message, ToolMessage):
@@ -753,28 +763,78 @@ class MainGraph(BaseGraph):
         #        break
         tool_messages = state.tool_messages[1:]
         thread_id = config["configurable"]["thread_id"]
-        if self.thread_recycled_messages.get(thread_id):
-            messages = self.thread_recycled_messages.pop(thread_id) + tool_messages
+        thread_run_id = config["configurable"]["thread_run_id"]
+        update_messages, update_new_messages = self.pop_messages_to_update(thread_id, thread_run_id, state.messages, state.new_messages)
+        if update_messages:
+            new_state = {"new_messages": update_new_messages + tool_messages, "messages": update_messages + tool_messages}
         else:
-            messages = tool_messages
-        return {"new_messages": tool_messages, "messages": messages}
+            new_state = {"new_messages": tool_messages, "messages": tool_messages}
 
+        direct_exit = True
+        for message in tool_messages:
+            if isinstance(message.artifact, dict) and message.artifact.get('bh_streaming', False):
+                pass
+            else:
+                direct_exit = False
+                break
+
+        if direct_exit:
+            return Command(update=new_state, goto="prepare_to_recycle")
+        else:
+            return Command(update=new_state, goto='chatbot')
+
+    async def prepare_to_recycle(self, state: State, config: RunnableConfig):
+        thread_id = config["configurable"]["thread_id"]
+        new_state = {}
+        messages = state.messages
+
+        recycle_messages = []
+        for message in messages:
+            if not isinstance(message, RemoveMessage) and not message.additional_kwargs.get("bh_recycled"):
+                message.additional_kwargs["bh_recycled"] = True
+                recycle_messages.append(message)
+
+        if count_tokens_approximately(messages) > get_thread_recycle_config(thread_id).recycle_trigger_threshold:
+            max_tokens = get_thread_recycle_config(thread_id).recycle_target_size
+            new_messages = trim_messages(
+                messages=messages,
+                max_tokens=max_tokens,
+                token_counter=count_tokens_approximately,
+                strategy='last',
+                start_on=HumanMessage,
+                allow_partial=True,
+                text_splitter=RecursiveCharacterTextSplitter(chunk_size=max_tokens, chunk_overlap=0)
+            )
+            if not new_messages:
+                warn("Trim messages failed.")
+                new_messages = []
+            excess_count = len(messages) - len(new_messages)
+            old_messages = messages[:excess_count]
+            remove_messages = [RemoveMessage(id=message.id) for message in old_messages]
+            new_state["overflow_messages"] = old_messages
+            new_state["messages"] = recycle_messages + remove_messages
+            new_state["new_messages"] = remove_messages
+            new_state["tool_messages"] = remove_messages
+        else:
+            new_state["messages"] = recycle_messages
+        new_state["recycle_messages"] = recycle_messages
+        return new_state
 
     async def recycle_messages(self, state: State, config: RunnableConfig):
+        if state.recycle_messages:
+            recycle_input = {"input_messages": state.recycle_messages, "recycle_type": "original"}
+            if state.overflow_messages:
+                await self.recycle_graph.graph.abatch([recycle_input, {"input_messages": state.overflow_messages, "recycle_type": "extract"}], config)
+            else:
+                await self.recycle_graph.graph.ainvoke(recycle_input, config)
+
+        thread_run_id = config["configurable"]["thread_run_id"]
         thread_id = config["configurable"]["thread_id"]
-        if thread_id not in self.recycling_thread_ids:
-            self.recycling_thread_ids.add(thread_id)
-            recycle_response = await self.recycle_graph.graph.ainvoke({"input_messages": state.messages}, config)
-            if recycle_response.get("success"):
-                if self.thread_recycled_messages.get(thread_id):
-                    self.thread_recycled_messages[thread_id].extend(recycle_response["remove_messages"])
-                else:
-                    self.thread_recycled_messages[thread_id] = recycle_response["remove_messages"]
-            try:
-                self.recycling_thread_ids.remove(thread_id)
-            except KeyError:
-                warn("recycling_thread_id已被意外移除")
+        update_messages, update_new_messages = self.pop_messages_to_update(thread_id, thread_run_id, state.messages, state.new_messages)
+        if update_messages:
+            return {"messages": update_messages, "new_messages": update_new_messages}
         return
+
 
 
     async def update_agent_state(self, state: State):
@@ -806,6 +866,54 @@ class MainGraph(BaseGraph):
             }
         )
         return {"agent_state": extractor_result["responses"]}
+
+
+    async def update_messages(self, thread_id: str, messages: list[BaseMessage]):
+        if not thread_id or not messages:
+            return
+        config = {"configurable": {"thread_id": thread_id}}
+        state = await self.graph.aget_state(config)
+        if state.next:
+            if self.thread_messages_to_update.get(thread_id):
+                self.thread_messages_to_update[thread_id].extend(messages)
+            else:
+                self.thread_messages_to_update[thread_id] = messages
+        else:
+            input_messages: list[AnyMessage] = state.values.get("input_messages", [])
+            if input_messages:
+                input_message_ids = [message.id for message in input_messages if message.id]
+                update_input_messages = [message for message in messages if message.id in input_message_ids]
+                await self.graph.aupdate_state(config, {"messages": messages, "input_messages": update_input_messages})
+            else:
+                await self.graph.aupdate_state(config, {"messages": messages})
+        return
+
+    async def get_messages(self, thread_id: str) -> list[BaseMessage]:
+        state = await self.graph.aget_state({"configurable": {"thread_id": thread_id}})
+        messages: list[AnyMessage] = state.values.get("messages", [])
+        if not messages:
+            return []
+        update_messages = self.thread_messages_to_update.get(thread_id, [])
+        if update_messages:
+            messages = add_messages(messages, update_messages)
+        return messages
+
+    def pop_messages_to_update(self, thread_id: str, thread_run_id: str, current_messages: Optional[list[AnyMessage]] = None, current_new_messages: list[AnyMessage] = []) -> tuple[list[BaseMessage], list[BaseMessage]]:
+        if self.thread_run_ids.get(thread_id) and self.thread_run_ids.get(thread_id) == thread_run_id:
+            update_messages = self.thread_messages_to_update.pop(thread_id, [])
+            update_new_messages: list[BaseMessage] = []
+            if update_messages and current_messages is not None:
+                current_message_ids = [m.id for m in current_messages if m.id]
+                current_new_message_ids = [m.id for m in current_new_messages if m.id]
+                for m in update_messages:
+                    if m.id in current_message_ids:
+                        if m.id in current_new_message_ids:
+                            update_new_messages.append(m)
+                    else:
+                        update_new_messages.append(m)
+            return update_messages, update_new_messages
+        return [], []
+
 
 
 def parse_agent_state(agent_state: list[StateEntry]) -> str:

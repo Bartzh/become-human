@@ -98,7 +98,7 @@ class MemoryManager():
             if timer['left'] >= timer['threshold']:
                 timer['left'] = 0
                 for t in types:
-                    where = validate_where({'$and': [{'stable_time': item} for item in timer['stable_time_range']]})
+                    where = validated_where({'$and': [{'stable_time': item} for item in timer['stable_time_range']]})
                     result = await self.aget(
                         thread_id=thread_id,
                         memory_type=t,
@@ -121,7 +121,7 @@ class MemoryManager():
 
         x = (current_timestamp - metadata["last_accessed_timestamp"]) / metadata["stable_time"]
         if x >= 1:
-            return {"forgot": True}
+            return {"forgot": True, "retrievability": 0.0}
         retrievability = 1 - x ** 0.4
 
         return {"retrievability": retrievability}
@@ -173,7 +173,7 @@ class MemoryManager():
             else:
                 metadatas_new.append(metadata_patch)
         if ids_to_delete:
-            await self.get_collection(thread_id, memory_type).delete(ids=list[ids_to_delete])
+            self.get_collection(thread_id, memory_type).delete(ids=list(ids_to_delete))
         await self.aupdate_metadatas(ids, metadatas_new, memory_type, thread_id)
 
 
@@ -235,7 +235,7 @@ class MemoryManager():
     async def retrieve_memories(self,
                                 inputs: list[RetrieveInput],
                                 thread_id: str
-                                ) -> list[Document]:
+                                ) -> list[tuple[Document, float]]:
         """检索记忆向量库中的文档并返回排序结果。"""
 
         # 构建有效输入字典：过滤掉无效输入（无搜索字符串或k<=0）
@@ -259,9 +259,11 @@ class MemoryManager():
         if not inputs and not gets:
                 raise ValueError("没有要检索的记忆！")
 
-        combined_docs: list[Document] = []
+        combined_docs_and_scores: list[tuple[Document, float]] = []
 
         current_timestamp = datetime.now(timezone.utc).timestamp()
+
+        ids_to_delete = {"original": set(), "summary": set(), "semantic": set()}
 
         # 这里是纯时间过滤的检索
         if gets:
@@ -269,23 +271,30 @@ class MemoryManager():
                 results = await self.aget(
                     thread_id=thread_id,
                     memory_type=g["search_type"],
-                    where=validate_where({"$and": g["metadata_filter"]}),
+                    where=validated_where({"$and": g["metadata_filter"]}),
                     limit=g["k"],
                 )
                 docs = results_to_docs(results)
-                combined_docs.extend(docs)
+                ids = []
                 metadatas = []
                 strength = g["strength"]
-                for metadata in results["metadatas"][0]:
-                    metadatas.append(self.recall(
-                        metadata=metadata,
+                for doc in docs:
+                    patched_metadata = self.recall(
+                        metadata=doc.metadata,
                         current_timestamp=current_timestamp,
                         strength=strength
-                    ))
-                await self.aupdate_metadatas(results["ids"][0], metadatas, g["search_type"], thread_id)
+                    )
+                    if patched_metadata.get("forgot"):
+                        ids_to_delete[g["search_type"]].add(doc.id)
+                    else:
+                        ids.append(doc.id)
+                        metadatas.append(patched_metadata)
+                        doc.metadata.update(patched_metadata)
+                await self.aupdate_metadatas(ids, metadatas, g["search_type"], thread_id)
+                combined_docs_and_scores.extend([(doc, doc.metadata["retrievability"]) for doc in docs if doc.id not in ids_to_delete[g["search_type"]]])
     
         if not inputs:
-            return combined_docs
+            return combined_docs_and_scores
 
 
         search_strings = []
@@ -322,9 +331,6 @@ class MemoryManager():
             input["search_embedding"] = search_embeddings[embeddings_index]
 
 
-        # 初始化合并结果列表
-        combined_docs_and_scores: list[tuple[Document, float]] = []
-
         current_timestamp = datetime.now(timezone.utc).timestamp()
 
         # 对每个输入类型执行向量搜索
@@ -337,7 +343,7 @@ class MemoryManager():
                     k=input["k"],
                     similarity_weight=input["similarity_weight"],
                     retrievability_weight=["retrievability_weight"],
-                    filter=validate_where({"$and": input.get("metadata_filter", [])}) if input.get("metadata_filter") else None
+                    filter=validated_where({"$and": input.get("metadata_filter", [])}) if input.get("metadata_filter") else None
                 )
             elif input["search_method"] == "mmr":
                 docs_and_scores = await self.amax_marginal_relevance_search_by_vector_with_retrievability(
@@ -349,21 +355,29 @@ class MemoryManager():
                     similarity_weight=input["similarity_weight"],
                     retrievability_weight=input["retrievability_weight"],
                     diversity_weight=input["diversity_weight"],
-                    filter=validate_where({"$and": input.get("metadata_filter", [])}) if input.get("metadata_filter") else None
+                    filter=validated_where({"$and": input.get("metadata_filter", [])}) if input.get("metadata_filter") else None
                 )
-            combined_docs_and_scores.extend(docs_and_scores)
             ids = []
             metadatas = []
             strength = input["strength"]
             for doc, score in docs_and_scores:
-                ids.append(doc.id)
-                metadatas.append(self.recall(
+                patched_metadata = self.recall(
                     metadata=doc.metadata,
                     current_timestamp=current_timestamp,
                     strength=strength
-                ))
+                )
+                if patched_metadata.get("forgot"):
+                    ids_to_delete[input["search_type"]].add(doc.id)
+                else:
+                    ids.append(doc.id)
+                    metadatas.append(patched_metadata)
             await self.aupdate_metadatas(ids, metadatas, input["search_type"], thread_id)
+            combined_docs_and_scores.extend([_ for _ in docs_and_scores if _[0].id not in ids_to_delete[input["search_type"]]])
 
+
+        for memory_type, delete_ids in ids_to_delete.items():
+            if delete_ids:
+                self.get_collection(thread_id, memory_type).delete(ids=list(delete_ids))
 
 
         # 按照score降序排序（score越大索引越小）
@@ -372,10 +386,10 @@ class MemoryManager():
         #TODO：可以做一个最大token限制，如果超出限制，则删除掉token最多的文档再试一次
 
 
-        combined_docs = [doc for doc, score in combined_docs_and_scores] + combined_docs
+        #combined_docs = [doc for doc, score in combined_docs_and_scores] + combined_docs
 
 
-        return combined_docs
+        return combined_docs_and_scores
 
 
     def update_metadatas(self, ids: list[str], metadatas: list[dict], memory_type: str, thread_id: str) -> None:
@@ -769,7 +783,7 @@ class MemoryManager():
             }
         )
 
-def validate_where(where: dict) -> Optional[dict]:
+def validated_where(where: dict) -> Optional[dict]:
     '''只解决在and或or时列表里不能只有一个元素的问题'''
     key = list(where.keys())[0]
     if (key == "$and" or key == "$or"):
@@ -820,19 +834,19 @@ def results_to_docs_and_scores(results: Any) -> list[tuple[Document, float]]:
 def calculate_stability_curve(retrievability: float) -> float:
     r = retrievability
 
-    #从0到1到-1，顶点r≈0.4
+    #r1=0, r0.4≈1, r0=-1
     #x = (1 - r) ** 2 + 2 * (1 - r) * r * 0.1
     #y = (1 - r) ** 2 * -1 + 2 * (1 - x) * x * 2.815
 
-    #从1到2到0，顶点r≈0.4
+    #r1=1, r0.4≈2, r0=0
     #x = (1 - r) ** 2 + 2 * (1 - r) * r * 0.2
     #y = 2 * (1 - x) * x * 3.7 + r ** 2
 
-    #从1到3到0，顶点r≈0.4
+    #r1=1, r0.4≈3, r0=0
     #x = (1 - r) ** 2 + 2 * (1 - r) * r * 0.2
     #y = 2 * (1 - x) * x * 5.72 + r ** 2
 
-    #从1到2.5到0，顶点r≈0.4
+    #r1=1, r0.4≈2.5, r0=0
     x = (1 - r) ** 2 + 2 * (1 - r) * r * 0.2
     y = 2 * (1 - x) * x * 4.71 + r ** 2
     return y
