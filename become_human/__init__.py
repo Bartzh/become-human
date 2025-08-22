@@ -273,7 +273,7 @@ class HeartbeatManager:
     async def start(self):
         for key, value in get_thread_configs().items():
             if value.init_on_startup:
-                await init_thread(key)
+                await self.init_thread(key)
         if self.task is None:
             self.task = asyncio.create_task(self.heartbeat_task())
 
@@ -331,7 +331,7 @@ class HeartbeatManager:
 
         # 闲置过久则关闭线程
         elif current_timestamp > (self.thread_ids[thread_id]["created_at"] + 1209600):
-            close_thread(thread_id)
+            self.close_thread(thread_id)
 
 
     async def init_thread(self, thread_id: str):
