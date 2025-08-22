@@ -122,7 +122,7 @@ def _merge_tomls(override: Table, default: Table) -> Table:
     for key, value in override.items():
         if key in default.keys() and isinstance(value, Table) and isinstance(default[key], Table):
             default[key] = loads(__merge_tomls(default[key], value).as_string().strip())
-        elif key not in default.keys():
+        elif key in default.keys():
             default[key] = value
     return default
 
