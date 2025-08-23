@@ -119,9 +119,13 @@ class MemoryManager():
         """
         #retrievability = metadata["retrievability"] * math.exp(-delta_t / metadata["stability"])
 
+        if metadata["stable_time"] == 0.0:
+            print('意外的stable_time为0，metadata：' + str(metadata))
+            return {"forgot": True}
+
         x = (current_timestamp - metadata["last_accessed_timestamp"]) / metadata["stable_time"]
         if x >= 1:
-            return {"forgot": True, "retrievability": 0.0}
+            return {"forgot": True}
         retrievability = 1 - x ** 0.4
 
         return {"retrievability": retrievability}
