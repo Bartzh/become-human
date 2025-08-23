@@ -162,19 +162,21 @@ class MemoryManager():
             return
         ids = results["ids"]
         metadatas = results["metadatas"]
-        metadatas_new = []
         if len(ids) != len(metadatas):
             raise ValueError("ids and metadatas must have the same length")
+        metadatas_new = []
+        ids_new = []
         ids_to_delete = set()
         for i in range(len(ids)):
             metadata_patch = self.update(metadatas[i], current_timestamp)
             if metadata_patch.get("forgot"):
                 ids_to_delete.add(ids[i])
             else:
+                ids_new.append(ids[i])
                 metadatas_new.append(metadata_patch)
         if ids_to_delete:
             self.get_collection(thread_id, memory_type).delete(ids=list(ids_to_delete))
-        await self.aupdate_metadatas(ids, metadatas_new, memory_type, thread_id)
+        await self.aupdate_metadatas(ids_new, metadatas_new, memory_type, thread_id)
 
 
     class InitialMemory(BaseModel):
