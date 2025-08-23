@@ -107,7 +107,7 @@ class MemoryManager():
                     )
                     if result['ids']:
                         await self.update_memories(result, t, thread_id)
-                        update_count += len(result['ids'][0])
+                        update_count += len(result['ids'])
 
         await self.set_timer_to_db(data['thread_id'], data['update_timers'], data['last_update_timestamp'])
         print(f'updated {update_count} memories for thread "{data['thread_id']}".')
@@ -156,12 +156,12 @@ class MemoryManager():
 
         return metadata_patch
 
-    async def update_memories(self, collection: dict[str, Any], memory_type: str, thread_id: str) -> None:
+    async def update_memories(self, results: dict[str, Any], memory_type: str, thread_id: str) -> None:
         current_timestamp = datetime.now(timezone.utc).timestamp()
-        if not collection["ids"]:
+        if not results["ids"]:
             return
-        ids = collection["ids"][0]
-        metadatas = collection["metadatas"][0]
+        ids = results["ids"]
+        metadatas = results["metadatas"]
         metadatas_new = []
         if len(ids) != len(metadatas):
             raise ValueError("ids and metadatas must have the same length")
@@ -274,7 +274,7 @@ class MemoryManager():
                     where=validated_where({"$and": g["metadata_filter"]}),
                     limit=g["k"],
                 )
-                docs = results_to_docs(results)
+                docs = get_results_to_docs(results)
                 ids = []
                 metadatas = []
                 strength = g["strength"]
@@ -809,6 +809,20 @@ def results_to_docs(results: Any) -> list[Document]:
             results["documents"][0],
             results["metadatas"][0],
             results["ids"][0],
+        )
+    ]
+
+def get_results_to_docs(results: dict[str, Any]) -> list[Document]:
+    if not results['ids']:
+        return []
+    return [
+        # TODO: Chroma can do batch querying,
+        # we shouldn't hard code to the 1st result
+        Document(page_content=result[0], metadata=result[1] or {}, id=result[2])
+        for result in zip(
+            results["documents"],
+            results["metadatas"],
+            results["ids"],
         )
     ]
 
