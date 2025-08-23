@@ -111,7 +111,7 @@ class RetrieveGraph(BaseGraph):
     如果输入为空，则会使用create_time_range直接获取限定时间范围的一些记忆。如果create_time_range也为空，则输入无效。
 
 2. create_time_range: Optional[str] = None
-    用于限定搜索结果的时间范围，格式为"2023-01-01 00:00:00,2023-01-01 23:59:59"，也即%Y-%m-%d,%H:%M:%S
+    用于限定搜索结果的时间范围，格式为"2023-01-01 00:00:00,2023-01-01 23:59:59"，也即%Y-%m-%d %H:%M:%S,%Y-%m-%d %H:%M:%S
     默认为空，表示不限制时间范围。
     由于是使用filter直接在程序上过滤掉了这个范围以外的记忆，所以比起在search_string中描述时间范围，使用create_time_range会更快且更准确。
     但也需要注意这里的create_time，准确来说指的是记忆的创建时间，这个时间是在记忆被创建时自动生成的。

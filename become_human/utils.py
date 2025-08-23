@@ -23,7 +23,7 @@ def parse_time(time: Union[dict, datetime, float, int]) -> str:
     try:
         if isinstance(time, (float, int)):
             time = datetime.fromtimestamp(time)
-        return time.strftime("%Y-%m-%d %H:%M:%S")
+        return time.strftime("%Y-%m-%d %H:%M:%S %A")
     except (OverflowError, OSError, ValueError):
         return "时间信息损坏"
 
@@ -73,10 +73,7 @@ def parse_message(message: AnyMessage) -> str:
     return ""
 
 def parse_messages(messages: list[AnyMessage]) -> str:
-    messages_string = ""
-    for message in messages:
-        messages_string += parse_message(message) + "\n\n\n"
-    return messages_string
+    return '\n\n\n'.join([parse_message(message) for message in messages])
 
 
 def parse_documents(documents: list[Document]) -> str:
@@ -87,11 +84,8 @@ def parse_documents(documents: list[Document]) -> str:
         content = doc.page_content
         memory_type = doc.metadata["type"]
         timestamp = doc.metadata.get("creation_timestamp")
-        if timestamp is not None:
-            try:
-                readable_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-            except (OverflowError, OSError, ValueError):
-                readable_time = "时间戳解析失败"
+        if isinstance(timestamp, (float, int)):
+            readable_time = parse_time(timestamp)
         else:
             readable_time = "未知时间"
         output.append(f"记忆类型：{memory_type}\n记忆创建时间: {readable_time}\n记忆内容: {content}")

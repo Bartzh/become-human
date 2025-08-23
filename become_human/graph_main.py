@@ -306,7 +306,7 @@ async def send_message(message: Annotated[str, '要发送的消息'], messages: 
     return content, artifact
 
 @tool
-async def web_search(query: Annotated[str, '要搜索的信息'], recency_filter: Annotated[Optional[Literal['week', 'month', 'semiyear', 'year']], '可选的根据网站发布时间的时间范围过滤器，若为空则意味着不限时间'] = None) -> str:
+async def web_search(query: Annotated[str, '要搜索的信息'], recency_filter: Annotated[Optional[Literal['week', 'month', 'semiyear', 'year']], '可选的根据网站发布时间的时间范围过滤器，若为空则意味着不限时间。注意如果不是特别追求时效性的信息最好不要使用此选项，容易导致可搜索到的信息少进而导致相关性低。'] = None) -> str:
     """使用网页搜索获取信息"""
     url = 'https://qianfan.baidubce.com/v2/ai_search/chat/completions'
     api_key = os.getenv('QIANFAN_API_KEY')
