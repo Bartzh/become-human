@@ -485,13 +485,26 @@ role_prompt: The role prompt to set for the user"""
             message = parse_messages(main_messages)
         else:
             message = "消息为空。"
-    
+
     elif user_input == "/tokens":
         main_state = await main_graph.graph.aget_state(config)
         if main_messages := main_state.values.get("messages"):
             message = count_tokens_approximately(main_messages)
         else:
             message = "消息为空。"
+
+    elif user_input.startswith("/memories ") or user_input == "/memories":
+        if user_input == "/memories":
+            message = "Usage: /memories <original|summary|semantic> [offset] [limit]"
+        else:
+            splited_input = user_input.split(" ")
+            memory_type = splited_input[1]
+            limit = int(splited_input[3]) if len(splited_input) > 3 else 6
+            offset = int(splited_input[2]) if len(splited_input) > 2 else None
+            get_result = await memory_manager.aget(thread_id=thread_id, memory_type=memory_type, limit=limit, offset=offset)
+            message = '\n\n\n'.join([f'id: {get_result["ids"][i]}\n\ncontent: {get_result["documents"][i]}\n\nmetadata: {'\n'.join([f'{k}: {str(v)}' for k, v in get_result["metadatas"][i].items()])}' for i in range(len(get_result["ids"]))])
+            if not message:
+                message = "没有找到任何记忆。"
 
     #return {"name": "log", "args": {"message": message}}
     await event_queue.put({"thread_id": thread_id, "name": "log", "args": {"message": message}, "id": 'command-' + str(uuid4())})
