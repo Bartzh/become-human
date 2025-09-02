@@ -13,6 +13,7 @@ import numpy as np
 import json
 import jieba
 
+from become_human.time import seconds_to_datetime, AgentTimeSettings, get_agent_time_zone, now_seconds
 
 from langchain_core.runnables.config import run_in_executor
 
@@ -43,7 +44,7 @@ class MemoryManager():
                 CREATE TABLE IF NOT EXISTS update_timers (
                     thread_id TEXT PRIMARY KEY,
                     timer_data TEXT NOT NULL,
-                    last_update_timestamp REAL NOT NULL
+                    last_update_time_seconds REAL NOT NULL
                 )
             ''')
             await db.commit()
@@ -51,7 +52,7 @@ class MemoryManager():
     async def get_timer_from_db(self, thread_id: str) -> dict:
         async with aiosqlite.connect(self.timer_db_path) as db:
             async with db.execute(
-                'SELECT timer_data, last_update_timestamp FROM update_timers WHERE thread_id = ?', 
+                'SELECT timer_data, last_update_time_seconds FROM update_timers WHERE thread_id = ?', 
                 (thread_id,)
             ) as cursor:
                 result = await cursor.fetchone()
@@ -59,7 +60,7 @@ class MemoryManager():
                     return {
                         "thread_id": thread_id,
                         "update_timers": json.loads(result[0]),
-                        "last_update_timestamp": result[1]
+                        "last_update_time_seconds": result[1]
                     }
                 else:
                     # 默认值
@@ -72,15 +73,15 @@ class MemoryManager():
                             {'left': 0.0, 'threshold': 500.0, 'stable_time_range': [{'$gte': 864000.0}, {'$lt': 8640000.0}]},
                             {'left': 0.0, 'threshold': 3600.0, 'stable_time_range': [{'$gte': 8640000.0}]},
                         ],
-                        "last_update_timestamp": datetime.now(timezone.utc).timestamp()
+                        "last_update_time_seconds": now_seconds()
                     }
 
-    async def set_timer_to_db(self, thread_id: str, update_timers: list, last_update_timestamp: float) -> None:
+    async def set_timer_to_db(self, thread_id: str, update_timers: list, last_update_time_seconds: float) -> None:
         async with aiosqlite.connect(self.timer_db_path) as db:
             await db.execute('''
-                INSERT OR REPLACE INTO update_timers (thread_id, timer_data, last_update_timestamp)
+                INSERT OR REPLACE INTO update_timers (thread_id, timer_data, last_update_time_seconds)
                 VALUES (?, ?, ?)
-            ''', (thread_id, json.dumps(update_timers), last_update_timestamp))
+            ''', (thread_id, json.dumps(update_timers), last_update_time_seconds))
             await db.commit()
 
 
@@ -90,9 +91,9 @@ class MemoryManager():
         update_count = 0
         data = await self.get_timer_from_db(thread_id)
 
-        current_timestamp = datetime.now(timezone.utc).timestamp()
-        time_diff = current_timestamp - data['last_update_timestamp']
-        data['last_update_timestamp'] = current_timestamp
+        current_time_seconds = now_seconds()
+        time_diff = current_time_seconds - data['last_update_time_seconds']
+        data['last_update_time_seconds'] = current_time_seconds
         for timer in data['update_timers']:
             timer['left'] += time_diff
             if timer['left'] >= timer['threshold']:
@@ -109,11 +110,11 @@ class MemoryManager():
                         await self.update_memories(result, t, thread_id)
                         update_count += len(result['ids'])
 
-        await self.set_timer_to_db(data['thread_id'], data['update_timers'], data['last_update_timestamp'])
+        await self.set_timer_to_db(data['thread_id'], data['update_timers'], data['last_update_time_seconds'])
         print(f'updated {update_count} memories for thread "{data['thread_id']}".')
 
 
-    def update(self, metadata: dict, current_timestamp: float) -> dict:
+    def update(self, metadata: dict, current_time_seconds: float) -> dict:
         """
         更新记忆的可检索性（模拟时间流逝）
         """
@@ -123,23 +124,23 @@ class MemoryManager():
             print('意外的stable_time为0，metadata：' + str(metadata))
             return {"forgot": True}
 
-        x = (current_timestamp - metadata["last_accessed_timestamp"]) / metadata["stable_time"]
+        x = (current_time_seconds - metadata["last_accessed_time_seconds"]) / metadata["stable_time"]
         if x >= 1:
             return {"forgot": True}
         retrievability = 1 - x ** 0.4
 
         return {"retrievability": retrievability}
 
-    def recall(self, metadata: dict, current_timestamp: float, strength: float = 1.0) -> dict:
+    def recall(self, metadata: dict, current_time_seconds: float, time_settings: AgentTimeSettings, strength: float = 1.0) -> dict:
         """
         调用记忆时重置可检索性并增强稳定性
         """
         # 更新可检索性
-        updated_metadata = self.update(metadata, current_timestamp)
+        updated_metadata = self.update(metadata, current_time_seconds)
         if updated_metadata.get("forgot"):
             return {"forgot": True}
 
-        datetime_alpha = calculate_memory_datetime_alpha(datetime.fromtimestamp(current_timestamp))
+        datetime_alpha = calculate_memory_datetime_alpha(seconds_to_datetime(current_time_seconds).astimezone(get_agent_time_zone(time_settings)))
         stable_strength = calculate_stability_curve(updated_metadata["retrievability"])
         stable_time_diff = metadata["stable_time"] * stable_strength - metadata["stable_time"]
         if stable_time_diff >= 0:
@@ -149,7 +150,7 @@ class MemoryManager():
         retrievability = min(1.0, updated_metadata["retrievability"] + strength * datetime_alpha)
 
         metadata_patch = {
-            "last_accessed_timestamp": current_timestamp,
+            "last_accessed_time_seconds": current_time_seconds,
             "retrievability": retrievability,
             "stable_time": stable_time
         }
@@ -161,7 +162,7 @@ class MemoryManager():
         return metadata_patch
 
     async def update_memories(self, results: dict[str, Any], memory_type: str, thread_id: str) -> None:
-        current_timestamp = datetime.now(timezone.utc).timestamp()
+        current_time_seconds = now_seconds()
         if not results["ids"]:
             return
         ids = results["ids"]
@@ -172,7 +173,7 @@ class MemoryManager():
         ids_new = []
         ids_to_delete = set()
         for i in range(len(ids)):
-            metadata_patch = self.update(metadatas[i], current_timestamp)
+            metadata_patch = self.update(metadatas[i], current_time_seconds)
             if metadata_patch.get("forgot"):
                 ids_to_delete.add(ids[i])
             else:
@@ -185,34 +186,34 @@ class MemoryManager():
 
     class InitialMemory(BaseModel):
         content: str = Field(description="The content of the memory")
-        creation_timestamp: float = Field(description="The creation timestamp of the memory")
+        creation_time_seconds: float = Field(description="The creation time seconds of the memory")
         type: Literal["original", "summary", "semantic"] = Field(description="The type of the memory")
         id: str = Field(default_factory=lambda: str(uuid4()), description="The id of the memory")
         stable_time: float = Field(description="The stable time base of the memory", gt=0.0)
 
-    async def add_memories(self, memories: list[InitialMemory], thread_id: str) -> None:
+    async def add_memories(self, memories: list[InitialMemory], thread_id: str, time_settings: AgentTimeSettings) -> None:
         docs: dict[str, list[Document]] = {
             "original": [],
             "summary": [],
             "semantic": []
         }
-        current_timestamp = datetime.now(timezone.utc).timestamp()
+        current_time_seconds = now_seconds()
         for memory in memories:
             # 使用jieba对memory.content进行分词并过滤掉重复词
             words = set(jieba.cut(memory.content))
             max_words_length = 200
             difficulty = 1 - min(1.0, (len(words) / max_words_length) ** 3)
-            datetime_alpha = calculate_memory_datetime_alpha(datetime.fromtimestamp(memory.creation_timestamp))
+            datetime_alpha = calculate_memory_datetime_alpha(seconds_to_datetime(memory.creation_time_seconds).astimezone(get_agent_time_zone(time_settings)))
             stable_time = memory.stable_time * difficulty * datetime_alpha # 稳定性，决定了可检索性的衰减速度
             metadata = {
-                "creation_timestamp": memory.creation_timestamp,
+                "creation_time_seconds": memory.creation_time_seconds,
                 "stable_time": stable_time,
                 "retrievability": 1.0, # 可检索性，决定了检索的概率
                 "difficulty": difficulty, # 难度，决定了稳定性基数增长的多少。可能会出现无法长期保留的记忆，如整本书的内容。
-                "last_accessed_timestamp": memory.creation_timestamp,
+                "last_accessed_time_seconds": memory.creation_time_seconds,
                 "type": memory.type
             }
-            r = self.update(metadata, current_timestamp)
+            r = self.update(metadata, current_time_seconds)
             if not r.get("forgot"):
                 metadata["retrievability"] = r["retrievability"]
                 document = Document(
@@ -240,7 +241,8 @@ class MemoryManager():
         strength: float = Field(description="检索强度，作为stable_time和retrievability的乘数", ge=0)
     async def retrieve_memories(self,
                                 inputs: list[RetrieveInput],
-                                thread_id: str
+                                thread_id: str,
+                                agent_time_settings: AgentTimeSettings
                                 ) -> list[tuple[Document, float]]:
         """检索记忆向量库中的文档并返回排序结果。"""
 
@@ -267,7 +269,7 @@ class MemoryManager():
 
         combined_docs_and_scores: list[tuple[Document, float]] = []
 
-        current_timestamp = datetime.now(timezone.utc).timestamp()
+        current_time_seconds = now_seconds()
 
         ids_to_delete = {"original": set(), "summary": set(), "semantic": set()}
 
@@ -287,7 +289,8 @@ class MemoryManager():
                 for doc in docs:
                     patched_metadata = self.recall(
                         metadata=doc.metadata,
-                        current_timestamp=current_timestamp,
+                        current_time_seconds=current_time_seconds,
+                        time_settings=agent_time_settings,
                         strength=strength
                     )
                     if patched_metadata.get("forgot"):
@@ -337,7 +340,7 @@ class MemoryManager():
             input["search_embedding"] = search_embeddings[embeddings_index]
 
 
-        current_timestamp = datetime.now(timezone.utc).timestamp()
+        current_time_seconds = now_seconds()
 
         # 对每个输入类型执行向量搜索
         for input in inputs:
@@ -369,7 +372,8 @@ class MemoryManager():
             for doc, score in docs_and_scores:
                 patched_metadata = self.recall(
                     metadata=doc.metadata,
-                    current_timestamp=current_timestamp,
+                    current_time_seconds=current_time_seconds,
+                    time_settings=agent_time_settings,
                     strength=strength
                 )
                 if patched_metadata.get("forgot"):

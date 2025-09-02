@@ -2,6 +2,7 @@ from become_human.graph_base import BaseGraph
 from become_human.memory import MemoryManager
 from become_human.config import get_thread_retrieve_config, RetrieveMemoriesConfig
 from become_human.utils import parse_seconds
+from become_human.time import datetime_to_seconds, AgentTimeSettings
 
 from typing import Any, Callable, Dict, Optional, Sequence, Union, Annotated, Literal
 from pydantic import BaseModel, Field
@@ -23,7 +24,7 @@ from langgraph.graph.message import add_messages
 
 from langgraph.prebuilt import ToolNode, tools_condition, InjectedState
 
-from datetime import datetime
+from datetime import datetime, timezone
 import random
 
 import aiosqlite
@@ -34,7 +35,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 class RetrieveMemoriesInput(BaseModel):
     search_string: Optional[str] = Field(default=None, description="要检索的内容")
     #increase_weight: bool = Field(default=False, description="可选，增加检索结果中该种类型记忆出现的比重")
-    create_time_range: Optional[str] = Field(default=None, description='限定检索结果时间范围，格式为"2023-01-01 00:00:00,2023-01-01 23:59:59"，也即%Y-%m-%d %H:%M:%S,%Y-%m-%d %H:%M:%S')
+    create_time_range: Optional[str] = Field(default=None, description='限定检索结果时间范围，格式为"2023-01-01 00:00:00~2023-01-01 23:59:59"，也即%Y-%m-%d %H:%M:%S~%Y-%m-%d %H:%M:%S')
 
 class RetrieveMemoriesInputs(BaseModel):
     original_retrieval: Optional[RetrieveMemoriesInput] = Field(default=None, description="original类型记忆的检索输入")
@@ -47,6 +48,7 @@ class RetrieveState(BaseModel):
     #输入
     input: str = Field(description="检索输入")
     type: Literal['passive', 'active'] = Field(description="检索类型：主动或被动['passive', 'active']")
+    agent_time_settings: AgentTimeSettings = Field(description="时间设置")
     #临时
     messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list, description="检索过程中产生的消息")
     output: list[Document] = Field(default_factory=list, description="检索结果")
@@ -111,12 +113,12 @@ class RetrieveGraph(BaseGraph):
     如果输入为空，则会使用create_time_range直接获取限定时间范围的一些记忆。如果create_time_range也为空，则输入无效。
 
 2. create_time_range: Optional[str] = None
-    用于限定搜索结果的时间范围，格式为"2023-01-01 00:00:00,2023-01-01 23:59:59"，也即%Y-%m-%d %H:%M:%S,%Y-%m-%d %H:%M:%S
+    用于限定搜索结果的时间范围，格式为"2023-01-01 00:00:00~2023-01-01 23:59:59"，也即%Y-%m-%d %H:%M:%S~%Y-%m-%d %H:%M:%S
     默认为空，表示不限制时间范围。
     由于是使用filter直接在程序上过滤掉了这个范围以外的记忆，所以比起在search_string中描述时间范围，使用create_time_range会更快且更准确。
     但也需要注意这里的create_time，准确来说指的是记忆的创建时间，这个时间是在记忆被创建时自动生成的。
     而如果出现“张三上星期感冒了。”这种情况，可能记忆是在"2025-02-12 11:31:12"时创建的，但实际上这是在记忆创建时间一个星期前发生的事件。
-    这时如果使用create_time_range来限定时间范围为"2025-02-03 00:00:00,2025-02-09 23:59:59"，那么就会检索不到“张三上星期感冒了”这条记忆，因为它是在一星期后创建的。
+    这时如果使用create_time_range来限定时间范围为"2025-02-03 00:00:00~2025-02-09 23:59:59"，那么就会检索不到“张三上星期感冒了”这条记忆，因为它是在一星期后创建的。
     总之不建议在较小范围使用create_time_range，可能会出现这种意外情况，create_time_range本质是一种性能优化手段。
 
 # 有三种类型记忆可供查询，original，summary，semantic。以下是三种不同类型记忆的说明以及它们在存储时的规范要求提示词，你可以根据这些信息来决定自己要检索哪些记忆类型并模仿创建更接近记忆内容的查询语句，因为是相似性搜索，所以使用与要检索的内容相似的语句来查询，可以获到更好的结果。
@@ -188,13 +190,13 @@ class RetrieveGraph(BaseGraph):
         max_retries = 3
         retry_count = 0
         memories = None
-        before_time = datetime.now()
+        before_time = datetime.now(timezone.utc)
         while retry_count < max_retries:
             try:
                 retrieve_inputs = await llm_with_structure.ainvoke(retrieve_prompt)
                 thread_id = config["configurable"]["thread_id"]
                 active_retrieve_config = get_thread_retrieve_config(thread_id).active_retrieve_config
-                memories = await self.retrieve_memories(retrieve_inputs, active_retrieve_config, thread_id)
+                memories = await self.retrieve_memories(retrieve_inputs, active_retrieve_config, thread_id, state.agent_time_settings)
                 break
             except ValueError as e:
                 retry_count += 1
@@ -210,7 +212,7 @@ class RetrieveGraph(BaseGraph):
 {retrieve_inputs.model_dump_json(indent=4)}'''
 
         if retry_count >= max_retries:
-            after_time = datetime.now()
+            after_time = datetime.now(timezone.utc)
             return {'error': f'主动检索记忆失败，这很少见。操作耗时{parse_seconds(after_time - before_time)}，请考虑是否要重新尝试。'}
         else:
             return {"output": memories}
@@ -227,7 +229,7 @@ class RetrieveGraph(BaseGraph):
         try:
             thread_id = config["configurable"]["thread_id"]
             passive_retrieve_config = get_thread_retrieve_config(thread_id).passive_retrieve_config
-            memories = await self.retrieve_memories(retrieve_inputs, passive_retrieve_config, thread_id)
+            memories = await self.retrieve_memories(retrieve_inputs, passive_retrieve_config, thread_id, state.agent_time_settings)
         except ValueError as e:
             memories = "被动检索记忆失败，请无视此消息。"
             print('被动检索报错：' + str(e))
@@ -238,7 +240,7 @@ class RetrieveGraph(BaseGraph):
         return
 
 
-    async def retrieve_memories(self, retrieve_inputs: RetrieveMemoriesInputs, retrieve_config: RetrieveMemoriesConfig, thread_id: str) -> list[Document]:
+    async def retrieve_memories(self, retrieve_inputs: RetrieveMemoriesInputs, retrieve_config: RetrieveMemoriesConfig, thread_id: str, agent_time_settings: AgentTimeSettings) -> list[Document]:
 
         total_k = retrieve_config.k
         fetch_k = retrieve_config.fetch_k
@@ -302,15 +304,15 @@ class RetrieveGraph(BaseGraph):
             create_time_range: str = retrieve.get("create_time_range")
             if create_time_range:
                 try:
-                    start_str, end_str = create_time_range.split(',')
+                    start_str, end_str = create_time_range.split('~')
                     retrieve["start_time"] = datetime.strptime(start_str.strip(), "%Y-%m-%d %H:%M:%S")
                     retrieve["end_time"] = datetime.strptime(end_str.strip(), "%Y-%m-%d %H:%M:%S")
                 except ValueError:
-                    raise ValueError(f'无法解析 {retrieve["type"]} 类型输入中的 create_time_range！请重新检查你的输入是否符合"2023-01-01 00:00:00,2023-01-01 23:59:59"这样的格式！(也即%Y-%m-%d %H:%M:%S)')
+                    raise ValueError(f'无法解析 {retrieve["type"]} 类型输入中的 create_time_range！请重新检查你的输入是否符合"2023-01-01 00:00:00~2023-01-01 23:59:59"这样的格式！(也即%Y-%m-%d %H:%M:%S~%Y-%m-%d %H:%M:%S)')
 
         for retrieve in retrieves:
             if isinstance(retrieve.get("start_time"), datetime) and isinstance(retrieve.get("end_time"), datetime):
-                retrieve["filter"] = [{"stable_time": {"$gte": retrieve["start_time"].timestamp()}}, {"stable_time": {"$lte": retrieve["end_time"].timestamp()}}]
+                retrieve["filter"] = [{"stable_time": {"$gte": datetime_to_seconds(retrieve["start_time"])}}, {"stable_time": {"$lte": datetime_to_seconds(retrieve["end_time"])}}]
 
 
         docs_and_scores = await self.memory_manager.retrieve_memories(
@@ -328,7 +330,8 @@ class RetrieveGraph(BaseGraph):
                     strength=retrieve_strength
                 ) for retrieve in retrieves
             ],
-            thread_id=thread_id
+            thread_id=thread_id,
+            agent_time_settings=agent_time_settings
         )
 
         #docs = [doc for doc, _ in docs_and_scores]

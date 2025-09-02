@@ -17,7 +17,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 #from langchain_community.embeddings import DashScopeEmbeddings
 from uuid import uuid4
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -25,6 +25,7 @@ from become_human.graph_base import BaseGraph
 from become_human.memory import MemoryManager
 from become_human.utils import parse_message, parse_messages
 from become_human.config import get_thread_recycle_config
+from become_human.time import now_seconds, AgentTimeSettings, real_time_to_agent_time, datetime_to_seconds
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -34,7 +35,7 @@ class MemoryEntry(BaseModel):
     content: str = Field(description="记忆的内容")
     stable_time: float = Field(description="记忆的稳定市场，单位为秒", ge=0.0)
     type: Literal["original", "summary", "semantic"] = Field(description="记忆的类型")
-    creation_timestamp: float = Field(description="记忆的创建时间戳")
+    creation_time_seconds: float = Field(description="记忆的创建时间总秒数")
     id: str = Field(description="记忆的唯一标识符")
 
 class ExtractedMemoryInfo(BaseModel):
@@ -85,6 +86,7 @@ class RecycleState(BaseModel):
     input_messages: list[AnyMessage] = Field(description="输入消息列表")
     recycle_type: Literal['extract', 'original'] = Field(description="回收类型")
     checking_messages: list[AnyMessage] = Field(default=list, description="用于检查是否溢出")
+    agent_time_settings: AgentTimeSettings = Field(description="代理时间设置")
     #输出及临时状态
     remove_messages: list[RemoveMessage] = Field(default_factory=list)
     old_messages: list[AnyMessage] = Field(default_factory=list)
@@ -169,7 +171,7 @@ class RecycleGraph(BaseGraph):
 
         extracted_memories: list[MemoryEntry] = []
 
-        current_timestamp = datetime.now(timezone.utc).timestamp()
+        current_time_seconds = now_seconds(state.agent_time_settings)
         base_stable_time = get_thread_recycle_config(config["configurable"]["thread_id"]).base_stable_time
 
         for message in messages:
@@ -185,13 +187,14 @@ class RecycleGraph(BaseGraph):
                 continue
             else:
                 stable_mult = random.uniform(0.0, 3.0)
-            bh_creation_timestamp = message.additional_kwargs.get("bh_creation_timestamp", current_timestamp)
+            bh_creation_time_seconds = message.additional_kwargs.get("bh_creation_time_seconds", current_time_seconds)
+            bh_creation_agent_time_seconds = datetime_to_seconds(real_time_to_agent_time(bh_creation_time_seconds))
 
             extracted_memories.append(MemoryEntry(
                 content=parse_message(message),
                 stable_time=stable_mult * base_stable_time,
                 type="original",
-                creation_timestamp=bh_creation_timestamp,
+                creation_time_seconds=bh_creation_agent_time_seconds,
                 id=message.id or str(uuid4())
             ))
 
@@ -214,10 +217,10 @@ class RecycleGraph(BaseGraph):
 
         extracted_memories = []
 
-        current_timestamp = datetime.now(timezone.utc).timestamp()
+        current_time_seconds = now_seconds()
         base_stable_time = get_thread_recycle_config(config["configurable"]["thread_id"]).base_stable_time
 
-        creation_timestamps = []
+        creation_time_secondses = []
 
         for message in messages:
             if isinstance(message, ToolMessage) and message.artifact and isinstance(message.artifact, dict) and message.artifact.get("bh_do_not_store"):
@@ -227,12 +230,13 @@ class RecycleGraph(BaseGraph):
             elif message.additional_kwargs.get("bh_extracted"):
                 continue
             trimmed_messages.append(message)
-            bh_creation_timestamp = message.additional_kwargs.get("bh_creation_timestamp", current_timestamp)
-            creation_timestamps.append(int(bh_creation_timestamp))
+            bh_creation_time_seconds = message.additional_kwargs.get("bh_creation_time_seconds", current_time_seconds)
+            bh_creation_agent_time_seconds = datetime_to_seconds(real_time_to_agent_time(bh_creation_time_seconds))
+            creation_time_secondses.append(int(bh_creation_agent_time_seconds))
 
         if trimmed_messages:
-            # 临时方案，对于总结和语义记忆的creation_timestamp直接使用原始记录的平均时间戳
-            creation_timestamp_average = sum(creation_timestamps) / len(creation_timestamps)
+            # 临时方案，对于总结和语义记忆的creation_time_seconds直接使用原始记录的平均时间戳
+            creation_time_seconds_average = sum(creation_time_secondses) / len(creation_time_secondses)
 
             llm_with_structure = self.llm.with_structured_output(ExtractedMemoryInfo, method="function_calling")
             extracted_memory_info = await llm_with_structure.ainvoke(f"""以下是用户的生活记录：
@@ -248,7 +252,7 @@ class RecycleGraph(BaseGraph):
                 content=extracted_memory_info_dict["summary"],
                 stable_time=random.uniform(0.0, 3.0) * base_stable_time,
                 type="summary",
-                creation_timestamp=creation_timestamp_average,
+                creation_time_seconds=creation_time_seconds_average,
                 id=str(uuid4())
             ))
 
@@ -257,7 +261,7 @@ class RecycleGraph(BaseGraph):
                     content=semantic_memory,
                     stable_time=random.uniform(0.0, 3.0) * base_stable_time,
                     type="semantic",
-                    creation_timestamp=creation_timestamp_average,
+                    creation_time_seconds=creation_time_seconds_average,
                     id=str(uuid4())
                 ))
 
@@ -274,8 +278,8 @@ class RecycleGraph(BaseGraph):
                 content=memory_entry.content,
                 id=memory_entry.id,
                 type=memory_entry.type,
-                creation_timestamp=memory_entry.creation_timestamp,
+                creation_time_seconds=memory_entry.creation_time_seconds,
                 stable_time=memory_entry.stable_time
             ))
-        await self.memory_manager.add_memories(docs, config["configurable"]["thread_id"])
+        await self.memory_manager.add_memories(docs, config["configurable"]["thread_id"], state.agent_time_settings)
         return {"input_messages": []}

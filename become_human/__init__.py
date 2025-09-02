@@ -14,7 +14,8 @@ from become_human.graph_recycle import RecycleGraph
 from become_human.graph_retrieve import RetrieveGraph
 from become_human.memory import MemoryManager
 from become_human.config import load_config, get_thread_configs_toml, set_config, get_thread_configs, get_thread_recycle_config
-from become_human.utils import parse_time, is_valid_json, parse_messages, parse_documents
+from become_human.utils import parse_time, is_valid_json, parse_messages, parse_memory_documents
+from become_human.time import datetime_to_seconds, real_time_to_agent_time, AgentTimeSettings, now_seconds, now_agent_seconds
 
 from typing import Annotated, Optional, Union, Any
 import os
@@ -27,16 +28,16 @@ from uuid import uuid4
 event_queue = asyncio.Queue()
 
 @tool(response_format="content_and_artifact")
-async def retrieve_memories(search_string: Annotated[str, "要检索的内容"], messages: Annotated[list[AnyMessage], InjectedState('messages')], config: RunnableConfig) -> tuple[str, dict[str, Any]]:
+async def retrieve_memories(search_string: Annotated[str, "要检索的内容"], messages: Annotated[list[AnyMessage], InjectedState('messages')], time_settings: Annotated[AgentTimeSettings, InjectedState('agent_time_settings')], config: RunnableConfig) -> tuple[str, dict[str, Any]]:
     """从数据库（大脑）中检索记忆"""
-    result = await retrieve_graph.graph.ainvoke({"input": search_string, "type": "active"}, config)
+    result = await retrieve_graph.graph.ainvoke({"input": search_string, "type": "active", "agent_time_settings": time_settings}, config)
     if result.get("error"):
         content = result.get("error")
     else:
         docs: list[Document] = result.get("output", [])
         message_ids = [m.id for m in messages if m.id]
         docs = [doc for doc in docs if doc.id not in message_ids]
-        content = parse_documents(docs)
+        content = parse_memory_documents(docs, time_settings)
     artifact = {"bh_do_not_store": True}
     return content, artifact
 
@@ -98,27 +99,30 @@ async def stream_graph_updates(user_input: Union[str, list[str]], thread_id: str
 
     config["configurable"]["thread_run_id"] = thread_run_id
     current_time = datetime.now()
-    parsed_time = parse_time(current_time)
-    current_timestamp = current_time.timestamp()
+    current_time_seconds = datetime_to_seconds(current_time)
+    current_agent_time = real_time_to_agent_time(current_time, main_graph_state.values.get("agent_time_settings", AgentTimeSettings()))
+    parsed_agent_time = parse_time(current_agent_time)
     if not is_self_call:
         if isinstance(user_name, str):
             user_name = user_name.strip()
         name = user_name or "未知姓名"
         if isinstance(user_input, str):
-            input_content = f'[{parsed_time}]\n{name}: {user_input}'
+            input_content = f'[{parsed_agent_time}]\n{name}: {user_input}'
         elif isinstance(user_input, list):
             if len(user_input) == 1:
-                input_content = f'[{parsed_time}]\n{name}: {user_input[0]}'
+                input_content = f'[{parsed_agent_time}]\n{name}: {user_input[0]}'
             elif len(user_input) > 1:
-                input_content = [{'type': 'text', 'text': f'[{parsed_time}]\n{name}: {message}'} for message in user_input]
+                input_content = [{'type': 'text', 'text': f'[{parsed_agent_time}]\n{name}: {message}'} for message in user_input]
             else:
+                del main_graph.thread_run_ids[thread_id]
                 raise ValueError("Input list cannot be empty")
         else:
+            del main_graph.thread_run_ids[thread_id]
             raise ValueError("Invalid input type")
         graph_input = {"input_messages": HumanMessage(
             content=input_content,
             name=user_name,
-            additional_kwargs={"bh_creation_timestamp": current_timestamp}
+            additional_kwargs={"bh_creation_time_seconds": current_time_seconds}
         )}
     else:
         config["configurable"]["is_self_call"] = True
@@ -299,23 +303,26 @@ class HeartbeatManager:
 
         # 处理自我调用
         main_graph_state = await main_graph.graph.aget_state(config)
-        current_timestamp = datetime.now(timezone.utc).timestamp()
-        self_call_timestamps = main_graph_state.values.get("self_call_timestamps", [])
-        wakeup_call_timestamp = main_graph_state.values.get("wakeup_call_timestamp")
+        if main_graph_state.next:
+            return
+        current_time_seconds = now_seconds()
+        current_agent_time_seconds = now_agent_seconds(main_graph_state.values.get("agent_time_settings", AgentTimeSettings()))
+        self_call_time_secondses = main_graph_state.values.get("self_call_time_secondses", [])
+        wakeup_call_time_seconds = main_graph_state.values.get("wakeup_call_time_seconds")
         can_call = False
-        if self_call_timestamps:
-            for timestamp in self_call_timestamps:
-                if current_timestamp >= timestamp:
+        if self_call_time_secondses:
+            for seconds in self_call_time_secondses:
+                if current_agent_time_seconds >= seconds:
                     can_call = True
                     break
-        if wakeup_call_timestamp and not can_call:
-            if current_timestamp >= wakeup_call_timestamp:
+        if wakeup_call_time_seconds and not can_call:
+            if current_agent_time_seconds >= wakeup_call_time_seconds:
                 can_call = True
         if can_call:
             await stream_graph_updates('', thread_id, is_self_call=True)
 
         # 自动回收闲置上下文
-        elif main_graph_state.values.get("active_timestamp") and current_timestamp > main_graph_state.values.get("active_timestamp"):# 已超出活跃时间
+        elif main_graph_state.values.get("active_time_seconds") and current_agent_time_seconds > main_graph_state.values.get("active_time_seconds"):# 已超出活跃时间
             messages = await main_graph.get_messages(thread_id)
             messages = [m for m in messages if not m.additional_kwargs.get("bh_extracted")]
             if [m for m in messages if isinstance(m, HumanMessage) and not m.additional_kwargs.get("bh_from_system")]: # 有来自用户的消息
@@ -330,12 +337,14 @@ class HeartbeatManager:
                     await main_graph.update_messages(thread_id, messages)
 
         # 闲置过久则关闭线程
-        elif current_timestamp > (self.thread_ids[thread_id]["created_at"] + 1209600):
+        elif current_time_seconds > (self.thread_ids[thread_id]["created_at"] + 1209600):
             self.close_thread(thread_id)
+
+        return
 
 
     async def init_thread(self, thread_id: str):
-        self.thread_ids[thread_id] = {"created_at": datetime.now(timezone.utc).timestamp()}
+        self.thread_ids[thread_id] = {"created_at": now_seconds()}
         await self.trigger_thread(thread_id)
 
     def close_thread(self, thread_id: str):
@@ -476,7 +485,7 @@ role_prompt: The role prompt to set for the user"""
         message = "配置文件已重新加载。"
 
     elif user_input == "/wakeup":
-        await main_graph.graph.aupdate_state(config, {"active_timestamp": 0.0, "self_call_timestamps": [], "wakeup_call_timestamp": 0.0})
+        await main_graph.graph.aupdate_state(config, {"active_time_seconds": 0.0, "self_call_time_secondses": [], "wakeup_call_time_seconds": 0.0})
         message = "已唤醒agent（重置自我调用相关状态），这可能导致agent对prompt有些误解。"
 
     elif user_input == "/messages":

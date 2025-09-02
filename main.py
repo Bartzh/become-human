@@ -19,9 +19,7 @@ def _print(item: dict):
 
 async def main():
     await init_graphs(30)
-
     await init_thread(config['configurable']['thread_id'])
-
     task = asyncio.create_task(event_listener())
 
     while True:
@@ -29,11 +27,9 @@ async def main():
         if user_input.lower() in ["quit", "exit", "q"]:
             print("Goodbye!")
             break
-
         elif user_input.startswith("/"):
             await command_processing(thread_id, user_input)
             continue
-
         asyncio.create_task(stream_graph_updates(user_input, thread_id, user_name=user_name))
 
     task.cancel()
