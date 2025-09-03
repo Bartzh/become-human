@@ -171,7 +171,7 @@ class RecycleGraph(BaseGraph):
 
         extracted_memories: list[MemoryEntry] = []
 
-        current_time_seconds = now_seconds(state.agent_time_settings)
+        current_time_seconds = now_seconds()
         base_stable_time = get_thread_recycle_config(config["configurable"]["thread_id"]).base_stable_time
 
         for message in messages:
@@ -188,7 +188,7 @@ class RecycleGraph(BaseGraph):
             else:
                 stable_mult = random.uniform(0.0, 3.0)
             bh_creation_time_seconds = message.additional_kwargs.get("bh_creation_time_seconds", current_time_seconds)
-            bh_creation_agent_time_seconds = datetime_to_seconds(real_time_to_agent_time(bh_creation_time_seconds))
+            bh_creation_agent_time_seconds = datetime_to_seconds(real_time_to_agent_time(bh_creation_time_seconds, state.agent_time_settings))
 
             extracted_memories.append(MemoryEntry(
                 content=parse_message(message),
@@ -231,7 +231,7 @@ class RecycleGraph(BaseGraph):
                 continue
             trimmed_messages.append(message)
             bh_creation_time_seconds = message.additional_kwargs.get("bh_creation_time_seconds", current_time_seconds)
-            bh_creation_agent_time_seconds = datetime_to_seconds(real_time_to_agent_time(bh_creation_time_seconds))
+            bh_creation_agent_time_seconds = datetime_to_seconds(real_time_to_agent_time(bh_creation_time_seconds, state.agent_time_settings))
             creation_time_secondses.append(int(bh_creation_agent_time_seconds))
 
         if trimmed_messages:

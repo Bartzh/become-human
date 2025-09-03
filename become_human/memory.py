@@ -5,7 +5,7 @@ from chromadb.config import Settings
 import aiosqlite
 from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Literal, Union, Optional
 from pydantic import BaseModel, Field
 from uuid import uuid4

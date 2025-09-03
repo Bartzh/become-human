@@ -20,8 +20,7 @@ from become_human.time import datetime_to_seconds, real_time_to_agent_time, Agen
 from typing import Annotated, Optional, Union, Any
 import os
 import asyncio
-import atexit
-from datetime import datetime, timezone
+from datetime import datetime
 from warnings import warn
 from uuid import uuid4
 
@@ -266,7 +265,6 @@ class HeartbeatManager:
         self.thread_ids = {}
         self.is_running = False
         self.task = None
-        atexit.register(self.stop)
 
     @classmethod
     async def create(cls, interval: float = 5.0):
@@ -351,15 +349,25 @@ class HeartbeatManager:
         if self.thread_ids.get(thread_id):
             del self.thread_ids[thread_id]
 
-    def stop(self):
+    async def stop(self):
         print("wait for the last heartbeat to stop")
         self.is_running = False
-
-    def stop_force(self):
-        if self.task:
-            self.task.cancel()
+        if self.task is not None:
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
             self.task = None
+
+    async def stop_force(self):
         self.is_running = False
+        if self.task is not None:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+            self.task = None
 
 async def init_thread(thread_id: str):
     await heartbeat_manager.init_thread(thread_id)
@@ -395,7 +403,7 @@ async def init_graphs(heartbeat_interval: float = 5.0) -> tuple[BaseChatModel, B
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     )
 
-    embeddings = DashScopeEmbeddings(model="text-embedding-v3")
+    embeddings = DashScopeEmbeddings(model="text-embedding-v4")
 
     memory_manager = await MemoryManager.create(embeddings)
 
@@ -408,7 +416,7 @@ async def init_graphs(heartbeat_interval: float = 5.0) -> tuple[BaseChatModel, B
     return llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph
 
 async def close_graphs():
-    #memory_manager.stop_periodic_task()
+    await heartbeat_manager.stop()
     await main_graph.conn.close()
     await recycle_graph.conn.close()
     await retrieve_graph.conn.close()
