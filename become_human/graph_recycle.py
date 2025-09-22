@@ -1,6 +1,5 @@
 from typing import Literal, Sequence, Dict, Any, Union, Callable, Optional
 
-#from typing_extensions import Annotated, TypedDict, Literal
 from langgraph.graph import END, StateGraph, START
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, SystemMessage, AnyMessage, RemoveMessage
 from langchain_core.messages.utils import trim_messages, count_tokens_approximately
@@ -15,17 +14,15 @@ from pydantic import BaseModel, Field
 import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-#from langchain_community.embeddings import DashScopeEmbeddings
 from uuid import uuid4
-from datetime import datetime, timezone, timedelta
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from become_human.graph_base import BaseGraph
 from become_human.memory import MemoryManager
 from become_human.utils import parse_message, parse_messages
-from become_human.config import get_thread_recycle_config
-from become_human.time import now_seconds, AgentTimeSettings, real_time_to_agent_time, datetime_to_seconds
+from become_human.time import now_seconds, real_time_to_agent_time, datetime_to_seconds
+from become_human.store_manager import store_manager
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -86,7 +83,6 @@ class RecycleState(BaseModel):
     input_messages: list[AnyMessage] = Field(description="输入消息列表")
     recycle_type: Literal['extract', 'original'] = Field(description="回收类型")
     checking_messages: list[AnyMessage] = Field(default=list, description="用于检查是否溢出")
-    agent_time_settings: AgentTimeSettings = Field(description="代理时间设置")
     #输出及临时状态
     remove_messages: list[RemoveMessage] = Field(default_factory=list)
     old_messages: list[AnyMessage] = Field(default_factory=list)
@@ -107,7 +103,6 @@ class RecycleGraph(BaseGraph):
         recycleGraph_builder = StateGraph(RecycleState)
 
         recycleGraph_builder.add_node("begin", self.begin)
-        #recycleGraph_builder.add_node("recycle", self.recycle_messages)
         recycleGraph_builder.add_node("extract", self.extract_messages)
         recycleGraph_builder.add_node("original", self.original_process)
         recycleGraph_builder.add_node("extract_process", self.extract_process)
@@ -115,9 +110,7 @@ class RecycleGraph(BaseGraph):
 
         recycleGraph_builder.set_entry_point("begin")
         recycleGraph_builder.add_conditional_edges("begin", self.type_condition)
-        #recycleGraph_builder.add_conditional_edges("original", self.original_condition)
         recycleGraph_builder.add_edge("original", "store")
-        #recycleGraph_builder.add_edge("recycle", "extract")
         recycleGraph_builder.add_edge("extract_process", "extract")
         recycleGraph_builder.add_edge("extract", "store")
         recycleGraph_builder.add_edge("store", END)
@@ -127,8 +120,7 @@ class RecycleGraph(BaseGraph):
     async def create(cls, llm: BaseChatModel, memory_manager: MemoryManager, tools: Optional[Sequence[Union[Dict[str, Any], type, Callable, BaseTool]]] = None):
         instance = cls(llm, memory_manager, tools)
         instance.conn = await aiosqlite.connect("./data/checkpoints_recycle.sqlite")
-        instance.checkpointer = AsyncSqliteSaver(instance.conn)
-        instance.graph = instance.graph_builder.compile(checkpointer=instance.checkpointer)
+        instance.graph = instance.graph_builder.compile(checkpointer=AsyncSqliteSaver(instance.conn))
         return instance
 
 
@@ -148,7 +140,9 @@ class RecycleGraph(BaseGraph):
     async def recycle_messages(self, state: RecycleState, config: RunnableConfig):
         # 获取当前消息列表
         messages = state.checking_messages
-        max_tokens = get_thread_recycle_config(config["configurable"]["thread_id"]).recycle_target_size
+        thread_id = config["configurable"]["thread_id"]
+        store_settings = await store_manager.get_settings(thread_id)
+        max_tokens = store_settings.recycle.recycle_target_size
         new_messages = trim_messages(
             messages=messages,
             max_tokens=max_tokens,
@@ -172,7 +166,9 @@ class RecycleGraph(BaseGraph):
         extracted_memories: list[MemoryEntry] = []
 
         current_time_seconds = now_seconds()
-        base_stable_time = get_thread_recycle_config(config["configurable"]["thread_id"]).base_stable_time
+        thread_id = config["configurable"]["thread_id"]
+        store_settings = await store_manager.get_settings(thread_id)
+        base_stable_time = store_settings.recycle.base_stable_time
 
         for message in messages:
             if isinstance(message, ToolMessage):
@@ -188,7 +184,8 @@ class RecycleGraph(BaseGraph):
             else:
                 stable_mult = random.uniform(0.0, 3.0)
             bh_creation_time_seconds = message.additional_kwargs.get("bh_creation_time_seconds", current_time_seconds)
-            bh_creation_agent_time_seconds = datetime_to_seconds(real_time_to_agent_time(bh_creation_time_seconds, state.agent_time_settings))
+            time_settings = store_settings.main.time_settings
+            bh_creation_agent_time_seconds = datetime_to_seconds(real_time_to_agent_time(bh_creation_time_seconds, time_settings))
 
             extracted_memories.append(MemoryEntry(
                 content=parse_message(message),
@@ -199,13 +196,6 @@ class RecycleGraph(BaseGraph):
             ))
 
         return {"extracted_memories": extracted_memories}
-
-    def original_condition(self, state: RecycleState, config: RunnableConfig):
-        if state.checking_messages:
-            if count_tokens_approximately(state.checking_messages) > get_thread_recycle_config(config["configurable"]["thread_id"]).recycle_trigger_threshold:
-                return 'recycle'
-            else:
-                return 'store'
 
     async def extract_process(self, state: RecycleState, config: RunnableConfig):
         return {"old_messages": state.input_messages, "remove_messages": [RemoveMessage(id=message.id) for message in state.input_messages]}
@@ -218,7 +208,9 @@ class RecycleGraph(BaseGraph):
         extracted_memories = []
 
         current_time_seconds = now_seconds()
-        base_stable_time = get_thread_recycle_config(config["configurable"]["thread_id"]).base_stable_time
+        thread_id = config["configurable"]["thread_id"]
+        store_settings = await store_manager.get_settings(thread_id)
+        base_stable_time = store_settings.recycle.base_stable_time
 
         creation_time_secondses = []
 
@@ -231,7 +223,8 @@ class RecycleGraph(BaseGraph):
                 continue
             trimmed_messages.append(message)
             bh_creation_time_seconds = message.additional_kwargs.get("bh_creation_time_seconds", current_time_seconds)
-            bh_creation_agent_time_seconds = datetime_to_seconds(real_time_to_agent_time(bh_creation_time_seconds, state.agent_time_settings))
+            time_settings = store_settings.main.time_settings
+            bh_creation_agent_time_seconds = datetime_to_seconds(real_time_to_agent_time(bh_creation_time_seconds, time_settings))
             creation_time_secondses.append(int(bh_creation_agent_time_seconds))
 
         if trimmed_messages:
@@ -281,5 +274,5 @@ class RecycleGraph(BaseGraph):
                 creation_time_seconds=memory_entry.creation_time_seconds,
                 stable_time=memory_entry.stable_time
             ))
-        await self.memory_manager.add_memories(docs, config["configurable"]["thread_id"], state.agent_time_settings)
+        await self.memory_manager.add_memories(docs, config["configurable"]["thread_id"])
         return {"input_messages": []}

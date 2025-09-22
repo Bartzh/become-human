@@ -5,7 +5,7 @@ from chromadb.config import Settings
 import aiosqlite
 from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any, Literal, Union, Optional
 from pydantic import BaseModel, Field
 from uuid import uuid4
@@ -13,7 +13,8 @@ import numpy as np
 import json
 import jieba
 
-from become_human.time import seconds_to_datetime, AgentTimeSettings, get_agent_time_zone, now_seconds
+from become_human.time import seconds_to_datetime, AgentTimeSettings, get_agent_time_zone, now_seconds, AgentTimeZone, parse_time
+from become_human.store_manager import store_manager
 
 from langchain_core.runnables.config import run_in_executor
 
@@ -84,6 +85,24 @@ class MemoryManager():
             ''', (thread_id, json.dumps(update_timers), last_update_time_seconds))
             await db.commit()
 
+    async def delete_timer_from_db(self, thread_id: str) -> bool:
+        """
+        从timer数据库中删除指定thread_id的记录
+        
+        Args:
+            thread_id (str): 要删除的线程ID
+            
+        Returns:
+            bool: 删除成功返回True，未找到记录返回False
+        """
+        async with aiosqlite.connect(self.timer_db_path) as db:
+            cursor = await db.execute(
+                'DELETE FROM update_timers WHERE thread_id = ?', 
+                (thread_id,)
+            )
+            await db.commit()
+            # 如果rowcount大于0，说明有记录被删除
+            return cursor.rowcount > 0
 
     async def update_timer(self, thread_id: str):
         types = ['original', 'summary', 'semantic']
@@ -131,7 +150,7 @@ class MemoryManager():
 
         return {"retrievability": retrievability}
 
-    def recall(self, metadata: dict, current_time_seconds: float, time_settings: AgentTimeSettings, strength: float = 1.0) -> dict:
+    def recall(self, metadata: dict, current_time_seconds: float, time_settings: Union[AgentTimeSettings, AgentTimeZone], strength: float = 1.0) -> dict:
         """
         调用记忆时重置可检索性并增强稳定性
         """
@@ -191,13 +210,14 @@ class MemoryManager():
         id: str = Field(default_factory=lambda: str(uuid4()), description="The id of the memory")
         stable_time: float = Field(description="The stable time base of the memory", gt=0.0)
 
-    async def add_memories(self, memories: list[InitialMemory], thread_id: str, time_settings: AgentTimeSettings) -> None:
+    async def add_memories(self, memories: list[InitialMemory], thread_id: str) -> None:
         docs: dict[str, list[Document]] = {
             "original": [],
             "summary": [],
             "semantic": []
         }
         current_time_seconds = now_seconds()
+        time_settings = (await store_manager.get_settings(thread_id)).main.time_settings
         for memory in memories:
             # 使用jieba对memory.content进行分词并过滤掉重复词
             words = set(jieba.cut(memory.content))
@@ -241,8 +261,7 @@ class MemoryManager():
         strength: float = Field(description="检索强度，作为stable_time和retrievability的乘数", ge=0)
     async def retrieve_memories(self,
                                 inputs: list[RetrieveInput],
-                                thread_id: str,
-                                agent_time_settings: AgentTimeSettings
+                                thread_id: str
                                 ) -> list[tuple[Document, float]]:
         """检索记忆向量库中的文档并返回排序结果。"""
 
@@ -270,6 +289,7 @@ class MemoryManager():
         combined_docs_and_scores: list[tuple[Document, float]] = []
 
         current_time_seconds = now_seconds()
+        agent_time_settings = (await store_manager.get_settings(thread_id)).main.time_settings
 
         ids_to_delete = {"original": set(), "summary": set(), "semantic": set()}
 
@@ -793,6 +813,13 @@ class MemoryManager():
             }
         )
 
+    def delete_collection(
+        self,
+        thread_id: str,
+        memory_type: Literal["original", "semantic", "summary"],
+    ) -> None:
+        self.vector_store_client.delete_collection(name=f"{thread_id}_{memory_type}")
+
 def validated_where(where: dict) -> Optional[dict]:
     '''只解决在and或or时列表里不能只有一个元素的问题'''
     key = list(where.keys())[0]
@@ -884,6 +911,7 @@ def calculate_memory_datetime_alpha(current_time: datetime) -> float:
         float: 表示记忆力的 alpha 值。
     """
     hour = current_time.hour + current_time.minute / 60.0  # 将时间转换为小时的小数值（如 14.5 表示 14:30）
+    #TODO: config
 
     # 根据时间计算 alpha 值
     if 6 <= hour < 8:
@@ -916,3 +944,21 @@ def calculate_memory_datetime_alpha(current_time: datetime) -> float:
         alpha = 0.4 + t * 0.5 / 2  # 0:00-6:00，从 0.4 线性上升到 0.9
 
     return alpha
+
+
+def parse_memory_documents(documents: list[Document], time_zone: Optional[Union[timezone, float, timedelta, AgentTimeSettings, AgentTimeZone]] = None) -> str:
+    """将记忆文档列表转换为(AI)可读的字符串"""
+    output = []
+    # 反过来从分数最低的开始读取
+    for doc in reversed(documents):
+        content = doc.page_content
+        memory_type = doc.metadata["type"]
+        time_seconds = doc.metadata.get("creation_time_seconds")
+        if isinstance(time_seconds, (float, int)):
+            readable_time = parse_time(time_seconds, time_zone)
+        else:
+            readable_time = "未知时间"
+        output.append(f"记忆类型：{memory_type}\n记忆创建时间: {readable_time}\n记忆内容: {content}")
+    if not output:
+        return "没有找到任何匹配的记忆。"
+    return "（可能会出现模糊的记忆，其中的`*`星号意味着暂时没想起来的细节）\n\n\n" + "\n\n".join(output)

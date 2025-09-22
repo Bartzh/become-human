@@ -18,7 +18,7 @@ def _print(item: dict):
             last_message = ''
 
 async def main():
-    await init_graphs(30)
+    await init_graphs(10)
     await init_thread(config['configurable']['thread_id'])
     task = asyncio.create_task(event_listener())
 

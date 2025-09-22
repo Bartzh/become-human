@@ -1,8 +1,8 @@
 from become_human.graph_base import BaseGraph
 from become_human.memory import MemoryManager
-from become_human.config import get_thread_retrieve_config, RetrieveMemoriesConfig
-from become_human.utils import parse_seconds
-from become_human.time import datetime_to_seconds, AgentTimeSettings
+from become_human.time import datetime_to_seconds, parse_seconds
+from become_human.store_settings import RetrieveMemoriesConfig
+from become_human.store_manager import store_manager
 
 from typing import Any, Callable, Dict, Optional, Sequence, Union, Annotated, Literal
 from pydantic import BaseModel, Field
@@ -22,7 +22,7 @@ from langchain_core.messages import (
 from langgraph.graph.state import StateGraph, START, END
 from langgraph.graph.message import add_messages
 
-from langgraph.prebuilt import ToolNode, tools_condition, InjectedState
+#from langgraph.prebuilt import ToolNode, tools_condition, InjectedState
 
 from datetime import datetime, timezone
 import random
@@ -48,7 +48,6 @@ class RetrieveState(BaseModel):
     #输入
     input: str = Field(description="检索输入")
     type: Literal['passive', 'active'] = Field(description="检索类型：主动或被动['passive', 'active']")
-    agent_time_settings: AgentTimeSettings = Field(description="时间设置")
     #临时
     messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list, description="检索过程中产生的消息")
     output: list[Document] = Field(default_factory=list, description="检索结果")
@@ -88,8 +87,7 @@ class RetrieveGraph(BaseGraph):
     async def create(cls, llm: BaseChatModel, memory_manager: MemoryManager, tools: Optional[Sequence[Union[Dict[str, Any], type, Callable, BaseTool]]] = None):
         instance = cls(llm, memory_manager, tools)
         instance.conn = await aiosqlite.connect("./data/checkpoints_retrieve.sqlite")
-        instance.checkpointer = AsyncSqliteSaver(instance.conn)
-        instance.graph = instance.graph_builder.compile(checkpointer=instance.checkpointer)
+        instance.graph = instance.graph_builder.compile(checkpointer=AsyncSqliteSaver(instance.conn))
         return instance
 
     async def begin(self, state: RetrieveState):
@@ -102,6 +100,7 @@ class RetrieveGraph(BaseGraph):
     async def active_processing(self, state: RetrieveState, config: RunnableConfig):
         # 主动输入的处理逻辑
         # 可以在这里添加特定于主动输入的处理代码
+        thread_id = config["configurable"]["thread_id"]
         llm_with_structure = self.llm.with_structured_output(RetrieveMemoriesInputs, method="function_calling")
         retrieve_prompt = f'''你是一个高级记忆检索优化器（RetrieverPrompter），你的核心目标是负责分析用户输入并将其转换为更优的记忆检索工具的输入参数（RetrieveMemoriesInput），使得检索工具能够获得比使用原始输入直接检索更好的准确性和相关性。
 **以下是输出要求：**
@@ -191,12 +190,12 @@ class RetrieveGraph(BaseGraph):
         retry_count = 0
         memories = None
         before_time = datetime.now(timezone.utc)
+        store_settings = await store_manager.get_settings(thread_id)
+        active_retrieve_config = store_settings.retrieve.active_retrieve_config
         while retry_count < max_retries:
             try:
                 retrieve_inputs = await llm_with_structure.ainvoke(retrieve_prompt)
-                thread_id = config["configurable"]["thread_id"]
-                active_retrieve_config = get_thread_retrieve_config(thread_id).active_retrieve_config
-                memories = await self.retrieve_memories(retrieve_inputs, active_retrieve_config, thread_id, state.agent_time_settings)
+                memories = await self.retrieve_memories(retrieve_inputs, active_retrieve_config, thread_id)
                 break
             except ValueError as e:
                 retry_count += 1
@@ -221,15 +220,16 @@ class RetrieveGraph(BaseGraph):
     async def passive_processing(self, state: RetrieveState, config: RunnableConfig):
         # 被动输入的处理逻辑
         # 可以在这里添加特定于被动输入的处理代码
+        thread_id = config["configurable"]["thread_id"]
+        store_settings = await store_manager.get_settings(thread_id)
         retrieve_inputs = RetrieveMemoriesInputs(
             original_retrieval=RetrieveMemoriesInput(search_string=state.input),
             summary_retrieval=RetrieveMemoriesInput(search_string=state.input),
             semantic_retrieval=RetrieveMemoriesInput(search_string=state.input),
         )
         try:
-            thread_id = config["configurable"]["thread_id"]
-            passive_retrieve_config = get_thread_retrieve_config(thread_id).passive_retrieve_config
-            memories = await self.retrieve_memories(retrieve_inputs, passive_retrieve_config, thread_id, state.agent_time_settings)
+            passive_retrieve_config = store_settings.retrieve.passive_retrieve_config
+            memories = await self.retrieve_memories(retrieve_inputs, passive_retrieve_config, thread_id)
         except ValueError as e:
             memories = "被动检索记忆失败，请无视此消息。"
             print('被动检索报错：' + str(e))
@@ -240,7 +240,7 @@ class RetrieveGraph(BaseGraph):
         return
 
 
-    async def retrieve_memories(self, retrieve_inputs: RetrieveMemoriesInputs, retrieve_config: RetrieveMemoriesConfig, thread_id: str, agent_time_settings: AgentTimeSettings) -> list[Document]:
+    async def retrieve_memories(self, retrieve_inputs: RetrieveMemoriesInputs, retrieve_config: RetrieveMemoriesConfig, thread_id: str) -> list[Document]:
 
         total_k = retrieve_config.k
         fetch_k = retrieve_config.fetch_k
@@ -290,11 +290,20 @@ class RetrieveGraph(BaseGraph):
         total_scale = 0.0
 
         for retrieve in retrieves:
-            retrieve["scale"] = 1.0
+            if retrieve["type"] == "original":
+                retrieve["scale"] = retrieve_config.original_ratio
+            elif retrieve["type"] == "summary":
+                retrieve["scale"] = retrieve_config.summary_ratio
+            elif retrieve["type"] == "semantic":
+                retrieve["scale"] = retrieve_config.semantic_ratio
+            else:
+                retrieve["scale"] = 0.0
             if retrieve["increase_weight"]:
-                retrieve["scale"] += 1.0#TODO:这些值可以根据环境变化
+                retrieve["scale"] *= 1.8#TODO:这些值可以根据环境变化
             total_scale += retrieve["scale"]
 
+        if total_scale == 0.0:
+            raise ValueError("所有检索类型的权重和为0，请检查你的输入。")
         for retrieve in retrieves:
             retrieve["proportion"] = retrieve["scale"] / total_scale
             retrieve["k"] = int(total_k * retrieve["proportion"])
@@ -330,23 +339,30 @@ class RetrieveGraph(BaseGraph):
                     strength=retrieve_strength
                 ) for retrieve in retrieves
             ],
-            thread_id=thread_id,
-            agent_time_settings=agent_time_settings
+            thread_id=thread_id
         )
 
         #docs = [doc for doc, _ in docs_and_scores]
 
 
-        for doc, score in docs_and_scores:
-            if score >= 0.35:
-                continue
-            # 计算要替换的字符比例，score从0.35到0对应替换比例从0到1
-            replacement_ratio = min(1 - (score / 0.35), 0.8)  # 0.35->0, 0->1
+        for i, doc_and_score in enumerate(docs_and_scores):
+            doc = doc_and_score[0]
+            score = doc_and_score[1]
             content = doc.page_content
             content_length = len(content)
+            if i < retrieve_config.stable_k and score < 0.35:
+                # 计算要替换的字符比例，score从0.35到0对应替换比例从0到1
+                replacement_ratio = min(1 - (score / 0.35), 0.8)  # 0.35->0, 0->1
+            elif i >= retrieve_config.stable_k and content_length > 15:
+                length_scale = min((content_length - 15) / 35, 1.0)
+                replacement_ratio = length_scale * random.uniform(0.6, 0.9)
+            else:
+                continue
             # 计算要替换的字符数量
             num_chars_to_replace = int(content_length * replacement_ratio)
-            
+            if num_chars_to_replace <= 0:
+                continue
+
             # 将字符串转换为列表以便修改
             content_list = list(content)
             # 随机选择要替换的字符位置
@@ -355,7 +371,7 @@ class RetrieveGraph(BaseGraph):
             for i in chars_to_replace:
                 content_list[i] = '*'
             # 重新组合成字符串
-            doc.page_content = '「模糊的记忆（`*`星号意味着暂时没想起来的细节）」' + ''.join(content_list)
+            doc.page_content = '「模糊的记忆」' + ''.join(content_list)
 
         docs = [doc for doc, score in docs_and_scores]
 

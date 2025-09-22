@@ -1,23 +1,28 @@
-from langchain_qwq import ChatQwen
+from langchain_qwq import ChatQwen, ChatQwQ
 from langchain_community.embeddings import DashScopeEmbeddings
+from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage, BaseMessage, AIMessage, AnyMessage, ToolMessage
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.embeddings import Embeddings
-from langchain_core.messages.utils import count_tokens_approximately
+from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.prebuilt import InjectedState
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from become_human.graph_main import MainGraph
 from become_human.graph_recycle import RecycleGraph
 from become_human.graph_retrieve import RetrieveGraph
-from become_human.memory import MemoryManager
-from become_human.config import load_config, get_thread_configs_toml, set_config, get_thread_configs, get_thread_recycle_config
-from become_human.utils import parse_time, is_valid_json, parse_messages, parse_memory_documents
-from become_human.time import datetime_to_seconds, real_time_to_agent_time, AgentTimeSettings, now_seconds, now_agent_seconds
+from become_human.memory import MemoryManager, parse_memory_documents
+from become_human.config import load_config, get_thread_configs
+from become_human.utils import is_valid_json, parse_messages
+from become_human.time import datetime_to_seconds, real_time_to_agent_time, now_seconds, now_agent_seconds, parse_time
+from become_human.store import store_setup, stop_listener, store_adelete_namespace
+from become_human.store_manager import store_manager
 
-from typing import Annotated, Optional, Union, Any
+from typing import Annotated, Optional, Union, Any, Literal
 import os
 import asyncio
 from datetime import datetime
@@ -27,9 +32,12 @@ from uuid import uuid4
 event_queue = asyncio.Queue()
 
 @tool(response_format="content_and_artifact")
-async def retrieve_memories(search_string: Annotated[str, "要检索的内容"], messages: Annotated[list[AnyMessage], InjectedState('messages')], time_settings: Annotated[AgentTimeSettings, InjectedState('agent_time_settings')], config: RunnableConfig) -> tuple[str, dict[str, Any]]:
+async def retrieve_memories(search_string: Annotated[str, "要检索的内容"], messages: Annotated[list[AnyMessage], InjectedState('messages')], config: RunnableConfig) -> tuple[str, dict[str, Any]]:
     """从数据库（大脑）中检索记忆"""
-    result = await retrieve_graph.graph.ainvoke({"input": search_string, "type": "active", "agent_time_settings": time_settings}, config)
+    thread_id = config["configurable"]["thread_id"]
+    store_settings = await store_manager.get_settings(thread_id)
+    time_settings = store_settings.main.time_settings
+    result = await retrieve_graph.graph.ainvoke({"input": search_string, "type": "active"}, config)
     if result.get("error"):
         content = result.get("error")
     else:
@@ -45,7 +53,7 @@ async def retrieve_memories(search_string: Annotated[str, "要检索的内容"],
 thread_user_input_buffers: dict[str, list[str]] = {}
 thread_gathereds: dict[str, AIMessageChunk] = {}
 thread_streaming_tool_messages: dict[str, list[ToolMessage]] = {}
-async def stream_graph_updates(user_input: Union[str, list[str]], thread_id: str, user_name: Optional[str] = None, is_self_call: Optional[bool] = None):
+async def stream_graph_updates(user_input: Union[str, list[str]], thread_id: str, user_name: Optional[str] = None, is_self_call: Optional[bool] = None, self_call_type: Literal['passive', 'active'] = 'passive'):
     global thread_user_input_buffers, thread_gathereds, thread_streaming_tool_messages
 
     if not is_self_call:
@@ -99,7 +107,9 @@ async def stream_graph_updates(user_input: Union[str, list[str]], thread_id: str
     config["configurable"]["thread_run_id"] = thread_run_id
     current_time = datetime.now()
     current_time_seconds = datetime_to_seconds(current_time)
-    current_agent_time = real_time_to_agent_time(current_time, main_graph_state.values.get("agent_time_settings", AgentTimeSettings()))
+    store_settings = await store_manager.get_settings(thread_id)
+    time_settings = store_settings.main.time_settings
+    current_agent_time = real_time_to_agent_time(current_time, time_settings)
     parsed_agent_time = parse_time(current_agent_time)
     if not is_self_call:
         if isinstance(user_name, str):
@@ -125,6 +135,7 @@ async def stream_graph_updates(user_input: Union[str, list[str]], thread_id: str
         )}
     else:
         config["configurable"]["is_self_call"] = True
+        config["configurable"]["self_call_type"] = self_call_type
         graph_input = {}
 
     first = True
@@ -274,7 +285,7 @@ class HeartbeatManager:
 
     async def start(self):
         for key, value in get_thread_configs().items():
-            if value.init_on_startup:
+            if value.get('init_on_startup'):
                 await self.init_thread(key)
         if self.task is None:
             self.task = asyncio.create_task(self.heartbeat_task())
@@ -299,55 +310,91 @@ class HeartbeatManager:
         # 更新记忆
         await memory_manager.update_timer(thread_id)
 
-        # 处理自我调用
         main_graph_state = await main_graph.graph.aget_state(config)
         if main_graph_state.next:
             return
+
+        # 处理自我调用
         current_time_seconds = now_seconds()
-        current_agent_time_seconds = now_agent_seconds(main_graph_state.values.get("agent_time_settings", AgentTimeSettings()))
+        store_settings = await store_manager.get_settings(thread_id)
+        time_settings = store_settings.main.time_settings
+        current_agent_time_seconds = now_agent_seconds(time_settings)
         self_call_time_secondses = main_graph_state.values.get("self_call_time_secondses", [])
         wakeup_call_time_seconds = main_graph_state.values.get("wakeup_call_time_seconds")
+        active_self_call_time_secondses_and_notes = main_graph_state.values.get("active_self_call_time_secondses_and_notes", [])
         can_call = False
-        if self_call_time_secondses:
+        if active_self_call_time_secondses_and_notes:
+            for seconds, note in active_self_call_time_secondses_and_notes:
+                if current_agent_time_seconds >= seconds:
+                    can_call = True
+                    self_call_type = 'active'
+                    break
+        if self_call_time_secondses and not can_call:
             for seconds in self_call_time_secondses:
                 if current_agent_time_seconds >= seconds:
                     can_call = True
+                    self_call_type = 'passive'
                     break
         if wakeup_call_time_seconds and not can_call:
             if current_agent_time_seconds >= wakeup_call_time_seconds:
                 can_call = True
+                self_call_type = 'passive'
         if can_call:
-            await stream_graph_updates('', thread_id, is_self_call=True)
+            await stream_graph_updates('', thread_id, is_self_call=True, self_call_type=self_call_type)
 
         # 自动回收闲置上下文
         elif main_graph_state.values.get("active_time_seconds") and current_agent_time_seconds > main_graph_state.values.get("active_time_seconds"):# 已超出活跃时间
             messages = await main_graph.get_messages(thread_id)
-            messages = [m for m in messages if not m.additional_kwargs.get("bh_extracted")]
-            if [m for m in messages if isinstance(m, HumanMessage) and not m.additional_kwargs.get("bh_from_system")]: # 有来自用户的消息
-                await recycle_graph.graph.ainvoke({"input_messages": messages, "recycle_type": "extract"}, config)
-                is_cleanup = get_thread_recycle_config(thread_id).cleanup_on_non_active_recycle
+            passive_retrieve_messages = [m for m in messages if m.additional_kwargs.get("bh_type", '') == "passive_retrieve"]
+            remove_messages = [RemoveMessage(id=m.id) for m in passive_retrieve_messages]
+            not_passive_retrieve_messages = [m for m in messages if m.additional_kwargs.get("bh_type", '') != "passive_retrieve"]
+            not_extracted_messages = [m for m in messages if not m.additional_kwargs.get("bh_extracted")]
+            if [m for m in not_extracted_messages if isinstance(m, HumanMessage) and (not m.additional_kwargs.get("bh_from_system") or not m.additional_kwargs.get("bh_do_not_store"))]: # 有来自用户的消息
+                await recycle_graph.graph.ainvoke({"input_messages": not_extracted_messages, "recycle_type": "extract"}, config)
+                is_cleanup = store_settings.recycle.cleanup_on_non_active_recycle
                 if is_cleanup:
-                    await main_graph.update_messages(thread_id, [RemoveMessage(id=m.id) for m in messages])
-                else:
-                    for m in messages:
-                        if not m.additional_kwargs.get("bh_extracted"):
+                    #await main_graph.update_messages(thread_id, [RemoveMessage(id=m.id) for m in messages])
+                    max_tokens = store_settings.recycle.cleanup_target_size
+                    if max_tokens > 0:
+                        new_messages: list[BaseMessage] = trim_messages(
+                            messages=not_passive_retrieve_messages,
+                            max_tokens=max_tokens,
+                            token_counter=count_tokens_approximately,
+                            strategy='last',
+                            start_on=HumanMessage,
+                            allow_partial=True,
+                            text_splitter=RecursiveCharacterTextSplitter(chunk_size=max_tokens, chunk_overlap=0)
+                        )
+                        if not new_messages:
+                            warn("Trim messages failed on cleanup.")
+                            new_messages = []
+                        excess_count = len(not_passive_retrieve_messages) - len(new_messages)
+                        old_messages = not_passive_retrieve_messages[:excess_count]
+                        remove_messages.extend([RemoveMessage(id=message.id) for message in old_messages])
+                        for m in new_messages:
                             m.additional_kwargs["bh_extracted"] = True
-                    await main_graph.update_messages(thread_id, messages)
+                        await main_graph.update_messages(thread_id, new_messages + remove_messages)
+                    else:
+                        await main_graph.update_messages(thread_id, [RemoveMessage(id=REMOVE_ALL_MESSAGES)])
+                else:
+                    for m in not_extracted_messages:
+                        m.additional_kwargs["bh_extracted"] = True
+                    await main_graph.update_messages(thread_id, not_extracted_messages + remove_messages)
 
         # 闲置过久则关闭线程
         elif current_time_seconds > (self.thread_ids[thread_id]["created_at"] + 1209600):
             self.close_thread(thread_id)
 
-        return
-
 
     async def init_thread(self, thread_id: str):
         self.thread_ids[thread_id] = {"created_at": now_seconds()}
+        await store_manager.init_thread(thread_id)
         await self.trigger_thread(thread_id)
 
     def close_thread(self, thread_id: str):
         if self.thread_ids.get(thread_id):
             del self.thread_ids[thread_id]
+        store_manager.close_thread(thread_id)
 
     async def stop(self):
         print("wait for the last heartbeat to stop")
@@ -379,32 +426,56 @@ def close_thread(thread_id: str):
 async def init_graphs(heartbeat_interval: float = 5.0) -> tuple[BaseChatModel, BaseChatModel, Embeddings, MemoryManager, MainGraph, RecycleGraph, RetrieveGraph]:
     global llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph, heartbeat_manager
 
-    envs = ["CHAT_MODEL_NAME", "CHAT_MODEL_ENABLE_THINKING", "STRUCTURED_MODEL_NAME", "STRUCTURED_MODEL_ENABLE_THINKING"]
-    for e in envs:
+    req_envs = ["CHAT_MODEL_NAME", "STRUCTURED_MODEL_NAME"]
+    for e in req_envs:
         if not os.getenv(e):
             raise Exception(f"{e} is not set")
 
-    llm_for_chat = ChatQwen(
-        model=os.getenv("CHAT_MODEL_NAME"),
-        #top_p=0.8,
-        max_retries=2,
-        timeout=30.0,
-        enable_thinking=True if os.getenv("CHAT_MODEL_ENABLE_THINKING").lower() == "true" else False,
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        #parallel_tool_calls=True
-    )
+    await store_setup()
+    await load_config()
 
-    llm_for_structured = ChatQwen(
-        model=os.getenv("STRUCTURED_MODEL_NAME"),
-        #top_p=0.8,
-        max_retries=2,
-        timeout=30.0,
-        enable_thinking=True if os.getenv("STRUCTURED_MODEL_ENABLE_THINKING").lower() == "true" else False,
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-    )
+    def create_model(model_name: str, enable_thinking: Optional[bool] = None):
+        if model_name.startswith('qwen-'):
+            return ChatQwen(
+                model=model_name,
+                max_retries=2,
+                timeout=60.0,
+                enable_thinking=enable_thinking,
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            )
+        elif model_name.startswith(('qwq-', 'qvq-')):
+            return ChatQwQ(
+                model=model_name,
+                max_retries=2,
+                timeout=60.0,
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            )
+        else:
+            return ChatOpenAI(
+                model_name=model_name,
+                max_retries=2,
+                timeout=60.0,
+            )
+
+    chat_enable_thinking = os.getenv("CHAT_MODEL_ENABLE_THINKING", '').lower()
+    if chat_enable_thinking == "true":
+        chat_enable_thinking = True
+    elif chat_enable_thinking == "false":
+        chat_enable_thinking = False
+    else:
+        chat_enable_thinking = None
+    llm_for_chat = create_model(os.getenv("CHAT_MODEL_NAME", ""), chat_enable_thinking)
+
+    structured_enable_thinking = os.getenv("STRUCTURED_MODEL_ENABLE_THINKING", '').lower()
+    if structured_enable_thinking == "true":
+        structured_enable_thinking = True
+    elif structured_enable_thinking == "false":
+        structured_enable_thinking = False
+    else:
+        structured_enable_thinking = None
+    llm_for_structured = create_model(os.getenv("STRUCTURED_MODEL_NAME", ""), structured_enable_thinking)
 
     embeddings = DashScopeEmbeddings(model="text-embedding-v4")
-
     memory_manager = await MemoryManager.create(embeddings)
 
     retrieve_graph = await RetrieveGraph.create(llm_for_structured, memory_manager)
@@ -420,6 +491,7 @@ async def close_graphs():
     await main_graph.conn.close()
     await recycle_graph.conn.close()
     await retrieve_graph.conn.close()
+    await stop_listener()
     print("Graphs closed")
 
 
@@ -481,15 +553,14 @@ role_prompt: The role prompt to set for the user"""
             splited_input = user_input.split(" ")
             role_prompt = " ".join(splited_input[1:]).strip()
             if role_prompt:
-                configs_toml = get_thread_configs_toml()
-                configs_toml[thread_id]['main']['role_prompt'] = role_prompt
-                set_config(configs_toml)
+                thread_settings = await store_manager.get_settings(thread_id)
+                thread_settings.main.role_prompt = role_prompt
                 message = "Role prompt set successfully"
             else:
                 message = "Role prompt cannot be empty"
 
     elif user_input == "/reload_config":
-        load_config()
+        await load_config()
         message = "配置文件已重新加载。"
 
     elif user_input == "/wakeup":
@@ -522,6 +593,25 @@ role_prompt: The role prompt to set for the user"""
             message = '\n\n\n'.join([f'id: {get_result["ids"][i]}\n\ncontent: {get_result["documents"][i]}\n\nmetadata: {'\n'.join([f'{k}: {str(v)}' for k, v in get_result["metadatas"][i].items()])}' for i in range(len(get_result["ids"]))])
             if not message:
                 message = "没有找到任何记忆。"
+
+    elif user_input == "/reset":
+        main_state = await main_graph.graph.aget_state(config)
+        if not main_state.next:
+            close_thread(thread_id)
+            await memory_manager.delete_timer_from_db(thread_id)
+            await main_graph.graph.checkpointer.adelete_thread(thread_id)
+            await recycle_graph.graph.checkpointer.adelete_thread(thread_id)
+            await retrieve_graph.graph.checkpointer.adelete_thread(thread_id)
+            memory_manager.delete_collection(thread_id, "original")
+            memory_manager.delete_collection(thread_id, "summary")
+            memory_manager.delete_collection(thread_id, "semantic")
+            await store_adelete_namespace((thread_id,))
+            await load_config(thread_id)
+            await init_thread(thread_id)
+            message = "已重置该线程所有数据。"
+        else:
+            message = "线程运行时无法重置。"
+
 
     #return {"name": "log", "args": {"message": message}}
     await event_queue.put({"thread_id": thread_id, "name": "log", "args": {"message": message}, "id": 'command-' + str(uuid4())})

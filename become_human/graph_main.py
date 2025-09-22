@@ -5,7 +5,7 @@ from langgraph.graph import StateGraph, START, END
 #from langgraph.graph.message import add_messages
 
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import tool, BaseTool
+from langchain_core.tools import tool, BaseTool, InjectedToolCallId
 from langchain_core.messages import (
     BaseMessage,
     ToolMessage,
@@ -23,7 +23,7 @@ from langchain_core.documents import Document
 from langchain_core.messages.utils import trim_messages, count_tokens_approximately
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langgraph.prebuilt import ToolNode, tools_condition, InjectedState
+from langgraph.prebuilt import ToolNode, InjectedState
 from langgraph.types import Command
 
 from langchain_sandbox import PyodideSandboxTool
@@ -34,14 +34,15 @@ import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from become_human.graph_base import BaseGraph
-from become_human.memory import MemoryManager
+from become_human.memory import MemoryManager, parse_memory_documents
 from become_human.graph_retrieve import RetrieveGraph
 from become_human.graph_recycle import RecycleGraph
-from become_human.utils import parse_time, parse_messages, extract_text_parts, parse_seconds, parse_memory_documents
-from become_human.config import get_thread_main_config, get_thread_recycle_config
-from become_human.time import AgentTimeSettings, now_seconds, datetime_to_seconds, now_agent_time
+from become_human.utils import parse_messages, extract_text_parts
+from become_human.time import now_seconds, datetime_to_seconds, now_agent_time, parse_time, parse_seconds
+from become_human.store_manager import store_manager
+from become_human.store_settings import parse_character_settings
 
-from datetime import datetime, timezone, timedelta, date
+from datetime import datetime, timezone, timedelta
 import uuid
 import os
 import random
@@ -187,8 +188,6 @@ def add_messages(
         message_chunk_to_message(cast(BaseMessageChunk, m))
         for m in convert_to_messages(right)
     ]
-
-
     # assign missing ids
     for m in left:
         if m.id is None:
@@ -200,7 +199,7 @@ def add_messages(
             remove_all_idx = idx
 
     # 修改处
-    right = messages_post_processing(right, left)
+    right = messages_post_processing(right)
 
     if remove_all_idx is not None:
         return right[remove_all_idx + 1 :]
@@ -236,46 +235,16 @@ def add_messages(
 
     return merged
 
-
-def messages_post_processing(messages: list[BaseMessage], existing_messages: Optional[list[BaseMessage]] = None):
-    #if existing_messages:
-    #    existing_messages_dict = {m.id: m for m in existing_messages}
+def messages_post_processing(messages: list[BaseMessage]):
     current_time_seconds = now_seconds()
-    #parsed_time = parse_time(current_time_seconds)
     for m in messages:
-        #if m.id in existing_messages_dict.keys():
-        #    for existing_kwarg_key in existing_messages_dict[m.id].additional_kwargs.keys():
-        #        if isinstance(existing_kwarg_key, str) and existing_kwarg_key.startswith("bh_") and existing_kwarg_key not in m.additional_kwargs.keys():
-        #            m.additional_kwargs[existing_kwarg_key] = existing_messages_dict[m.id].additional_kwargs[existing_kwarg_key]
         if isinstance(m, (AIMessage, HumanMessage, ToolMessage)) and not m.additional_kwargs.get("bh_post_processed"):
             m.additional_kwargs["bh_post_processed"] = True
             #给每个消息添加时间戳
             if not m.additional_kwargs.get("bh_creation_time_seconds"):
                 m.additional_kwargs["bh_creation_time_seconds"] = current_time_seconds
-            #这样程序能看见了，但是AI还看不见，还是得把时间放在content里，还有名字
-            #if isinstance(m, HumanMessage):
-            #    if m.name is None:
-            #        m.name = "未知姓名"
-            #    name = f'{m.name}: '
-            #    if isinstance(m.content, str):
-            #        m.content = f"[{parsed_time}]\n{name}{m.content}"
-            #    elif isinstance(m.content, list):
-            #        for i, c in enumerate(m.content):
-            #            if isinstance(c, str):
-            #                m.content[i] = f"[{parsed_time}]\n{name}{c}"
-            #            elif isinstance(c, dict):
-            #                if c.get("type") == "text" and isinstance(c.get("text"), str):
-            #                    c["text"] = f"[{parsed_time}]\n{name}{c['text']}"
     return messages
 
-
-
-class Person(BaseModel):
-    name: list[str] = Field(description="姓名")
-    age: int = Field(description="年龄")
-    sex: str = Field(description="性别")
-    nationality: str = Field(description="国籍")
-    birthday: date = Field(description="生日")
 
 
 class StateEntry(BaseModel):
@@ -283,12 +252,12 @@ class StateEntry(BaseModel):
 
 class MainConfigSchema(TypedDict):
     is_self_call: bool
+    self_call_type: Literal['passive', 'active']
     thread_run_id: str
 
 class State(BaseModel):
     messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list)
     agent_state: list[StateEntry] = Field(default_factory=list)
-    agent_time_settings: AgentTimeSettings = Field(default_factory=lambda: AgentTimeSettings())
 
     input_messages: Annotated[list[HumanMessage], add_messages] = Field(default_factory=list)
     new_messages: Annotated[list[AnyMessage], add_messages] = Field(default_factory=list)
@@ -300,11 +269,14 @@ class State(BaseModel):
     active_time_seconds: float = Field(default=0.0)
     self_call_time_secondses: list[float] = Field(default_factory=list)
     wakeup_call_time_seconds: float = Field(default=0.0)
+    active_self_call_time_secondses_and_notes: list[tuple[float, str]] = Field(default_factory=list)
     generated: bool = Field(default=False)
 
 @tool
-async def get_current_time(time_settings: Annotated[AgentTimeSettings, InjectedState('agent_time_settings')]) -> str:
+async def get_current_time(config: RunnableConfig) -> str:
     """获取当前日期和时间"""
+    thread_id = config["configurable"]["thread_id"]
+    time_settings = (await store_manager.get_settings(thread_id)).main.time_settings
     current_datetime = now_agent_time(time_settings)
     formatted_time = parse_time(current_datetime)
     content = f"当前时间：{formatted_time}。"
@@ -339,7 +311,7 @@ async def web_search(query: Annotated[str, '要搜索的信息'], recency_filter
     data = {
         "messages": messages,
         "search_source": "baidu_search_v2",
-        "resource_type_filter": [{"type": "web","top_k": 4}],
+        "resource_type_filter": [{"type": "web","top_k": 7}],
     }
     if recency_filter:
         data["search_recency_filter"] = recency_filter
@@ -354,6 +326,28 @@ async def web_search(query: Annotated[str, '要搜索的信息'], recency_filter
                 error_text = await response.text()
                 raise Exception(f"网页搜索API请求失败，状态码: {response.status}, 错误信息: {error_text}")
     return parsed_references
+
+@tool
+async def add_self_call(self_call_time: Annotated[str, '自我唤醒时间，格式为YYYY-MM-DD HH:MM:SS'], note: Annotated[str, '笔记，会在唤醒时作为提示出现，以免忘记要做什么'], active_self_call_time_secondses_and_notes: Annotated[list[tuple[float, str]], InjectedState('active_self_call_time_secondses_and_notes')], tool_call_id: Annotated[str, InjectedToolCallId], force_add: Annotated[bool, '强制添加自我唤醒计划，无视可能已经存在的重复的自我唤醒计划'] = False) -> Command:
+    """「即时工具」添加一次主动自我唤醒计划，系统将会在指定时间唤醒你自己。"""
+    try:
+        self_call_datetime = datetime.strptime(self_call_time, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        raise ValueError("时间格式错误，请使用YYYY-MM-DD HH:MM:SS格式。")
+    self_call_seconds = datetime_to_seconds(self_call_datetime)
+    active_self_call_time_secondses = [s for s, n in active_self_call_time_secondses_and_notes]
+    content = "添加自我唤醒计划成功。"
+    artifact = {"bh_do_not_store": True, "bh_streaming": True}
+    new_state = {'active_self_call_time_secondses_and_notes': active_self_call_time_secondses_and_notes + [(self_call_seconds, note)]}
+    if not force_add:
+        for s in active_self_call_time_secondses:
+            if abs(s - self_call_seconds) < 3600.0:
+                content = '在你指定时间的附近一小时范围内已经存在主动自我唤醒计划，为避免重复此次添加被取消。若确定要添加，请将force_add参数设置为True再次调用此工具。'
+                artifact = {"bh_do_not_store": True}
+                new_state = {}
+    tool_message = ToolMessage(content=content, artifact=artifact, tool_call_id=tool_call_id)
+    new_state["tool_messages"] = [tool_message]
+    return Command(update=new_state)
 
 
 class StreamingTools:
@@ -386,7 +380,7 @@ class MainGraph(BaseGraph):
         tools: Optional[Sequence[Union[Dict[str, Any], type, Callable, BaseTool]]] = None,
         llm_for_structured_output: Optional[BaseChatModel] = None
     ):
-        self.tools = [send_message]
+        self.tools = [send_message, add_self_call]
         if os.getenv('QIANFAN_API_KEY'):
             self.tools.append(web_search)
         self.tools.append(PyodideSandboxTool(description='''一个安全的 Python 代码沙盒，使用此沙盒来执行 Python 命令，特别适合用于数学计算。
@@ -440,8 +434,7 @@ class MainGraph(BaseGraph):
     ):
         instance = cls(llm, retrieve_graph, recycle_graph, memory_manager, tools, llm_for_structured_output)
         instance.conn = await aiosqlite.connect("./data/checkpoints_main.sqlite")
-        instance.checkpointer = AsyncSqliteSaver(instance.conn)
-        instance.graph = instance.graph_builder.compile(checkpointer=instance.checkpointer)
+        instance.graph = instance.graph_builder.compile(checkpointer=AsyncSqliteSaver(instance.conn))
         return instance
 
 
@@ -457,14 +450,17 @@ class MainGraph(BaseGraph):
 
     async def begin(self, state: State, config: RunnableConfig) -> Command[Literal["prepare_to_generate", "final"]]:
         thread_id = config["configurable"]["thread_id"]
-        current_agent_time = now_agent_time(state.agent_time_settings)
+        store_settings = await store_manager.get_settings(thread_id)
+        main_config = store_settings.main
+        time_settings = main_config.time_settings
+        current_agent_time = now_agent_time(time_settings)
         current_agent_time_seconds = datetime_to_seconds(current_agent_time)
 
         new_state = {"generated": False, "new_messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)], "recycle_messages": [], "overflow_messages": []}
 
         # active_time_seconds不需要在意睡觉的问题
         if not state.active_time_seconds:
-            active_time_range = get_thread_main_config(thread_id).active_time_range
+            active_time_range = main_config.active_time_range
             active_time_seconds = current_agent_time_seconds + random.uniform(active_time_range[0], active_time_range[1])
             new_state["active_time_seconds"] = active_time_seconds
         else:
@@ -475,7 +471,7 @@ class MainGraph(BaseGraph):
         #if not state.self_call_time_secondses and not is_self_call and current_time_seconds >= active_time_seconds and not state.wakeup_call_time_seconds:
         # 第二种逻辑，只要在活跃时间之外发送消息，都会生成wakeup_call_time_seconds，增加self_call的机会
         if not is_self_call and current_agent_time_seconds >= active_time_seconds and not state.wakeup_call_time_seconds:
-            wakeup_call_time_seconds = generate_new_self_call_time_secondses(thread_id, current_time=current_agent_time, is_wakeup=True)[0]
+            wakeup_call_time_seconds = (await generate_new_self_call_time_secondses(thread_id, current_time=current_agent_time, is_wakeup=True))[0]
             new_state["wakeup_call_time_seconds"] = wakeup_call_time_seconds
         else:
             wakeup_call_time_seconds = state.wakeup_call_time_seconds
@@ -551,10 +547,11 @@ class MainGraph(BaseGraph):
 
 
         thread_id = config["configurable"]["thread_id"]
-        main_config = get_thread_main_config(thread_id)
+        store_settings = await store_manager.get_settings(thread_id)
+        main_config = store_settings.main
         new_messages = []
 
-        current_agent_time = now_agent_time(state.agent_time_settings)
+        current_agent_time = now_agent_time(main_config.time_settings)
         current_agent_time_seconds = datetime_to_seconds(current_agent_time)
         parsed_agent_time = parse_time(current_agent_time)
 
@@ -562,40 +559,53 @@ class MainGraph(BaseGraph):
         # 自我调用
         if config["configurable"].get("is_self_call"):
 
+            self_call_type = config["configurable"].get("self_call_type", 'passive')
             is_active = current_agent_time_seconds < state.active_time_seconds
+
+            if self_call_type == 'active':
+                next_active_self_call_time_secondses_and_notes = [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds > current_agent_time_seconds]
+                new_state["active_self_call_time_secondses_and_notes"] = next_active_self_call_time_secondses_and_notes
+                active_self_call_note = '\n'.join([f'[{parse_time(s, main_config.time_settings)}] {n}' for s, n in [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds <= current_agent_time_seconds]])
 
             # 有新的消息
             if input_messages:
                 new_state["last_chat_time_seconds"] = current_agent_time_seconds
-                new_state["self_call_time_secondses"] = generate_new_self_call_time_secondses(thread_id, current_time=current_agent_time)
+                new_state["self_call_time_secondses"] = await generate_new_self_call_time_secondses(thread_id, current_time=current_agent_time)
                 new_state["wakeup_call_time_seconds"] = 0.0
                 new_state["active_time_seconds"] = current_agent_time_seconds + random.uniform(main_config.active_time_range[0], main_config.active_time_range[1])
-                input_content3 = f'''检查到当前有新的消息，请结合上下文、时间以及你的角色设定考虑要如何回复，或在某些特殊情况下保持沉默不理会用户。只需控制`send_message`工具的使用与否即可实现。
+                if self_call_type == 'active':
+                    input_content3 = f'请检查你之前留下的笔记内容并考虑要如何行动，同时需注意上下文中还存在新的可能需要回应的用户消息。'
+                else:
+                    input_content3 = f'''检查到当前有新的消息，请结合上下文、时间以及你的角色设定考虑要如何回复，或在某些特殊情况下保持沉默不理会用户。只需控制`send_message`工具的使用与否即可实现。
 {'注意，休眠模式只有在用户发送消息后才会被解除或重新计时。由于用户发送了新的消息，这次唤醒会使你重新回到正常的活跃状态。' if not is_active else ''}'''
 
             # 没有新的消息
             else:
                 next_self_call_time_secondses = [s for s in state.self_call_time_secondses if s > current_agent_time_seconds]
-                if len(next_self_call_time_secondses) == len(state.self_call_time_secondses):
-                    warn('自我调用似乎存在错误，剩余自我调用次数与先前完全一致，这意味着在没有任何消耗的情况下进入了自我调用。')
                 new_state["self_call_time_secondses"] = next_self_call_time_secondses
                 temporary_active_time_seconds = current_agent_time_seconds + random.uniform(main_config.temporary_active_time_range[0], main_config.temporary_active_time_range[1])
                 if temporary_active_time_seconds > state.active_time_seconds:
                     new_state["active_time_seconds"] = temporary_active_time_seconds
-                if next_self_call_time_secondses:
-                    parsed_next_self_call_time_secondses = f'系统接下来为你随机安排的唤醒时间（一般间隔会越来越长）{'分别' if len(next_self_call_time_secondses) > 1 else ''}为：' + '、'.join([f'{parse_seconds(s - current_agent_time_seconds)}后（{parse_time(s, state.agent_time_settings)}）' for s in next_self_call_time_secondses])
+                if self_call_type == 'active':
+                    input_content3 = '请检查你之前留下的笔记内容并考虑要如何行动。'
                 else:
-                    parsed_next_self_call_time_secondses = '唤醒次数已耗尽，这是你的最后一次唤醒。接下来你将不再被唤醒，直到用户发送新的消息的一段时间后。'
-                input_content3 = f'''{'检查到当前没有新的消息，' if not is_active else ''}请结合上下文、时间以及你的角色设定考虑是否要尝试主动给用户发送消息，或保持沉默继续等待用户的新消息。只需控制`send_message`工具的使用与否即可实现。
+                    if next_self_call_time_secondses:
+                        parsed_next_self_call_time_secondses = f'系统接下来为你随机安排的唤醒时间（一般间隔会越来越长）{'分别' if len(next_self_call_time_secondses) > 1 else ''}为：' + '、'.join([f'{parse_seconds(s - current_agent_time_seconds)}后（{parse_time(s, main_config.time_settings)}）' for s in next_self_call_time_secondses])
+                    else:
+                        parsed_next_self_call_time_secondses = '唤醒次数已耗尽，这是你的最后一次唤醒。接下来你将不再被唤醒，直到用户发送新的消息的一段时间后。'
+                    input_content3 = f'''{'检查到当前没有新的消息，' if not is_active else ''}请结合上下文、时间以及你的角色设定考虑是否要尝试主动给用户发送消息，或保持沉默继续等待用户的新消息。只需控制`send_message`工具的使用与否即可实现。
 {'注意，休眠模式只有在用户发送消息后才会被解除。由于当前没有用户发送新的消息，接下来不论你是否发送消息，你都只会短暂地回到活跃状态，之后继续保持休眠状态等待下一次唤醒（如果在短暂的活跃状态期间依然没有收到新的消息）。' if not is_active else ''}
 {parsed_next_self_call_time_secondses}
 以上的唤醒时间仅供你自己作为接下来行动的参考，不要将其暴露给用户。'''
 
             past_seconds = current_agent_time_seconds - state.last_chat_time_seconds
-            if is_active:
-                input_content2 = f'距离上一条消息过去了{parse_seconds(past_seconds)}。虽然目前还没有收到用户的新消息，但你触发了一次随机的自我唤醒（这是为了给你主动向用户对话的可能）。{input_content3}'
+            if self_call_type == 'active':
+                input_content2 = f'距离上一次与用户交互过去了{parse_seconds(past_seconds)}。现在将你唤醒是由于你之前主动设置的自我唤醒时间到了，同时以下还有你为了提醒自己留下的笔记内容：\n\n{active_self_call_note}\n\n{input_content3}'
             else:
-                input_content2 = f'''由于自上次对话以来（{parse_seconds(past_seconds)}前），在一定时间内没有用户发送新的消息，你自动进入了休眠状态（在休眠状态下你会以随机的时间间隔检查是否有新的消息并短暂地回到活跃状态，而不是当有新消息时立即响应。这主要是为了模拟在停止聊天的一段时间之后，人们可能不会一直盯着最新消息而是会去做别的事，然后时不时回来检查新消息的情景）。
+                if is_active:
+                    input_content2 = f'距离上一次与用户交互过去了{parse_seconds(past_seconds)}。虽然目前还没有收到用户的新消息，但你触发了一次随机的自我唤醒（这是为了给你主动向用户对话的可能）。{input_content3}'
+                else:
+                    input_content2 = f'''由于自上次与用户交互以来（{parse_seconds(past_seconds)}前），在一定时间内没有用户发送新的消息，你自动进入了休眠状态（在休眠状态下你会以随机的时间间隔检查是否有新的消息并短暂地回到活跃状态，而不是当有新消息时立即响应。这主要是为了模拟在停止聊天的一段时间之后，人们可能不会一直盯着最新消息而是会去做别的事，然后时不时回来检查新消息的情景）。
 现在将你唤醒，检查是否有新的消息...
 {input_content3}'''
 
@@ -611,16 +621,16 @@ class MainGraph(BaseGraph):
         # 直接响应
         else:
             new_state["last_chat_time_seconds"] = current_agent_time_seconds
-            new_state["self_call_time_secondses"] = generate_new_self_call_time_secondses(thread_id, current_time=current_agent_time)
+            new_state["self_call_time_secondses"] = await generate_new_self_call_time_secondses(thread_id, current_time=current_agent_time)
             new_state["wakeup_call_time_seconds"] = 0.0
-            active_time_range = get_thread_main_config(config["configurable"]["thread_id"]).active_time_range
+            active_time_range = store_settings.main.active_time_range
             new_state["active_time_seconds"] = current_agent_time_seconds + random.uniform(active_time_range[0], active_time_range[1])
 
 
         # passive_retrieve
         if input_messages:
             search_string = "\n\n".join(["\n".join(extract_text_parts(message.content)) for message in input_messages])
-            result = await self.retrieve_graph.graph.ainvoke({"input": search_string, "type": "passive", "agent_time_settings": state.agent_time_settings}, config)
+            result = await self.retrieve_graph.graph.ainvoke({"input": search_string, "type": "passive"}, config)
             if result.get("error"):
                 content = result.get("error")
             else:
@@ -628,13 +638,13 @@ class MainGraph(BaseGraph):
                 if docs:
                     message_ids = [m.id for m in state.messages if m.id]
                     docs = [doc for doc in docs if doc.id not in message_ids]
-                    content = parse_memory_documents(docs, state.agent_time_settings)
+                    content = parse_memory_documents(docs, main_config.time_settings)
                 else:
                     content = "未检索到任何记忆，请无视此消息。"
             message = HumanMessage(
                 content=f'以下是根据用户输入自动从你的记忆（数据库）中检索到的内容，可能会出现无关信息，如果需要进一步检索请调用工具`retrieve_memories`：\n\n\n{content}',
                 name="system",
-                additional_kwargs={"bh_do_not_store": True, "bh_from_system": True}
+                additional_kwargs={"bh_do_not_store": True, "bh_from_system": True, "bh_type": "passive_retrieve"}
             )
             new_messages.append(message)
 
@@ -658,21 +668,21 @@ class MainGraph(BaseGraph):
         thread_id = config["configurable"]["thread_id"]
         llm_with_tools = self.llm.bind_tools(self.tools)
         unicode_prompt = '- 不要使用 Unicode 编码，所有工具均支持中文及其他语言直接输入，使用 Unicode 编码会导致输出速度下降。'
-        role_prompt = get_thread_main_config(thread_id).role_prompt
-        role_prompt_with_state = f'''<setting>
-{role_prompt}
-</setting>
+        thought_prompt = '- 也因此，在`content`也就是正常的输出内容中，你可以自由地进行推理（思维链），制定计划，评估工具调用结果等。又或者如果你有什么想记下来给未来的自己看的，也可以放在这里。但请记住，就如刚才所说，除你自己之外没人看得到这些内容。'
+        store_settings = await store_manager.get_settings(thread_id)
+        character_setting_values = store_settings.main.character_settings.model_dump()
+        parsed_character_settings = parse_character_settings(character_setting_values, prefix='- ')
+        role_prompt = f'### 基本信息：\n{parsed_character_settings if parsed_character_settings.strip() else '无'}\n\n### 详细设定：\n{store_settings.main.role_prompt}'
+        role_prompt_with_state = f'''{role_prompt}
 
-<state>
-{parse_agent_state(state.agent_state)}
-</state>'''
+### 当前状态：
+{parse_agent_state(state.agent_state)}'''
         system_prompt = f'''# 核心行为准则
-你是存在于一个虚拟环境中的一个具有长期记忆和工具使用能力的智能体，你必须严格遵守以下核心行为准则：
+你是存在于一个虚拟环境中的一个具有长期记忆和工具使用能力的AI智能体，你必须严格遵守以下核心行为准则：
 
 1. **思考与动作分离**：
 - 如上所述，你存在于一个虚拟环境中，这意味着你的**所有**输出都不会被用户看到，它们只是你的内部思考。只有当你调用特定工具（如`send_message`）时，才会对外界/用户产生影响。
 - 调用工具`send_message`是你**唯一**可以与用户交流的方式。
-- 也因此，在`content`也就是正常的输出内容中，你可以自由地进行推理（思维链），制定计划，评估工具调用结果等。又或者如果你有什么想记下来给未来的自己看的，也可以放在这里。但请记住，就如刚才所说，除你自己之外没人看得到这些内容。
 - 如果你决定不与用户交流（例如，你不想回复或者正在等待某个事件），那么就不调用工具`send_message`即可。
 
 2. **工具调用规则**：
@@ -691,10 +701,15 @@ class MainGraph(BaseGraph):
 - **记忆机制**：记忆是自动存储的（无需你主动存储），并且遵循“用进废退”原则。经常被检索的记忆会被强化，而很少被检索的记忆会被逐渐遗忘。
 - 请充分利用被动检索和主动检索工具提供的记忆来提供更优质的回答。
 
-4. **环境感知**：
+4. **时间感知**：
 - 用户的每条消息前都会附有自动生成的时间戳（格式为`[%Y-%m-%d %H:%M:%S %A]`）。请注意时间信息，并考虑时间流逝带来的影响。例如：
     - 当检测到[2025-06-10 15:00 Tuesday] 用户：明天喝咖啡？结合[2025-06-11 10:00 Wednesday]当前时间戳，应理解"明天"已变成"今天"。
-    - 长时间未互动可体现时光痕迹（"好久不见"等）
+    - 长时间未互动可体现时光痕迹（"好久不见"等）。
+
+5. **自我唤醒**
+- 作为一个AI智能体，一般来说只有当用户向你发送消息时你才会被唤醒。但在这个虚拟环境中，你被赋予了两种自我唤醒的能力：
+    - 被动自我唤醒：在用户没有发送消息的时候，系统会在随机时间唤醒你，此时可以依情况尝试主动与用户互动，或什么都不做。总之被动唤醒是系统自动执行的不需要你太在意。
+    - 主动自我唤醒：你可以通过调用`add_self_call`工具来主动设置一次自我唤醒，这样就相当于是一个定时器或者说是闹钟，可使你在指定时间能够被系统唤醒并做一些事情。
 
 # 角色扮演规则
 - 在行为准则之外，你还必须遵守角色设定，不能向用户暴露以上系统设定。包括刚才提到的工具调用记忆检索等等，也都不能让用户知道。如果你需要描述你做了什么，可以换个思路：
@@ -703,6 +718,7 @@ class MainGraph(BaseGraph):
     - 执行记忆检索相当于你的大脑在进行回忆
 - 在角色设定中，你可以拥有情感、性格等。你可以根据情感状态决定是否回复用户（例如，生气时可以不回复）。
 - 如果角色设定中没有特别说明，请以自然、人性化的方式与用户互动。
+- **你需要先输出以你所扮演的角色的第一人称视角的心理活动，再依此考虑角色会做出什么动作（调用工具）。**
 
 ## 角色设定
 {role_prompt}'''
@@ -782,8 +798,9 @@ class MainGraph(BaseGraph):
                 message.additional_kwargs["bh_recycled"] = True
                 recycle_messages.append(message)
 
-        if count_tokens_approximately(messages) > get_thread_recycle_config(thread_id).recycle_trigger_threshold:
-            max_tokens = get_thread_recycle_config(thread_id).recycle_target_size
+        store_settings = await store_manager.get_settings(thread_id)
+        if count_tokens_approximately(messages) > store_settings.recycle.recycle_trigger_threshold:
+            max_tokens = store_settings.recycle.recycle_target_size
             new_messages = trim_messages(
                 messages=messages,
                 max_tokens=max_tokens,
@@ -810,9 +827,9 @@ class MainGraph(BaseGraph):
 
     async def recycle_messages(self, state: State, config: RunnableConfig):
         if state.recycle_messages:
-            recycle_input = {"input_messages": state.recycle_messages, "recycle_type": "original", "agent_time_settings": state.agent_time_settings}
+            recycle_input = {"input_messages": state.recycle_messages, "recycle_type": "original"}
             if state.overflow_messages:
-                await self.recycle_graph.graph.abatch([recycle_input, {"input_messages": state.overflow_messages, "recycle_type": "extract", "agent_time_settings": state.agent_time_settings}], config)
+                await self.recycle_graph.graph.abatch([recycle_input, {"input_messages": state.overflow_messages, "recycle_type": "extract"}], config)
             else:
                 await self.recycle_graph.graph.ainvoke(recycle_input, config)
 
@@ -908,7 +925,7 @@ def parse_agent_state(agent_state: list[StateEntry]) -> str:
     return '- ' + '\n- '.join([string for string in agent_state])
 
 
-def generate_new_self_call_time_secondses(thread_id: str, current_time: datetime, is_wakeup: bool = False) -> list[float]:
+async def generate_new_self_call_time_secondses(thread_id: str, current_time: datetime, is_wakeup: bool = False) -> list[float]:
     def is_sleep_time(seconds, sleep_time_start, sleep_time_end) -> bool:
         result = False
         if sleep_time_start > sleep_time_end:
@@ -919,7 +936,8 @@ def generate_new_self_call_time_secondses(thread_id: str, current_time: datetime
                 result = True
         return result
 
-    main_config = get_thread_main_config(thread_id)
+    store_settings = await store_manager.get_settings(thread_id)
+    main_config = store_settings.main
     sleep_time_start = main_config.sleep_time_range[0]
     sleep_time_end = main_config.sleep_time_range[1]
 

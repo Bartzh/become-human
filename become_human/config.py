@@ -1,183 +1,273 @@
 from tomlkit import load, loads, dump, document, table, comment, nl, TOMLDocument
 from tomlkit.items import Table
 from become_human.utils import make_sure_path_exists
+from become_human.store import StoreModel, StoreField, store_alist_namespaces, store_abatch
+from become_human.store_settings import ThreadSettings
+from langgraph.store.base import PutOp
 import os
-from typing import Optional, Literal, Type, Union
-from pydantic import BaseModel, Field
 from warnings import warn
-from copy import deepcopy
+from typing import Optional, Literal, Type, Union, get_type_hints, Any
+from typing_inspect import get_args, get_origin
+from pydantic import BaseModel, TypeAdapter
+from pydantic_core import ValidationError
 
-class MainConfig(BaseModel):
-    role_prompt: str = Field(default="你是一个友善且富有同理心的助手，用简洁自然的语言为用户提供帮助。", description="角色提示词")
-    active_time_range: tuple[float, float] = Field(default=(1800.0, 7200.0), description="活跃时间随机范围（最小值和最大值），在这之后进入休眠状态")
-    temporary_active_time_range: tuple[float, float] = Field(default=(30.0, 600.0), description="在无新消息时self_call后agent获得的临时活跃时间的随机范围（最小值和最大值），单位为秒。")
-    self_call_time_ranges: list[tuple[float, float]] = Field(default_factory=lambda: [
-        (1800.0, 10800.0),
-        (5400.0, 32400.0),
-        (16200.0, 97200.0),
-        (97200.0, 388800.0)
-    ], description="在活跃状态之后的休眠状态时self_call时间随机范围（最小值和最大值），单位为秒，睡觉期间不算时间")
-    wakeup_time_range: tuple[float, float] = Field(default=(1.0, 61201.0), description="在进入休眠状态后（也算作self_call），通过发送消息唤醒agent需要的时间随机范围（最小值和最大值），单位为秒")
-    sleep_time_range: tuple[float, float] = Field(default=(79200.0, 18000.0), description="agent进入睡眠的时间段，单位为秒。目前的作用是self_call的时间生成会跳过这个时间段。")
-
-class RecycleConfig(BaseModel):
-    cleanup_on_non_active_recycle: bool = Field(default=False, description="是否在非活跃自动回收的同时清理回收的消息")
-    recycle_trigger_threshold: int = Field(default=5000, ge=0.0, description="触发回收的阈值，单位为Tokens")
-    recycle_target_size: int = Field(default=3000, ge=0.0, description="回收后目标大小，单位为Tokens")
-    base_stable_time: float = Field(default=43200.0, ge=0.0, description="记忆初始化时stable_time的初始值，单位为秒。目前会乘以一个0~3的随机数")
-
-class RetrieveMemoriesConfig(BaseModel):
-    k: int = Field(default=6, ge=0, description="检索返回的记忆数量")
-    fetch_k: int = Field(default=24, ge=0, description="从多少个结果中筛选出最终的结果，目前仅用于mmr")
-    search_method: Literal['similarity', 'mmr'] = Field(default='mmr', description="检索方法：[similarity, mmr]")
-    similarity_weight: float = Field(default=0.4, description="检索权重：相似性权重，范围[0,1]", ge=0.0, le=1.0)
-    retrievability_weight: float = Field(default=0.3, description="检索权重：可访问性权重，范围[0,1]", ge=0.0, le=1.0)
-    diversity_weight: float = Field(default=0.3, description="检索权重：多样性权重，范围[0,1]。只在检索方法为mmr生效", ge=0.0, le=1.0)
-    strength: float = Field(default=1.0, description="检索强度，范围[0,1]，也可以超过1")
-
-class RetrieveConfig(BaseModel):
-    active_retrieve_config: RetrieveMemoriesConfig = Field(default_factory=lambda: RetrieveMemoriesConfig(
-        k=8,
-        fetch_k=24,
-        search_method='mmr',
-        similarity_weight=0.5,
-        retrievability_weight=0.25,
-        diversity_weight=0.25,
-        strength=1.0
-    ), description="主动检索配置")
-    passive_retrieve_config: RetrieveMemoriesConfig = Field(default_factory=lambda: RetrieveMemoriesConfig(
-        k=6,
-        fetch_k=18,
-        search_method='mmr',
-        similarity_weight=0.3,
-        retrievability_weight=0.5,
-        diversity_weight=0.2,
-        strength=0.5
-    ), description="被动检索配置")
-
-class ThreadConfig(BaseModel):
-    init_on_startup: bool = Field(default=False, description="是否在程序启动时自动初始化该线程")
-    main: MainConfig = Field(default_factory=lambda: MainConfig(), description="main_graph配置")
-    recycle: RecycleConfig = Field(default_factory=lambda: RecycleConfig(), description="recycle_graph配置")
-    retrieve: RetrieveConfig = Field(default_factory=lambda: RetrieveConfig(), description="retrieve_graph配置")
-
-
-thread_configs_toml = document()
-thread_configs: dict[str, ThreadConfig] = {}
-default_thread_config = ThreadConfig()
-
-make_sure_path_exists(config_path="./config")
+make_sure_path_exists()
 
 THREADS_FILE = "./config/threads.toml"
+THREAD_COMMENTS_FILE = "./config/thread_comments.toml"
 
+thread_configs: dict[str, dict[str, Any]] = {}
 
-default_thread_toml = table()
-for key, value in ThreadConfig().model_dump().items():
-    default_thread_toml.add(key, value)
+DEFAULT_THREAD_2 = {
+    'main': {
+        'role_prompt': '你是一个待人较为冷淡的人，对什么事情都无所谓，比较懒，说话也很简短、敷衍。',
+        'active_time_range': (60.0, 1800.0),
+        'self_call_time_ranges': [(300.0, 10800.0)],
+        'wakeup_time_range': (1.0, 61201.0),
+        'sleep_time_range': (82800.0, 32400.0)
+    },
+    'recycle': {
+        'base_stable_time': 43200.0,
+        'cleanup_on_non_active_recycle': True,
+        'cleanup_target_size': 800
+    },
+    'retrieve': {
+        'active_retrieve_config': {
+            'similarity_weight': 0.4,
+            'retrievability_weight': 0.3,
+            'diversity_weight': 0.3
+        }
+    }
+}
 
-
-def _add_field_comments(doc: TOMLDocument, model: Type[BaseModel], prefix: str = "") -> TOMLDocument:
-    """递归地将模型字段的描述添加为TOML文档的注释"""
-    for field_name, field_info in model.model_fields.items():
-        # 如果字段类型是BaseModel，则递归处理
-        if field_info.default_factory and isinstance(field_info.default_factory(), BaseModel):
-            doc.add(nl())
-            doc.add(comment(f'[thread_id.{prefix}{field_name}]{f': {field_info.description}' if field_info.description else ''}'))
-            doc = _add_field_comments(doc, field_info.default_factory(), prefix+field_name+'.')
+def parse_default(d: Any) -> str:
+        if isinstance(d, str):
+            return f'"{d}"'
+        elif isinstance(d, bool):
+            return str(d).lower()
+        elif d is None:
+            return 'null'
+        elif isinstance(d, (tuple, list)):
+            return '[' + ', '.join([parse_default(i) for i in d]) + ']'
         else:
-            if field_info.description:
-                doc.add(comment(f'{field_name}: {field_info.description}'))
+            return str(d)
+
+def enhanced_type_name(tp):
+    """增强的类型名称获取"""
+    origin = get_origin(tp)
+    args = get_args(tp)
+
+    if origin is Union:
+        arg_names = [enhanced_type_name(a) for a in args]
+        return f"Union[{', '.join(arg_names)}]"
+
+    elif origin:
+        if args:
+            arg_names = [enhanced_type_name(a) for a in args]
+            name = getattr(origin, '__name__', str(origin))
+            return f"{name}[{', '.join(arg_names)}]"
+        else:
+            return getattr(origin, '__name__', str(origin))
+
+    else:
+        return getattr(tp, '__name__', str(tp))
+
+def _add_field_comments(doc: TOMLDocument, model: Type[Union[StoreModel, BaseModel]], prefix: str = "") -> TOMLDocument:
+    """递归地将模型字段的描述添加为TOML文档的注释"""
+    if issubclass(model, StoreModel):
+        hints = get_type_hints(model)
+        for key, hint_type in hints.items():
+            if isinstance(hint_type, type) and issubclass(hint_type, (StoreModel, BaseModel)):
+                if issubclass(hint_type, StoreModel):
+                    desc = hint_type._readable_name if hint_type._readable_name else ''
+                    if desc and hint_type._description:
+                        desc += ': ' + hint_type._description
+                    else:
+                        desc += hint_type._description if hint_type._description else ''
+                else:
+                    field = model.__dict__.get(key)
+                    if field is not None and isinstance(field, StoreField):
+                        desc = field.readable_name if field.readable_name else ''
+                        if field.readable_name and field.description:
+                            desc += '：' + field.description
+                        else:
+                            desc += field.description if field.description else ''
+                    else:
+                        continue
+                desc = f'<{enhanced_type_name(hint_type)}> ' + desc
+                doc.add(nl())
+                doc.add(nl())
+                doc.add(comment(desc))
+                doc.add(comment(f'[thread_id.{prefix}{key}]'))
+                doc = _add_field_comments(doc, hint_type, prefix+key+'.')
+            else:
+                field = model.__dict__.get(key)
+                if field is not None and isinstance(field, StoreField):
+                    doc.add(nl())
+                    desc = f'<{enhanced_type_name(hint_type)}> '
+                    desc += field.readable_name if field.readable_name else ''
+                    if field.readable_name and field.description:
+                        desc += '：' + field.description
+                    else:
+                        desc += field.description if field.description else ''
+                    doc.add(comment(desc))
+                    default = model.get_field_default(field)
+                    doc.add(comment(f'{key}{" = " + parse_default(default)}'))
+    else:
+        for field_name, field_info in model.model_fields.items():
+            desc = f'<{enhanced_type_name(field_info.annotation)}> '
+            desc += field_info.description if field_info.description else ''
+            if isinstance(field_info.annotation, type) and issubclass(field_info.annotation, (StoreModel, BaseModel)):
+                doc.add(nl())
+                doc.add(nl())
+                doc.add(comment(desc))
+                doc.add(comment(f'[thread_id.{prefix}{field_name}]'))
+                doc = _add_field_comments(doc, field_info.annotation, prefix+field_name+'.')
+            else:
+                doc.add(nl())
+                doc.add(comment(desc))
+                if field_info.default_factory is not None:
+                    v = field_info.default_factory()
+                elif field_info.default is not None:
+                    v = field_info.default
+                else:
+                    v = None
+                doc.add(comment(f'{field_name}{' = ' + parse_default(v)}'))
     return doc
 
 def _add_config_comments(doc: TOMLDocument):
+    doc.add(comment('类型说明'))
+    doc.add(comment('<>描述了该字段的类型，写入数据库时会使用pydantic的类型转换功能尝试转换至目标类型'))
+    doc.add(comment('意味着如str, int, float, bool等类型，会尝试自动转换为对应的类型，但不建议依赖类型转换功能'))
+    doc.add(nl())
+    doc.add(nl())
     doc.add(comment('配置说明'))
-    doc.add(comment('[thread_id]: 会使用这个key来作为thread_id，它是唯一的'))
+    doc.add(comment('<str> 线程id: 会使用这个key来作为thread_id，它是唯一的'))
+    doc.add(comment('[thread_id]'))
+    doc.add(comment('<bool> 启动时初始化: 是否在程序启动时自动初始化该线程'))
+    doc.add(comment('init_on_startup = false'))
 
     # 添加字段描述
-    doc = _add_field_comments(doc, ThreadConfig)
+    doc = _add_field_comments(doc, ThreadSettings)
 
-    doc.add(nl())
+    #doc.add(nl())
+    return doc
+
+def _add_config_thread_comments(doc: TOMLDocument, prefix: str, config: dict):
+    doc.add(comment(f'[{prefix}]'))
+    for key, value in config.items():
+        if isinstance(value, dict):
+            doc.add(nl())
+            doc = _add_config_thread_comments(doc, prefix+'.'+key, value)
+        else:
+            doc.add(comment(f'{key} = {parse_default(value)}'))
     return doc
 
 def create_default_thread_configs_toml() -> TOMLDocument:
     doc = document()
-    doc = _add_config_comments(doc)
-
-    doc.add('default_thread', default_thread_toml)
+    doc.add(comment('线程配置'))
+    doc.add(comment('查阅 thread_comments.toml 获取线程配置的详细说明及默认值'))
+    doc.add(nl())
+    doc.add(nl())
+    doc.add(comment('[default_thread]'))
+    doc.add(nl())
+    doc.add(nl())
+    doc = _add_config_thread_comments(doc, 'default_thread_2', DEFAULT_THREAD_2)
+    doc.add(nl())
     return doc
 
 
-def verify_toml(override: TOMLDocument) -> TOMLDocument:
-    default = deepcopy(default_thread_toml)
-    doc = document()
-    doc = _add_config_comments(doc)
-    for key, value in override.items():
-        doc.add(nl())
-        doc.add(key, _merge_tomls(value, deepcopy(default)))
-        doc.add(nl())
-        doc.add(nl())
-    return doc
-
-def _merge_tomls(override: Table, default: Table) -> Table:
-    for key, value in override.items():
-        if key in default.keys() and isinstance(value, Table) and isinstance(default[key], Table):
-            default[key] = loads(__merge_tomls(default[key], value).as_string().strip())
-        elif key in default.keys():
-            default[key] = value
-    return default
-
-def __merge_tomls(override: Table, default: Table) -> Table:
-    for key, value in override.items():
-        if key in default.keys() and isinstance(value, Table) and isinstance(default[key], Table):
-            __merge_tomls(value, default[key])
-            default[key] = loads(default[key].as_string().strip())
-        elif key not in default.keys():
-            default[key] = value
-    return default
-
-def load_config() -> dict[str, ThreadConfig]:
-    global thread_configs_toml, thread_configs
+async def load_config(thread_ids: Optional[Union[list[str], str]] = None) -> dict[str, dict[str, Any]]:
+    global thread_configs
+    update_thread_comments()
     if not os.path.exists(THREADS_FILE):
         thread_configs_toml = create_default_thread_configs_toml()
+        with open(THREADS_FILE, 'w', encoding='utf-8') as f:
+            dump(thread_configs_toml, f)
     else:
         with open(THREADS_FILE, "r", encoding='utf-8') as f:
             thread_configs_toml = load(f)
-            thread_configs_toml = verify_toml(thread_configs_toml)
-    thread_configs = {key: ThreadConfig.model_validate(value) for key, value in thread_configs_toml.unwrap().items()}
-    with open(THREADS_FILE, 'w', encoding='utf-8') as f:
-        dump(thread_configs_toml, f)
+    thread_configs = thread_configs_toml.unwrap()
+    if thread_ids:
+        if isinstance(thread_ids, str):
+            thread_ids = [thread_ids]
+        thread_configs = {k: v for k, v in thread_configs.items() if k in thread_ids}
+    if not thread_configs:
+        return {}
+    has_settings_namespaces = await store_alist_namespaces(prefix=('*', 'model', 'settings'), max_depth=3, limit=99999)
+    has_settings_thread_ids = [n[0] for n in has_settings_namespaces]
+
+    def _dump_models(items: Union[list, tuple, dict]) -> Union[list, tuple, dict]:
+        if isinstance(items, list):
+            new_items = []
+            old_items = items
+            items_type = 'list'
+        elif isinstance(items, tuple):
+            new_items = ()
+            old_items = items
+            items_type = 'tuple'
+        else:
+            new_items = {}
+            old_items = items.items()
+            items_type = 'dict'
+        for item in old_items:
+            if items_type == 'dict':
+                item_value = item[1]
+            else:
+                item_value = item
+            if isinstance(item_value, BaseModel):
+                new_item = item_value.model_dump(exclude_unset=True)
+            elif isinstance(item_value, (list, tuple, dict)):
+                new_item = _dump_models(item_value)
+            else:
+                new_item = item_value
+            if items_type == 'dict':
+                new_items[item[0]] = new_item
+            elif items_type == 'tuple':
+                new_items += (new_item,)
+            else:
+                new_items.append(new_item)
+        return new_items
+    def _write_config_to_store(d: dict, namespace: tuple[str, ...], model: Type[StoreModel]):
+        put_ops = []
+        hints = get_type_hints(model)
+        for key, value in d.items():
+            hint_type = hints.get(key)
+            if hint_type is not None:
+                if isinstance(hint_type, type) and issubclass(hint_type, StoreModel):
+                    if isinstance(value, dict):
+                        put_ops.extend(_write_config_to_store(value, namespace+(key,), hint_type))
+                    else:
+                        warn(f"Invalid value for {key} in config file: expected dict for StoreModel, got {type(value)}")
+                else:
+                    adapter = TypeAdapter(hint_type)
+                    try:
+                        validated_value = adapter.validate_python(value)
+                    except ValidationError as e:
+                        warn(f"Invalid value for {key} in config file: {e}")
+                        continue
+                    if isinstance(validated_value, BaseModel):
+                        validated_value = validated_value.model_dump(exclude_unset=True)
+                    elif isinstance(validated_value, (list, tuple, dict)):
+                        validated_value = _dump_models(validated_value)
+                    put_ops.append(PutOp(namespace=namespace, key=key, value={'value': validated_value}))
+        return put_ops
+
+    ops = []
+    for key, value in thread_configs.items():
+        if key not in has_settings_thread_ids:
+            if isinstance(value, dict):
+                ops.extend(_write_config_to_store(value, (key, 'model', 'settings'), ThreadSettings))
+    if ops:
+        await store_abatch(ops)
+
     return thread_configs
 
-def set_config(override: TOMLDocument) -> dict[str, ThreadConfig]:
-    global thread_configs_toml, thread_configs
-    thread_configs_toml = verify_toml(override)
-    thread_configs = {key: ThreadConfig.model_validate(value) for key, value in thread_configs_toml.unwrap().items()}
-    with open(THREADS_FILE, 'w', encoding='utf-8') as f:
-        dump(thread_configs_toml, f)
-    return thread_configs
+def update_thread_comments():
+    doc = document()
+    doc = _add_config_comments(doc)
+    with open(THREAD_COMMENTS_FILE, "w", encoding='utf-8') as f:
+        dump(doc, f)
 
-
-load_config()
-
-
-def get_thread_configs_toml() -> TOMLDocument:
-    return thread_configs_toml
-
-def get_thread_configs() -> dict[str, ThreadConfig]:
-    return thread_configs
-
-def get_thread_config(thread_id: str) -> ThreadConfig:
-    thread_config = thread_configs.get(thread_id)
-    if not thread_config:
-        warn(f'Thread "{thread_id}" not found, using default thread config.')
-        thread_config = default_thread_config
-    return thread_config
-
-def get_thread_main_config(thread_id: str) -> MainConfig:
-    return get_thread_config(thread_id).main
-
-def get_thread_recycle_config(thread_id: str) -> RecycleConfig:
-    return get_thread_config(thread_id).recycle
-
-def get_thread_retrieve_config(thread_id: str) -> RetrieveConfig:
-    return get_thread_config(thread_id).retrieve
+def get_thread_configs() -> dict[str, dict[str, Any]]:
+        return thread_configs

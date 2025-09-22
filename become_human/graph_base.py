@@ -5,7 +5,6 @@ from langchain_core.tools import BaseTool
 from typing import Sequence, Dict, Any, Union, Callable, Optional
 
 import aiosqlite
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from become_human.memory import MemoryManager
 
@@ -14,7 +13,6 @@ class BaseGraph:
     graph: CompiledStateGraph
     graph_builder: StateGraph
     conn: aiosqlite.Connection
-    checkpointer: AsyncSqliteSaver
 
     llm: BaseChatModel
     tools: list[BaseTool]
