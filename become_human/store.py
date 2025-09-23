@@ -53,11 +53,31 @@ async def store_alist_namespaces(
     prefix: NamespacePath | None = None,
     suffix: NamespacePath | None = None,
     max_depth: int | None = None,
-    limit: int = 100,
+    limit: int = 0,
     offset: int = 0,
+    batch_size: int = 100,
 ) -> list[tuple[str, ...]]:
+    """limit设为0则意为没有限制，将使用batch_size遍历所有结果"""
     async with AsyncSqliteStore.from_conn_string(STORE_PATH) as store:
-        return await store.alist_namespaces(prefix=prefix, suffix=suffix, max_depth=max_depth, limit=limit, offset=offset)
+        if limit == 0:
+            results = []
+            while True:
+                batch = await store.alist_namespaces(
+                    prefix=prefix,
+                    suffix=suffix,
+                    max_depth=max_depth,
+                    limit=batch_size,
+                    offset=offset,
+                )
+                if not batch:
+                    break
+                results.extend(batch)
+                offset += batch_size
+                if len(batch) < batch_size:
+                    break
+            return results
+        else:
+            return await store.alist_namespaces(prefix=prefix, suffix=suffix, max_depth=max_depth, limit=limit, offset=offset)
 
 async def store_asearch(
     namespace_prefix: tuple[str, ...],
@@ -65,20 +85,40 @@ async def store_asearch(
     *,
     query: str | None = None,
     filter: dict[str, Any] | None = None,
-    limit: int = 10,
+    limit: int = 0,
     offset: int = 0,
     refresh_ttl: bool | None = None,
+    batch_size: int = 100,
 ) -> list[SearchItem]:
+    """limit设为0则意为没有限制，将使用batch_size遍历所有结果"""
     async with AsyncSqliteStore.from_conn_string(STORE_PATH) as store:
-        return await store.asearch(namespace_prefix, query=query, filter=filter, limit=limit, offset=offset, refresh_ttl=refresh_ttl)
+        if limit == 0:
+            results = []
+            while True:
+                batch = await store.asearch(
+                    namespace_prefix,
+                    query=query,
+                    filter=filter,
+                    limit=batch_size,
+                    offset=offset,
+                    refresh_ttl=refresh_ttl,
+                )
+                if not batch:
+                    break
+                results.extend(batch)
+                offset += batch_size
+                if len(batch) < batch_size:
+                    break
+            return results
+        else:
+            return await store.asearch(namespace_prefix, query=query, filter=filter, limit=limit, offset=offset, refresh_ttl=refresh_ttl)
 
 async def store_adelete_namespace(
     namespace: tuple[str, ...],
 ) -> None:
-    async with AsyncSqliteStore.from_conn_string(STORE_PATH) as store:
-        items = await store.asearch(namespace, limit=99999)
-        ops = [PutOp(namespace=item.namespace, key=item.key, value=None) for item in items]
-        await store.abatch(ops)
+    items = await store_asearch(namespace)
+    ops = [PutOp(namespace=item.namespace, key=item.key, value=None) for item in items]
+    await store_abatch(ops)
 
 
 store_queue = asyncio.Queue()

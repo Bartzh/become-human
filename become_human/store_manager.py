@@ -13,7 +13,7 @@ class StoreManager:
         self.threads = {}
 
     async def init_thread(self, thread_id: str) -> ThreadStore:
-        search_items = await store_asearch((thread_id,) + ThreadStore._namespace, limit=99999)
+        search_items = await store_asearch((thread_id,) + ThreadStore._namespace)
         model = ThreadStore(thread_id, search_items)
         self.threads[thread_id] = model
         return model

@@ -300,8 +300,6 @@ class HeartbeatManager:
         print("Heartbeat task stopped.")
 
     async def trigger_threads(self):
-        #for thread_id in self.thread_ids.keys():
-        #    await self.trigger_thread(thread_id)
         tasks = [self.trigger_thread(thread_id) for thread_id in self.thread_ids.keys()]
         await asyncio.gather(*tasks)
 
@@ -559,9 +557,21 @@ role_prompt: The role prompt to set for the user"""
             else:
                 message = "Role prompt cannot be empty"
 
-    elif user_input == "/reload_config":
-        await load_config()
-        message = "配置文件已重新加载。"
+    elif user_input == "/load_config" or user_input.startswith("/load_config "):
+        if user_input == "/load_config":
+            result = await load_config(thread_id, force=True)
+        else:
+            splited_input = user_input.split(" ")
+            if splited_input[1]:
+                if splited_input[1] == "__all__":
+                    result = await load_config(force=True)
+                else:
+                    result = await load_config(splited_input[1], force=True)
+        if result:
+            await store_manager.init_thread(thread_id)
+            message = "配置文件已加载。"
+        else:
+            message = "不存在指定的线程ID。"
 
     elif user_input == "/wakeup":
         await main_graph.graph.aupdate_state(config, {"active_time_seconds": 0.0, "self_call_time_secondses": [], "wakeup_call_time_seconds": 0.0})
@@ -594,23 +604,34 @@ role_prompt: The role prompt to set for the user"""
             if not message:
                 message = "没有找到任何记忆。"
 
-    elif user_input == "/reset":
-        main_state = await main_graph.graph.aget_state(config)
-        if not main_state.next:
-            close_thread(thread_id)
-            await memory_manager.delete_timer_from_db(thread_id)
-            await main_graph.graph.checkpointer.adelete_thread(thread_id)
-            await recycle_graph.graph.checkpointer.adelete_thread(thread_id)
-            await retrieve_graph.graph.checkpointer.adelete_thread(thread_id)
-            memory_manager.delete_collection(thread_id, "original")
-            memory_manager.delete_collection(thread_id, "summary")
-            memory_manager.delete_collection(thread_id, "semantic")
-            await store_adelete_namespace((thread_id,))
-            await load_config(thread_id)
-            await init_thread(thread_id)
-            message = "已重置该线程所有数据。"
+    elif user_input == "/reset" or user_input.startswith("/reset "):
+        if user_input == "/reset":
+            message = "Usage: /reset <all|config>"
         else:
-            message = "线程运行时无法重置。"
+            splited_input = user_input.split(" ")
+            if len(splited_input) >= 2 and splited_input[1]:
+                reset_type = splited_input[1]
+                if reset_type == 'config':
+                    await store_adelete_namespace((thread_id, 'model', 'settings'))
+                    await store_manager.init_thread(thread_id)
+                    message = "已重置该线程配置。"
+                elif reset_type == 'all':
+                    main_state = await main_graph.graph.aget_state(config)
+                    if not main_state.next:
+                        close_thread(thread_id)
+                        await memory_manager.delete_timer_from_db(thread_id)
+                        await main_graph.graph.checkpointer.adelete_thread(thread_id)
+                        await recycle_graph.graph.checkpointer.adelete_thread(thread_id)
+                        await retrieve_graph.graph.checkpointer.adelete_thread(thread_id)
+                        memory_manager.delete_collection(thread_id, "original")
+                        memory_manager.delete_collection(thread_id, "summary")
+                        memory_manager.delete_collection(thread_id, "semantic")
+                        await store_adelete_namespace((thread_id,))
+                        await load_config(thread_id)
+                        await init_thread(thread_id)
+                        message = "已重置该线程所有数据。"
+                    else:
+                        message = "线程运行时无法重置所有数据。"
 
 
     #return {"name": "log", "args": {"message": message}}

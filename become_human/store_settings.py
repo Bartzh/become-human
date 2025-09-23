@@ -50,7 +50,7 @@ class RetrieveMemoriesConfig(BaseModel):
     similarity_weight: float = Field(default=0.5, description="检索权重：相似性权重，范围[0,1]", ge=0.0, le=1.0)
     retrievability_weight: float = Field(default=0.25, description="检索权重：可访问性权重，范围[0,1]", ge=0.0, le=1.0)
     diversity_weight: float = Field(default=0.25, description="检索权重：多样性权重，范围[0,1]。只在检索方法为mmr时生效", ge=0.0, le=1.0)
-    strength: float = Field(default=1.0, description="检索强度，范围[0,1]，也可以超过1")
+    strength: float = Field(default=1.0, description="检索强度，作为倍数将乘以被检索记忆的可检索性、稳定时长与难易度的提升幅度，范围[0,1]，也可以超过1")
 
 class RetrieveSettings(StoreModel):
     _namespace = ('retrieve',)

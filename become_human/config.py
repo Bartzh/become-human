@@ -167,6 +167,7 @@ def create_default_thread_configs_toml() -> TOMLDocument:
     doc = document()
     doc.add(comment('线程配置'))
     doc.add(comment('查阅 thread_comments.toml 获取线程配置的详细说明及默认值'))
+    doc.add(comment('将值设为null表示从数据库中删除该字段（若有），保持默认值'))
     doc.add(nl())
     doc.add(nl())
     doc.add(comment('[default_thread]'))
@@ -177,7 +178,7 @@ def create_default_thread_configs_toml() -> TOMLDocument:
     return doc
 
 
-async def load_config(thread_ids: Optional[Union[list[str], str]] = None) -> dict[str, dict[str, Any]]:
+async def load_config(thread_ids: Optional[Union[list[str], str]] = None, force: bool = False) -> dict[str, dict[str, Any]]:
     global thread_configs
     update_thread_comments()
     if not os.path.exists(THREADS_FILE):
@@ -194,8 +195,11 @@ async def load_config(thread_ids: Optional[Union[list[str], str]] = None) -> dic
         thread_configs = {k: v for k, v in thread_configs.items() if k in thread_ids}
     if not thread_configs:
         return {}
-    has_settings_namespaces = await store_alist_namespaces(prefix=('*', 'model', 'settings'), max_depth=3, limit=99999)
-    has_settings_thread_ids = [n[0] for n in has_settings_namespaces]
+    if not force:
+        has_settings_namespaces = await store_alist_namespaces(prefix=('*', 'model', 'settings'), max_depth=3)
+        has_settings_thread_ids = [n[0] for n in has_settings_namespaces]
+    else:
+        has_settings_thread_ids = []
 
     def _dump_models(items: Union[list, tuple, dict]) -> Union[list, tuple, dict]:
         if isinstance(items, list):
@@ -240,6 +244,10 @@ async def load_config(thread_ids: Optional[Union[list[str], str]] = None) -> dic
                     else:
                         warn(f"Invalid value for {key} in config file: expected dict for StoreModel, got {type(value)}")
                 else:
+                    # 如果值是None，则视为删除数据
+                    if value is None:
+                        put_ops.append(PutOp(namespace=namespace, key=key, value=None))
+                        continue
                     adapter = TypeAdapter(hint_type)
                     try:
                         validated_value = adapter.validate_python(value)
@@ -270,4 +278,4 @@ def update_thread_comments():
         dump(doc, f)
 
 def get_thread_configs() -> dict[str, dict[str, Any]]:
-        return thread_configs
+    return thread_configs
