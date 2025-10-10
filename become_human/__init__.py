@@ -18,14 +18,15 @@ from become_human.graph_retrieve import RetrieveGraph
 from become_human.memory import MemoryManager, parse_memory_documents
 from become_human.config import load_config, get_thread_configs
 from become_human.utils import is_valid_json, parse_messages
-from become_human.time import datetime_to_seconds, real_time_to_agent_time, now_seconds, now_agent_seconds, parse_time
-from become_human.store import store_setup, stop_listener, store_adelete_namespace
+from become_human.time import datetime_to_seconds, real_time_to_agent_time, now_seconds, parse_time, utcnow, seconds_to_datetime, parse_agent_time_zone, now_agent_time
+from become_human.store import store_setup, store_stop_listener, store_adelete_namespace
 from become_human.store_manager import store_manager
 
 from typing import Annotated, Optional, Union, Any, Literal
 import os
 import asyncio
 from datetime import datetime
+from dateutil.relativedelta import relativedelta
 from warnings import warn
 from uuid import uuid4
 
@@ -33,7 +34,7 @@ event_queue = asyncio.Queue()
 
 @tool(response_format="content_and_artifact")
 async def retrieve_memories(search_string: Annotated[str, "要检索的内容"], messages: Annotated[list[AnyMessage], InjectedState('messages')], config: RunnableConfig) -> tuple[str, dict[str, Any]]:
-    """从数据库（大脑）中检索记忆"""
+    """从数据库（大脑）中检索（回忆）记忆"""
     thread_id = config["configurable"]["thread_id"]
     store_settings = await store_manager.get_settings(thread_id)
     time_settings = store_settings.main.time_settings
@@ -305,18 +306,40 @@ class HeartbeatManager:
 
     async def trigger_thread(self, thread_id: str):
         config = {"configurable": {"thread_id": thread_id}}
+        store_thread = await store_manager.get_thread(thread_id)
+        store_settings = store_thread.settings
+        store_states = store_thread.states
         # 更新记忆
-        await memory_manager.update_timer(thread_id)
+        await process_timers(thread_id)
 
+        # 获取时间
+        current_datetime = utcnow()
+        current_time_seconds = datetime_to_seconds(current_datetime)
+        current_agent_datetime = real_time_to_agent_time(current_datetime, store_settings.main.time_settings)
+        current_agent_time_seconds = datetime_to_seconds(current_agent_datetime)
+
+        # 处理每天的任务
+        last_update_agent_datetime = seconds_to_datetime(store_states.last_update_agent_time_seconds).astimezone(parse_agent_time_zone(store_settings.main.time_settings))
+        if (current_agent_datetime.day != last_update_agent_datetime.day or
+            current_agent_datetime.month != last_update_agent_datetime.month or
+            current_agent_datetime.year != last_update_agent_datetime.year):
+
+            # 处理年龄
+            if store_settings.main.character_settings.birthday is not None:
+                age = relativedelta(current_agent_datetime.date(), store_settings.main.character_settings.birthday).years
+                if age != store_settings.main.character_settings.age:
+                    store_settings.main.character_settings.age = age
+
+        # 更新最后更新时间
+        store_states.last_update_time_seconds = current_time_seconds
+        store_states.last_update_agent_time_seconds = current_agent_time_seconds
+
+        # 如果线程正在运行，取消以下任务
         main_graph_state = await main_graph.graph.aget_state(config)
         if main_graph_state.next:
             return
 
         # 处理自我调用
-        current_time_seconds = now_seconds()
-        store_settings = await store_manager.get_settings(thread_id)
-        time_settings = store_settings.main.time_settings
-        current_agent_time_seconds = now_agent_seconds(time_settings)
         self_call_time_secondses = main_graph_state.values.get("self_call_time_secondses", [])
         wakeup_call_time_seconds = main_graph_state.values.get("wakeup_call_time_seconds")
         active_self_call_time_secondses_and_notes = main_graph_state.values.get("active_self_call_time_secondses_and_notes", [])
@@ -343,9 +366,9 @@ class HeartbeatManager:
         # 自动回收闲置上下文
         elif main_graph_state.values.get("active_time_seconds") and current_agent_time_seconds > main_graph_state.values.get("active_time_seconds"):# 已超出活跃时间
             messages = await main_graph.get_messages(thread_id)
-            passive_retrieve_messages = [m for m in messages if m.additional_kwargs.get("bh_type", '') == "passive_retrieve"]
+            passive_retrieve_messages = [m for m in messages if m.additional_kwargs.get("bh_message_type", '') == "passive_retrieve"]
             remove_messages = [RemoveMessage(id=m.id) for m in passive_retrieve_messages]
-            not_passive_retrieve_messages = [m for m in messages if m.additional_kwargs.get("bh_type", '') != "passive_retrieve"]
+            not_passive_retrieve_messages = [m for m in messages if m.additional_kwargs.get("bh_message_type", '') != "passive_retrieve"]
             not_extracted_messages = [m for m in messages if not m.additional_kwargs.get("bh_extracted")]
             if [m for m in not_extracted_messages if isinstance(m, HumanMessage) and (not m.additional_kwargs.get("bh_from_system") or not m.additional_kwargs.get("bh_do_not_store"))]: # 有来自用户的消息
                 await recycle_graph.graph.ainvoke({"input_messages": not_extracted_messages, "recycle_type": "extract"}, config)
@@ -420,6 +443,8 @@ async def init_thread(thread_id: str):
 def close_thread(thread_id: str):
     heartbeat_manager.close_thread(thread_id)
 
+async def process_timers(thread_id: str):
+    await memory_manager.update_timers(thread_id)
 
 async def init_graphs(heartbeat_interval: float = 5.0) -> tuple[BaseChatModel, BaseChatModel, Embeddings, MemoryManager, MainGraph, RecycleGraph, RetrieveGraph]:
     global llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph, heartbeat_manager
@@ -433,7 +458,7 @@ async def init_graphs(heartbeat_interval: float = 5.0) -> tuple[BaseChatModel, B
     await load_config()
 
     def create_model(model_name: str, enable_thinking: Optional[bool] = None):
-        if model_name.startswith('qwen-'):
+        if model_name.startswith(('qwen-', 'qwen3-')):
             return ChatQwen(
                 model=model_name,
                 max_retries=2,
@@ -489,7 +514,7 @@ async def close_graphs():
     await main_graph.conn.close()
     await recycle_graph.conn.close()
     await retrieve_graph.conn.close()
-    await stop_listener()
+    await store_stop_listener()
     print("Graphs closed")
 
 
@@ -619,14 +644,13 @@ role_prompt: The role prompt to set for the user"""
                     main_state = await main_graph.graph.aget_state(config)
                     if not main_state.next:
                         close_thread(thread_id)
-                        await memory_manager.delete_timer_from_db(thread_id)
                         await main_graph.graph.checkpointer.adelete_thread(thread_id)
                         await recycle_graph.graph.checkpointer.adelete_thread(thread_id)
                         await retrieve_graph.graph.checkpointer.adelete_thread(thread_id)
                         memory_manager.delete_collection(thread_id, "original")
                         memory_manager.delete_collection(thread_id, "summary")
                         memory_manager.delete_collection(thread_id, "semantic")
-                        await store_adelete_namespace((thread_id,))
+                        await store_adelete_namespace(('threads', thread_id))
                         await load_config(thread_id)
                         await init_thread(thread_id)
                         message = "已重置该线程所有数据。"

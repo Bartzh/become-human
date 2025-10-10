@@ -1,6 +1,7 @@
 import json
 from typing import Union, Optional, Any, Type
 import os
+from pydantic import BaseModel
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, AnyMessage, BaseMessage
 
@@ -82,3 +83,42 @@ def is_that_type(type_hint: Any, target_class: type) -> bool:
             return False
         except:
             return False
+
+
+def dump_basemodels(items: Union[list, tuple, dict, set]) -> Union[list, tuple, dict, set]:
+    if isinstance(items, list):
+        new_items = []
+        old_items = items
+        items_type = 'list'
+    elif isinstance(items, tuple):
+        new_items = ()
+        old_items = items
+        items_type = 'tuple'
+    elif isinstance(items, set):
+        new_items = set()
+        old_items = items
+        items_type = 'set'
+    else:
+        new_items = {}
+        old_items = items.items()
+        items_type = 'dict'
+    for item in old_items:
+        if items_type == 'dict':
+            item_value = item[1]
+        else:
+            item_value = item
+        if isinstance(item_value, BaseModel):
+            new_item = item_value.model_dump(exclude_unset=True)
+        elif isinstance(item_value, (list, tuple, dict, set)):
+            new_item = dump_basemodels(item_value)
+        else:
+            new_item = item_value
+        if items_type == 'dict':
+            new_items[item[0]] = new_item
+        elif items_type == 'tuple':
+            new_items += (new_item,)
+        elif items_type == 'set':
+            new_items.add(new_item)
+        else:
+            new_items.append(new_item)
+    return new_items

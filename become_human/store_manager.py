@@ -1,10 +1,14 @@
 from become_human.store import StoreModel, store_asearch
 from become_human.store_settings import ThreadSettings
+from become_human.store_timers import ThreadTimers
+from become_human.store_states import ThreadStates
 
 class ThreadStore(StoreModel):
     _namespace = ('model',)
     _readable_name = "线程存储模型"
     settings: ThreadSettings
+    timers: ThreadTimers
+    states: ThreadStates
 
 class StoreManager:
     threads: dict[str, ThreadStore]
@@ -13,7 +17,7 @@ class StoreManager:
         self.threads = {}
 
     async def init_thread(self, thread_id: str) -> ThreadStore:
-        search_items = await store_asearch((thread_id,) + ThreadStore._namespace)
+        search_items = await store_asearch(('threads', thread_id) + ThreadStore._namespace)
         model = ThreadStore(thread_id, search_items)
         self.threads[thread_id] = model
         return model
@@ -31,5 +35,13 @@ class StoreManager:
     async def get_settings(self, thread_id: str) -> ThreadSettings:
         thread_store = await self.get_thread(thread_id)
         return thread_store.settings
+
+    async def get_timers(self, thread_id: str) -> ThreadTimers:
+        thread_store = await self.get_thread(thread_id)
+        return thread_store.timers
+
+    async def get_states(self, thread_id: str) -> ThreadStates:
+        thread_store = await self.get_thread(thread_id)
+        return thread_store.states
 
 store_manager = StoreManager()

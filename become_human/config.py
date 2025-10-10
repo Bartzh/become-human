@@ -1,6 +1,6 @@
 from tomlkit import load, loads, dump, document, table, comment, nl, TOMLDocument
 from tomlkit.items import Table
-from become_human.utils import make_sure_path_exists
+from become_human.utils import make_sure_path_exists, dump_basemodels
 from become_human.store import StoreModel, StoreField, store_alist_namespaces, store_abatch
 from become_human.store_settings import ThreadSettings
 from langgraph.store.base import PutOp
@@ -196,42 +196,11 @@ async def load_config(thread_ids: Optional[Union[list[str], str]] = None, force:
     if not thread_configs:
         return {}
     if not force:
-        has_settings_namespaces = await store_alist_namespaces(prefix=('*', 'model', 'settings'), max_depth=3)
-        has_settings_thread_ids = [n[0] for n in has_settings_namespaces]
+        has_settings_namespaces = await store_alist_namespaces(prefix=('threads', '*', 'model', 'settings'), max_depth=4)
+        has_settings_thread_ids = [n[1] for n in has_settings_namespaces]
     else:
         has_settings_thread_ids = []
 
-    def _dump_models(items: Union[list, tuple, dict]) -> Union[list, tuple, dict]:
-        if isinstance(items, list):
-            new_items = []
-            old_items = items
-            items_type = 'list'
-        elif isinstance(items, tuple):
-            new_items = ()
-            old_items = items
-            items_type = 'tuple'
-        else:
-            new_items = {}
-            old_items = items.items()
-            items_type = 'dict'
-        for item in old_items:
-            if items_type == 'dict':
-                item_value = item[1]
-            else:
-                item_value = item
-            if isinstance(item_value, BaseModel):
-                new_item = item_value.model_dump(exclude_unset=True)
-            elif isinstance(item_value, (list, tuple, dict)):
-                new_item = _dump_models(item_value)
-            else:
-                new_item = item_value
-            if items_type == 'dict':
-                new_items[item[0]] = new_item
-            elif items_type == 'tuple':
-                new_items += (new_item,)
-            else:
-                new_items.append(new_item)
-        return new_items
     def _write_config_to_store(d: dict, namespace: tuple[str, ...], model: Type[StoreModel]):
         put_ops = []
         hints = get_type_hints(model)
@@ -256,8 +225,8 @@ async def load_config(thread_ids: Optional[Union[list[str], str]] = None, force:
                         continue
                     if isinstance(validated_value, BaseModel):
                         validated_value = validated_value.model_dump(exclude_unset=True)
-                    elif isinstance(validated_value, (list, tuple, dict)):
-                        validated_value = _dump_models(validated_value)
+                    elif isinstance(validated_value, (list, tuple, dict, set)):
+                        validated_value = dump_basemodels(validated_value)
                     put_ops.append(PutOp(namespace=namespace, key=key, value={'value': validated_value}))
         return put_ops
 
@@ -265,7 +234,7 @@ async def load_config(thread_ids: Optional[Union[list[str], str]] = None, force:
     for key, value in thread_configs.items():
         if key not in has_settings_thread_ids:
             if isinstance(value, dict):
-                ops.extend(_write_config_to_store(value, (key, 'model', 'settings'), ThreadSettings))
+                ops.extend(_write_config_to_store(value, ('threads', key, 'model', 'settings'), ThreadSettings))
     if ops:
         await store_abatch(ops)
 

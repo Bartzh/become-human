@@ -284,7 +284,7 @@ async def get_current_time(config: RunnableConfig) -> str:
 
 @tool(response_format="content_and_artifact")
 async def send_message(message: Annotated[str, '要发送的消息'], messages: Annotated[list[AnyMessage], InjectedState('messages')]) -> tuple[str, dict[str, Any]]:
-    """「即时工具」发送一条消息"""
+    """「即时工具」发送一条消息，这是你唯一可以与用户交流的方式"""
     content = "消息发送成功。"
     artifact = {"bh_do_not_store": True, "bh_streaming": True}
     return content, artifact
@@ -644,7 +644,7 @@ class MainGraph(BaseGraph):
             message = HumanMessage(
                 content=f'以下是根据用户输入自动从你的记忆（数据库）中检索到的内容，可能会出现无关信息，如果需要进一步检索请调用工具`retrieve_memories`：\n\n\n{content}',
                 name="system",
-                additional_kwargs={"bh_do_not_store": True, "bh_from_system": True, "bh_type": "passive_retrieve"}
+                additional_kwargs={"bh_do_not_store": True, "bh_from_system": True, "bh_message_type": "passive_retrieve"}
             )
             new_messages.append(message)
 
@@ -718,7 +718,7 @@ class MainGraph(BaseGraph):
     - 执行记忆检索相当于你的大脑在进行回忆
 - 在角色设定中，你可以拥有情感、性格等。你可以根据情感状态决定是否回复用户（例如，生气时可以不回复）。
 - 如果角色设定中没有特别说明，请以自然、人性化的方式与用户互动。
-- **你需要先输出以你所扮演的角色的第一人称视角的心理活动，再依此考虑角色会做出什么动作（调用工具）。**
+- **最重要的一点，你需要先输出以你所扮演的角色的第一人称视角的心理活动，再依此考虑角色会做出什么动作（调用工具）。**
 
 ## 角色设定
 {role_prompt}'''

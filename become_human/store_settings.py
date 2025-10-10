@@ -3,7 +3,7 @@ from become_human.store import StoreField, StoreModel
 
 from pydantic import BaseModel, Field
 from typing import Literal, Any, Optional, Union, Type
-from datetime import date
+from datetime import datetime, date
 from warnings import warn
 
 

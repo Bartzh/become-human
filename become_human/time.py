@@ -1,18 +1,15 @@
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from pydantic import BaseModel, Field
 from typing import Optional, Union
+from tzlocal import get_localzone_name, get_localzone
 
-def get_system_timezone_info() -> tuple[float, str]:
-    """获取当前系统时区的偏移秒数和名称"""
-    tz = datetime.now().astimezone()
-    tzname = tz.tzname()
-    tzoffset = tz.utcoffset()
-    if tzoffset:
-        tzoffset_sec = tzoffset.total_seconds()
-    if tzname and tzoffset_sec:
-        return tzoffset_sec, tzname
-    else:
-        return 0.0, "UTC"
+def nowtz() -> datetime:
+    """now() but with ZoneInfo"""
+    return datetime.now(get_localzone())
+
+def utcnow() -> datetime:
+    return datetime.now(ZoneInfo('UTC'))
 
 def datetime_to_seconds(dt: datetime) -> float:
     if dt.tzinfo is None:
@@ -28,32 +25,37 @@ def now_seconds() -> float:
     return datetime_to_seconds(datetime.now(timezone.utc))
 
 class AgentTimeZone(BaseModel):
-    offset: float = Field(default_factory=lambda: get_system_timezone_info()[0], gt=-86400.0, lt=86400.0, description="时区偏移，单位为秒")
-    name: str = Field(default_factory=lambda: get_system_timezone_info()[1], description="时区名称")
+    """不设定offset会被当成ZoneInfo"""
+    name: str = Field(description="时区名称")
+    offset: Optional[float] = Field(default=None, gt=-86400.0, lt=86400.0, description="时区偏移，单位为秒")
 
 class AgentTimeSettings(BaseModel):
     agent_time_anchor: float = Field(default=0.0, description="agent时间锚点，agent在此时间时真实世界的时间等于real_time_anchor")
     real_time_anchor: float = Field(default=0.0, description="真实时间锚点，真实世界在此时间时，agent时间等于agent_time_anchor")
     time_scale: float = Field(default=1.0, description="相对于真实世界的时间膨胀，控制时间流逝速度")
-    time_zone: AgentTimeZone = Field(default_factory=lambda: AgentTimeZone(), description="agent时区")
+    time_zone: AgentTimeZone = Field(default_factory=lambda: AgentTimeZone(name=get_localzone_name()), description="agent时区")
 
-def get_agent_time_zone(setting: Union[AgentTimeSettings, AgentTimeZone]) -> timezone:
-    if isinstance(setting, AgentTimeZone):
-        return timezone(timedelta(seconds=setting.offset), setting.name)
+def parse_agent_time_zone(setting: Union[AgentTimeSettings, AgentTimeZone]) -> Union[timezone, ZoneInfo]:
+    if isinstance(setting, AgentTimeSettings):
+        tz = setting.time_zone
     else:
-        return timezone(timedelta(seconds=setting.time_zone.offset), setting.time_zone.name)
+        tz = setting
+    if tz.offset is None:
+        return ZoneInfo(tz.name)
+    else:
+        return timezone(timedelta(seconds=setting.offset), setting.name)
 
 def real_time_to_agent_time(real_time: Union[datetime, float], setting: AgentTimeSettings) -> datetime:
     """使用agent自己的时区"""
     if not setting.agent_time_anchor or not setting.real_time_anchor:
         if isinstance(real_time, (float, int)):
             real_time = seconds_to_datetime(real_time)
-        agent_time = real_time.astimezone(get_agent_time_zone(setting))
+        agent_time = real_time.astimezone(parse_agent_time_zone(setting))
         return agent_time
     if isinstance(real_time, datetime):
         real_time = datetime_to_seconds(real_time)
     seconds = (real_time - setting.real_time_anchor) * setting.time_scale + setting.agent_time_anchor
-    agent_time = seconds_to_datetime(seconds).astimezone(get_agent_time_zone(setting))
+    agent_time = seconds_to_datetime(seconds).astimezone(parse_agent_time_zone(setting))
     return agent_time
 
 def agent_time_to_real_time(agent_time: Union[datetime, float], setting: AgentTimeSettings) -> datetime:
@@ -70,7 +72,7 @@ def agent_time_to_real_time(agent_time: Union[datetime, float], setting: AgentTi
     return agent_time
 
 def now_agent_time(setting: AgentTimeSettings) -> datetime:
-    return real_time_to_agent_time(datetime.now(timezone.utc), setting)
+    return real_time_to_agent_time(utcnow(), setting)
 
 def now_agent_seconds(setting: AgentTimeSettings) -> float:
     return datetime_to_seconds(now_agent_time(setting))
@@ -91,7 +93,7 @@ def parse_time(time: Union[dict, datetime, float], time_zone: Optional[Union[tim
                 elif isinstance(time_zone, timedelta):
                     tz = timezone(time_zone)
                 elif isinstance(time_zone, (AgentTimeSettings, AgentTimeZone)):
-                    tz = get_agent_time_zone(time_zone)
+                    tz = parse_agent_time_zone(time_zone)
                 else:
                     tz = time_zone
                 time = time.astimezone(tz)

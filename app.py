@@ -54,7 +54,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
 USERS_FILE = "./config/app_users.json"
 DEFAULT_USERS = {
     "default_user": {
-        "password": "donotchangeifyouwannaletmein",
+        "password": "donotchangeifyouwantme",
         "is_admin": True,
         "accessible_threads": ["default_thread"]
     }

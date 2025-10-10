@@ -19,29 +19,29 @@ from uuid import uuid4
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from become_human.graph_base import BaseGraph
-from become_human.memory import MemoryManager
+from become_human.memory import MemoryManager, AnyMemory
 from become_human.utils import parse_message, parse_messages
 from become_human.time import now_seconds, real_time_to_agent_time, datetime_to_seconds
 from become_human.store_manager import store_manager
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+#from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 import random
 
 class MemoryEntry(BaseModel):
     content: str = Field(description="记忆的内容")
     stable_time: float = Field(description="记忆的稳定市场，单位为秒", ge=0.0)
-    type: Literal["original", "summary", "semantic"] = Field(description="记忆的类型")
+    type: AnyMemory = Field(description="记忆的类型")
     creation_time_seconds: float = Field(description="记忆的创建时间总秒数")
     id: str = Field(description="记忆的唯一标识符")
 
+rmprompt = '0. 这份记录实际上来自一个AI，但请把它当作人类来撰写你提取到的信息，不要暴露这个人是一个AI的事实'
 class ExtractedMemoryInfo(BaseModel):
-    '''使用这个工具来返回你从记录中提取到的记忆信息，请以第一人称视角提取记忆信息，提取到的所有记忆信息需满足以下规则：
-0. 这份记录实际上来自一个AI，但请把它当作人类来撰写你提取到的信息，不要暴露这个人是一个AI的事实
+    '''请使用这个工具来返回你从记录中提取到的记忆信息，请以第一人称视角提取记忆信息，提取到的所有记忆信息需满足以下规则：
 1. 代词转换规则：
    - 在你最终输出的信息里出现的"我"只能指代当前用户（即需要提取记忆信息的主体），这是为了保持第一人称视角
    - 除"我"外，所有代词（你/他/她/他们）必须替换为完整姓名
-   - 例：原句"他昨天去了超市" → "李四在2023-04-05去了超市"
+   - 例：原句"他昨天去了超市。" → "李四在2023-04-05去了超市。"
 2. 时间规范化：
    - 使用YYYY-MM-DD HH:MM:SS格式
    - 尽可能精确到秒，但原始记录中没有具体信息时也可以从后往前省略一些时间信息，或直接使用文字代替
@@ -49,8 +49,8 @@ class ExtractedMemoryInfo(BaseModel):
     summary: str = Field(description="""对于整个记录尽可能简短的摘要总结。
 
    示例：
-   - 我在2024-03-15 14:30与王芳讨论了项目进度
-   - 张强在2023-08-22 09:15完成了季度报告""")
+   - 我在2024-03-15 14:30与王芳讨论了项目进度。
+   - 我在2025-09-30下午与阿哲聊天，发现他因加班开会没吃午饭，于是给他带了皮蛋瘦肉粥，并提醒他注意胃病。""")
     semantic_memories: list[str] = Field(description="""记录中出现的语义信息，也即知识。提取出的原子级语义单元除了需要满足上面提到的代词转换规则和时间规范化，还需满足：
 1. SPO三元组结构：
    - 主语(S)：专有名词或"我"
@@ -61,16 +61,16 @@ class ExtractedMemoryInfo(BaseModel):
    - 例："我"、"上海交通大学"、"2024春季运动会"
 3. 原子性要求：
    - 单句仅表达一个事实
-   - 例：拆分"我今天吃了苹果和香蕉"为：
-     "我吃了苹果"和"我吃了香蕉"
+   - 例：拆分"我今天吃了苹果和香蕉。"为：
+     "我今天吃了苹果。"和"我今天吃了香蕉。"
 
    示例：
-   - 我毕业于北京大学
-   - 李华擅长编程
-   - 北京时间2024-05-01 20:00举办演唱会
-   - 我的生日是1995-07-23
-   - 项目截止日期为2024-06-30
-   - 东京塔高度为333米""")
+   - 我毕业于北京大学。
+   - 李华擅长编程。
+   - 北京时间2024-05-01 20:00举办演唱会。
+   - 我的生日是1995-07-23。
+   - 项目截止日期为2024-06-30。
+   - 东京塔高度为332.6米。""")
 
 class ExtractedMemories(BaseModel):
     original_memories: list[MemoryEntry] = Field(description="事件原始信息")
@@ -82,7 +82,7 @@ class RecycleState(BaseModel):
     #输入
     input_messages: list[AnyMessage] = Field(description="输入消息列表")
     recycle_type: Literal['extract', 'original'] = Field(description="回收类型")
-    checking_messages: list[AnyMessage] = Field(default=list, description="用于检查是否溢出")
+    checking_messages: list[AnyMessage] = Field(default_factory=list, description="用于检查是否溢出")
     #输出及临时状态
     remove_messages: list[RemoveMessage] = Field(default_factory=list)
     old_messages: list[AnyMessage] = Field(default_factory=list)
@@ -135,30 +135,6 @@ class RecycleGraph(BaseGraph):
                 return 'extract_process'
         return END
 
-    # 回收溢出的消息
-
-    async def recycle_messages(self, state: RecycleState, config: RunnableConfig):
-        # 获取当前消息列表
-        messages = state.checking_messages
-        thread_id = config["configurable"]["thread_id"]
-        store_settings = await store_manager.get_settings(thread_id)
-        max_tokens = store_settings.recycle.recycle_target_size
-        new_messages = trim_messages(
-            messages=messages,
-            max_tokens=max_tokens,
-            token_counter=count_tokens_approximately,
-            strategy='last',
-            start_on=HumanMessage,
-            allow_partial=True,
-            text_splitter=RecursiveCharacterTextSplitter(chunk_size=max_tokens, chunk_overlap=0)
-        )
-        if not new_messages:
-            raise Exception("Trim messages failed.")
-        excess_count = len(messages) - len(new_messages)
-        old_messages = messages[:excess_count]
-        remove_messages = [RemoveMessage(id=message.id) for message in old_messages]
-
-        return {"remove_messages": remove_messages, "new_messages": new_messages, "old_messages": old_messages}
 
     async def original_process(self, state: RecycleState, config: RunnableConfig):
         messages = state.input_messages
@@ -245,7 +221,7 @@ class RecycleGraph(BaseGraph):
                 content=extracted_memory_info_dict["summary"],
                 stable_time=random.uniform(0.0, 3.0) * base_stable_time,
                 type="summary",
-                creation_time_seconds=creation_time_seconds_average,
+                creation_time_seconds=current_time_seconds,
                 id=str(uuid4())
             ))
 

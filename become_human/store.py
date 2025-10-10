@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, TypeAdapter, PydanticSchemaGenerationErro
 from pydantic_core import ValidationError
 from typing import Literal, Any, Iterable, Optional, Union, Callable, get_type_hints
 import asyncio
+from warnings import warn
 
 from become_human.utils import make_sure_path_exists
 
@@ -15,7 +16,7 @@ make_sure_path_exists()
 async def store_setup():
     async with AsyncSqliteStore.from_conn_string(STORE_PATH) as store:
         await store.setup()
-    run_listener()
+    store_run_listener()
 
 async def store_aget(
     namespace: tuple[str, ...],
@@ -133,17 +134,20 @@ async def store_queue_listener():
         elif item['action'] == 'delete':
             await store_adelete(item['namespace'], item['key'])
         elif item['action'] == 'stop':
-            listener_task_is_running = False
-            print('store listener task stopped.')
+            if store_queue.empty():
+                listener_task_is_running = False
+                print('store listener task stopped.')
+            else:
+                await store_queue.put(item)
 listener_task: Optional[asyncio.Task] = None
 
-def run_listener():
+def store_run_listener():
     global listener_task, listener_task_is_running
     listener_task_is_running = True
     if listener_task is None or listener_task.done():
         listener_task = asyncio.create_task(store_queue_listener())
 
-async def stop_listener():
+async def store_stop_listener():
     global listener_task
     if listener_task is not None and not listener_task.done() and listener_task_is_running:
         await store_queue.put({'action': 'stop'})
@@ -163,7 +167,9 @@ class StoreItem(BaseModel):
     value: Optional[Any] = Field(default=None)
 
 class StoreModel:
-    """为该类的子类创建新的类属性，直接赋值为StoreField即可。需要设置_namespace。注意添加StoreModel属性时不要使用泛型也不要赋值；添加BaseModel属性时不要使用泛型。"""
+    """为该类的子类创建新的类属性，直接赋值为StoreField即可。需要设置_namespace。注意添加StoreModel属性时不要使用泛型也不要赋值。
+
+    在使用时，注意只能使用StoreModel.xxx = xxx 的方式改变属性值。"""
 
     _thread_id: str
     _namespace: tuple[str, ...] = ()
@@ -176,21 +182,27 @@ class StoreModel:
         if namespace:
             self._namespace = namespace + super().__getattribute__('_namespace')
         self_namespace = self._namespace
+        self_cls = self.__class__
+        type_hints = get_type_hints(self_cls)
         cached = {}
         not_cached = []
         for item in search_items:
-            if item.namespace == self_namespace:
+            if item.namespace == self_namespace and item.key in type_hints.keys():
+                adapter = TypeAdapter(type_hints[item.key])
+                try:
+                    value = adapter.validate_python(item.value.get('value'))
+                except ValidationError as e:
+                    warn(f"Invalid value for {item.key}: {e}, from store.")
+                    continue
                 cached[item.key] = StoreItem(
                     readable_name=item.value.get('readable_name'),
                     description=item.value.get('description'),
-                    value=item.value.get('value')
+                    value=value
                 )
             else:
                 not_cached.append(item)
         self._cache = cached
 
-        self_cls = self.__class__
-        type_hints = get_type_hints(self_cls)
         for attr_name, attr_type in type_hints.items():
             if not hasattr(self_cls, attr_name) and isinstance(attr_type, type) and issubclass(attr_type, StoreModel):
                 nested_model = attr_type(thread_id, not_cached, super().__getattribute__('_namespace'))
@@ -198,25 +210,24 @@ class StoreModel:
 
     def __getattribute__(self, name: str):
         if name == '_namespace':
-            return (self._thread_id,) + super().__getattribute__('_namespace')
+            return ('threads', self._thread_id) + super().__getattribute__('_namespace')
         attr = super().__getattribute__(name)
         if not isinstance(attr, StoreField):
             return attr
         else:
             value = self._cache.get(name)
-            value_type = self.__class__.__annotations__.get(name)
+            self_cls = self.__class__
+            value_type = get_type_hints(self_cls).get(name)
             if value is not None:
                 value = value.value
             if value is None:
-                value = self.__class__.get_field_default(attr)
+                value = self_cls.get_field_default(attr)
                 if (
                     value is None and
                     value_type is not None and
                     (str(value_type) == 'typing.Any' or not isinstance(value, value_type))
                 ):
-                    raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}', from StoreModel.")
-            if isinstance(value_type, type) and issubclass(value_type, BaseModel) and isinstance(value, dict):
-                value = value_type.model_validate(value)
+                    raise AttributeError(f"'{self_cls.__name__}' object has no attribute '{name}', from StoreModel.")
             return value
 
     def __setattr__(self, name: str, value: Any):
@@ -230,24 +241,18 @@ class StoreModel:
             hints = get_type_hints(self.__class__)
             value_type = hints.get(name)
             if value_type is not None:
-                if isinstance(value, type) and issubclass(value_type, BaseModel):
-                    if not isinstance(value, value_type):
-                        raise ValueError(f"Invalid value for {self.__class__.__name__}.{name}: {e}")
-                    else:
-                        value = value.model_dump(exclude_unset=True)
-                else:
-                    adapter = TypeAdapter(value_type)
-                    try:
-                        adapter.validate_python(value, strict=True)
-                    except ValidationError as e:
-                        raise ValueError(f"Invalid value for {self.__class__.__name__}.{name}: {e}")
+                adapter = TypeAdapter(value_type)
+                try:
+                    value = adapter.validate_python(value, strict=True)
+                except ValidationError as e:
+                    raise ValueError(f"Invalid value for {self.__class__.__name__}.{name}: {e}")
             item = self._cache.get(name)
             if item is not None:
                 item.value = value
             else:
                 item = StoreItem(value=value)
                 self._cache[name] = item
-            store_queue.put_nowait({'action': 'put', 'namespace': self._namespace, 'key': name, 'value': item.model_dump()})
+            store_queue.put_nowait({'action': 'put', 'namespace': self._namespace, 'key': name, 'value': item.model_dump(exclude_none=True)})
 
     def __delattr__(self, name: str):
         try:

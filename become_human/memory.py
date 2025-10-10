@@ -1,8 +1,7 @@
 import chromadb
-from chromadb.api.types import ID, OneOrMany, Where, WhereDocument
+from chromadb.api.types import ID, OneOrMany, Where, WhereDocument, GetResult, QueryResult
 from chromadb.api.models.Collection import Collection
 from chromadb.config import Settings
-import aiosqlite
 from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
 from datetime import datetime, timezone, timedelta
@@ -10,14 +9,17 @@ from typing import Any, Literal, Union, Optional
 from pydantic import BaseModel, Field
 from uuid import uuid4
 import numpy as np
-import json
 import jieba
+from warnings import warn
 
-from become_human.time import seconds_to_datetime, AgentTimeSettings, get_agent_time_zone, now_seconds, AgentTimeZone, parse_time
+from become_human.time import seconds_to_datetime, AgentTimeSettings, parse_agent_time_zone, now_seconds, AgentTimeZone, parse_time, utcnow
 from become_human.store_manager import store_manager
 
 from langchain_core.runnables.config import run_in_executor
 
+
+AnyMemory = Literal["original", "summary", "semantic"]
+MEMORY_TYPES = set(["original", "summary", "semantic"])
 
 
 class MemoryManager():
@@ -35,90 +37,27 @@ class MemoryManager():
     @classmethod
     async def create(cls, embeddings: Embeddings, db_path: str = './data/aimemory_chroma_db'):
         instance = cls(embeddings, db_path)
-        await instance.init_db()
+        #await instance.init_db()
         return instance
 
 
-    async def init_db(self):
-        async with aiosqlite.connect(self.timer_db_path) as db:
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS update_timers (
-                    thread_id TEXT PRIMARY KEY,
-                    timer_data TEXT NOT NULL,
-                    last_update_time_seconds REAL NOT NULL
-                )
-            ''')
-            await db.commit()
-
-    async def get_timer_from_db(self, thread_id: str) -> dict:
-        async with aiosqlite.connect(self.timer_db_path) as db:
-            async with db.execute(
-                'SELECT timer_data, last_update_time_seconds FROM update_timers WHERE thread_id = ?', 
-                (thread_id,)
-            ) as cursor:
-                result = await cursor.fetchone()
-                if result:
-                    return {
-                        "thread_id": thread_id,
-                        "update_timers": json.loads(result[0]),
-                        "last_update_time_seconds": result[1]
-                    }
-                else:
-                    # 默认值
-                    return {
-                        "thread_id": thread_id,
-                        "update_timers": [
-                            {'left': 0.0, 'threshold': 5.0, 'stable_time_range': [{'$gte': 0.0}, {'$lt': 43200.0}]},
-                            {'left': 0.0, 'threshold': 30.0, 'stable_time_range': [{'$gte': 43200.0}, {'$lt': 86400.0}]},
-                            {'left': 0.0, 'threshold': 60.0, 'stable_time_range': [{'$gte': 86400.0}, {'$lt': 864000.0}]},
-                            {'left': 0.0, 'threshold': 500.0, 'stable_time_range': [{'$gte': 864000.0}, {'$lt': 8640000.0}]},
-                            {'left': 0.0, 'threshold': 3600.0, 'stable_time_range': [{'$gte': 8640000.0}]},
-                        ],
-                        "last_update_time_seconds": now_seconds()
-                    }
-
-    async def set_timer_to_db(self, thread_id: str, update_timers: list, last_update_time_seconds: float) -> None:
-        async with aiosqlite.connect(self.timer_db_path) as db:
-            await db.execute('''
-                INSERT OR REPLACE INTO update_timers (thread_id, timer_data, last_update_time_seconds)
-                VALUES (?, ?, ?)
-            ''', (thread_id, json.dumps(update_timers), last_update_time_seconds))
-            await db.commit()
-
-    async def delete_timer_from_db(self, thread_id: str) -> bool:
-        """
-        从timer数据库中删除指定thread_id的记录
-        
-        Args:
-            thread_id (str): 要删除的线程ID
-            
-        Returns:
-            bool: 删除成功返回True，未找到记录返回False
-        """
-        async with aiosqlite.connect(self.timer_db_path) as db:
-            cursor = await db.execute(
-                'DELETE FROM update_timers WHERE thread_id = ?', 
-                (thread_id,)
-            )
-            await db.commit()
-            # 如果rowcount大于0，说明有记录被删除
-            return cursor.rowcount > 0
-
-    async def update_timer(self, thread_id: str):
-        types = ['original', 'summary', 'semantic']
+    async def update_timers(self, thread_id: str):
+        states = await store_manager.get_states(thread_id)
+        types = states.memory_types
 
         update_count = 0
-        data = await self.get_timer_from_db(thread_id)
+        timers = await store_manager.get_timers(thread_id)
 
-        current_time_seconds = now_seconds()
-        time_diff = current_time_seconds - data['last_update_time_seconds']
-        data['last_update_time_seconds'] = current_time_seconds
-        for timer in data['update_timers']:
-            timer['left'] += time_diff
-            if timer['left'] >= timer['threshold']:
-                timer['left'] = 0
+        current_time = utcnow()
+        new_timers = []
+        for timer in timers.memory_update_timers:
+            if timer.is_agent_time:
+                warn(f'不支持MemoryUpdateTimer使用agent时间。')
+                continue
+            next_timer, triggered = timer.calculate_next_timer(current_time)
+            if triggered:
                 for t in types:
-                    where = validated_where({'$and': [{'stable_time': item} for item in timer['stable_time_range']]})
+                    where = validated_where({'$and': [{'stable_time': item} for item in timer.stable_time_range]})
                     result = await self.aget(
                         thread_id=thread_id,
                         memory_type=t,
@@ -128,9 +67,11 @@ class MemoryManager():
                     if result['ids']:
                         await self.update_memories(result, t, thread_id)
                         update_count += len(result['ids'])
+            if next_timer is not None:
+                new_timers.append(next_timer)
+        timers.memory_update_timers = new_timers
 
-        await self.set_timer_to_db(data['thread_id'], data['update_timers'], data['last_update_time_seconds'])
-        print(f'updated {update_count} memories for thread "{data['thread_id']}".')
+        print(f'updated {update_count} memories for thread "{thread_id}".')
 
 
     def update(self, metadata: dict, current_time_seconds: float) -> dict:
@@ -159,7 +100,7 @@ class MemoryManager():
         if updated_metadata.get("forgot"):
             return {"forgot": True}
 
-        datetime_alpha = calculate_memory_datetime_alpha(seconds_to_datetime(current_time_seconds).astimezone(get_agent_time_zone(time_settings)))
+        datetime_alpha = calculate_memory_datetime_alpha(seconds_to_datetime(current_time_seconds).astimezone(parse_agent_time_zone(time_settings)))
         stable_strength = calculate_stability_curve(updated_metadata["retrievability"])
         stable_time_diff = metadata["stable_time"] * stable_strength - metadata["stable_time"]
         if stable_time_diff >= 0:
@@ -180,7 +121,7 @@ class MemoryManager():
 
         return metadata_patch
 
-    async def update_memories(self, results: dict[str, Any], memory_type: str, thread_id: str) -> None:
+    async def update_memories(self, results: GetResult, memory_type: str, thread_id: str) -> None:
         current_time_seconds = now_seconds()
         if not results["ids"]:
             return
@@ -206,16 +147,12 @@ class MemoryManager():
     class InitialMemory(BaseModel):
         content: str = Field(description="The content of the memory")
         creation_time_seconds: float = Field(description="The creation time seconds of the memory")
-        type: Literal["original", "summary", "semantic"] = Field(description="The type of the memory")
+        type: AnyMemory = Field(description="The type of the memory")
         id: str = Field(default_factory=lambda: str(uuid4()), description="The id of the memory")
         stable_time: float = Field(description="The stable time base of the memory", gt=0.0)
 
     async def add_memories(self, memories: list[InitialMemory], thread_id: str) -> None:
-        docs: dict[str, list[Document]] = {
-            "original": [],
-            "summary": [],
-            "semantic": []
-        }
+        docs: dict[str, list[Document]] = {t: [] for t in MEMORY_TYPES}
         current_time_seconds = now_seconds()
         time_settings = (await store_manager.get_settings(thread_id)).main.time_settings
         for memory in memories:
@@ -223,7 +160,7 @@ class MemoryManager():
             words = set(jieba.cut(memory.content))
             max_words_length = 200
             difficulty = 1 - min(1.0, (len(words) / max_words_length) ** 3)
-            datetime_alpha = calculate_memory_datetime_alpha(seconds_to_datetime(memory.creation_time_seconds).astimezone(get_agent_time_zone(time_settings)))
+            datetime_alpha = calculate_memory_datetime_alpha(seconds_to_datetime(memory.creation_time_seconds).astimezone(parse_agent_time_zone(time_settings)))
             stable_time = memory.stable_time * difficulty * datetime_alpha # 稳定性，决定了可检索性的衰减速度
             metadata = {
                 "creation_time_seconds": memory.creation_time_seconds,
@@ -250,7 +187,7 @@ class MemoryManager():
 
     class RetrieveInput(BaseModel):
         search_string: Optional[str] = Field(default=None, description="检索字符串")
-        search_type: Literal["original", "summary", "semantic"] = Field(description="检索类型")
+        search_type: AnyMemory = Field(description="检索类型")
         search_method: Literal["similarity", "mmr"] = Field(default="similarity", description="检索方法")
         k: int = Field(description="返回的记忆数量", ge=0)
         fetch_k: int = Field(description="从多少个结果中筛选出最终结果(fetch_k>k)，目前只有mmr使用", ge=0)
@@ -291,7 +228,7 @@ class MemoryManager():
         current_time_seconds = now_seconds()
         agent_time_settings = (await store_manager.get_settings(thread_id)).main.time_settings
 
-        ids_to_delete = {"original": set(), "summary": set(), "semantic": set()}
+        ids_to_delete = {t: set() for t in MEMORY_TYPES}
 
         # 这里是纯时间过滤的检索
         if gets:
@@ -302,7 +239,7 @@ class MemoryManager():
                     where=validated_where({"$and": g["metadata_filter"]}),
                     limit=g["k"],
                 )
-                docs = get_results_to_docs(results)
+                docs = get_result_to_docs(results)
                 ids = []
                 metadatas = []
                 strength = g["strength"]
@@ -442,7 +379,7 @@ class MemoryManager():
         offset: Optional[int] = None,
         where_document: Optional[WhereDocument] = None,
         include: Optional[list[str]] = None,
-    ) -> dict[str, Any]:
+    ) -> GetResult:
         kwargs = {
             "ids": ids,
             "where": where if where else None,
@@ -466,7 +403,7 @@ class MemoryManager():
         offset: Optional[int] = None,
         where_document: Optional[WhereDocument] = None,
         include: Optional[list[str]] = None,
-    ) -> dict[str, Any]:
+    ) -> GetResult:
         return await run_in_executor(None, self.get, thread_id, memory_type, ids, where, limit, offset, where_document, include)
 
     async def aadd_documents(
@@ -501,8 +438,9 @@ class MemoryManager():
             where_document=where_document if where_document else None,
             **kwargs,
         )
-        return results_to_docs_and_scores(result)
-    
+        #对于chroma的cosine来说，输出的score范围是0~1，越小越相似。这里统一反转为越大越相似
+        return [(doc, 1 - score) for doc, score in query_result_to_docs_and_scores(result)]
+
     async def asimilarity_search_by_vector_with_score(
         self,
         thread_id: str,
@@ -529,7 +467,6 @@ class MemoryManager():
         where_document: Optional[dict[str, str]] = None,
         **kwargs: Any,
     ) -> list[tuple[Document, float]]:
-        #对于chroma的cosine来说，输出的score范围是0~1，越小越相似。这里统一反转为越大越相似
         docs_and_scores = await self.asimilarity_search_by_vector_with_score(
             thread_id=thread_id,
             memory_type=memory_type,
@@ -540,7 +477,7 @@ class MemoryManager():
             **kwargs)
         if not docs_and_scores:
             return []
-        docs_and_scores_with_retrievability = [(doc, (1 - score) * similarity_weight + doc.metadata.get("retrievability", 0) * retrievability_weight) for doc, score in docs_and_scores]
+        docs_and_scores_with_retrievability = [(doc, score * similarity_weight + doc.metadata.get("retrievability", 0) * retrievability_weight) for doc, score in docs_and_scores]
         docs_and_scores_with_retrievability.sort(key=lambda x: x[1], reverse=True)
         return docs_and_scores_with_retrievability
 
@@ -695,7 +632,7 @@ class MemoryManager():
             diversity_weight=diversity_weight
         )
 
-        candidates = results_to_docs(results)
+        candidates = query_result_to_docs(results)
 
         # 使用maximal_marginal_relevance_with_retrievability返回的实际分数
         selected_results = [(candidates[i], score) for i, score in mmr_selected]
@@ -802,7 +739,7 @@ class MemoryManager():
     def get_collection(
         self,
         thread_id: str,
-        memory_type: Literal["original", "semantic", "summary"],
+        memory_type: AnyMemory,
     ) -> Collection:
         return self.vector_store_client.get_or_create_collection(
             name=f"{thread_id}_{memory_type}",
@@ -816,9 +753,13 @@ class MemoryManager():
     def delete_collection(
         self,
         thread_id: str,
-        memory_type: Literal["original", "semantic", "summary"],
-    ) -> None:
-        self.vector_store_client.delete_collection(name=f"{thread_id}_{memory_type}")
+        memory_type: AnyMemory,
+    ) -> bool:
+        try:
+            self.vector_store_client.delete_collection(name=f"{thread_id}_{memory_type}")
+            return True
+        except ValueError:
+            return False
 
 def validated_where(where: dict) -> Optional[dict]:
     '''只解决在and或or时列表里不能只有一个元素的问题'''
@@ -835,7 +776,7 @@ def validated_where(where: dict) -> Optional[dict]:
         return where
 
 
-def results_to_docs(results: Any) -> list[Document]:
+def query_result_to_docs(results: QueryResult) -> list[Document]:
     if not results['ids']:
         return []
     return [
@@ -849,7 +790,7 @@ def results_to_docs(results: Any) -> list[Document]:
         )
     ]
 
-def get_results_to_docs(results: dict[str, Any]) -> list[Document]:
+def get_result_to_docs(results: GetResult) -> list[Document]:
     if not results['ids']:
         return []
     return [
@@ -863,7 +804,7 @@ def get_results_to_docs(results: dict[str, Any]) -> list[Document]:
         )
     ]
 
-def results_to_docs_and_scores(results: Any) -> list[tuple[Document, float]]:
+def query_result_to_docs_and_scores(results: QueryResult) -> list[tuple[Document, float]]:
     if not results['ids']:
         return []
     return [
