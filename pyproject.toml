@@ -10,11 +10,11 @@ dependencies = [
     "dashscope>=1.23.2",
     "fastapi>=0.115.9",
     "jieba>=0.42.1",
+    "langchain>=1.0.0",
     "langchain-community>=0.3.22",
     "langchain-openai>=0.3.14",
-    "langchain-qwq>=0.1.6",
-    "langchain-sandbox>=0.0.6",
-    "langgraph>=0.3.34",
+    "langchain-qwq>=0.3.1",
+    "langgraph>=1.0.0",
     "langgraph-checkpoint-sqlite>=2.0.6",
     "langsmith>=0.3.37",
     "pyjwt>=2.10.1",
@@ -23,4 +23,9 @@ dependencies = [
     "tzdata>=2025.2",
     "tzlocal>=5.3.1",
     "uvicorn>=0.34.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
 ]

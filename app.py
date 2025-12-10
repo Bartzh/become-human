@@ -18,14 +18,15 @@ from langchain_core.messages import AnyMessage, ToolMessage, BaseMessage, AIMess
 
 from become_human import init_graphs, close_graphs, command_processing, init_thread, event_queue, stream_graph_updates
 from become_human.utils import extract_text_parts
+from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 
 #from fastapi.middleware.cors import CORSMiddleware
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph
-    llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph, recycle_graph, retrieve_graph = await init_graphs()
+    global llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph
+    llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph = await init_graphs()
     event_listener_task = asyncio.create_task(event_listener())
     yield
     event_listener_task.cancel()
@@ -56,7 +57,7 @@ DEFAULT_USERS = {
     "default_user": {
         "password": "donotchangeifyouwantme",
         "is_admin": True,
-        "accessible_threads": ["default_thread"]
+        "accessible_threads": ["default_thread_1", "default_thread_2"]
     }
 }
 
@@ -116,11 +117,11 @@ async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
             continue
         elif isinstance(message, AIMessage):
             for tool_call in message.tool_calls:
-                if tool_call["name"] == "send_message":
-                    if tool_call["args"].get("message"):
-                        messages.append({"role": "ai", "content": tool_call["args"]["message"], "id": f'{message.id}.{tool_call["id"]}', "name": None})
+                if tool_call["name"] == SEND_MESSAGE:
+                    if tool_call["args"].get(SEND_MESSAGE_CONTENT):
+                        messages.append({"role": "ai", "content": tool_call["args"][SEND_MESSAGE_CONTENT], "id": f'{message.id}.{tool_call["id"]}', "name": None})
                     else:
-                        warn('send_message意外的没有参数，也可能是打断导致的概率问题')
+                        warn(f'{SEND_MESSAGE}意外的没有参数，也可能是打断导致的概率问题')
         elif isinstance(message, HumanMessage):
             if isinstance(message.content, str):
                 content = human_message_pattern.sub('', message.text())
@@ -164,7 +165,7 @@ async def input_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
             return Response()
 
     await stream_graph_updates(extracted_message, thread_id, user_name=user_input.get("user_name"))
-    # 处理回收逻辑
+
     main_state = await main_graph.graph.aget_state(config)
     main_messages = main_state.values["messages"]
     new_messages = main_state.values["new_messages"]

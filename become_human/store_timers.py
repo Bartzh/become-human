@@ -22,7 +22,7 @@ class Timer(BaseModel):
     next_time_seconds: float = Field(default=0.0, description="下次执行时间")
     loop_times: int = Field(default=0, description="已运行次数，只有当存在max_loop_times时才会计算")
 
-    def calculate_next_timer(self, current_time: datetime) -> tuple[Union[Self, None], bool]:
+    def calculate_next_timer(self, current_time: datetime) -> tuple[Optional[Self], bool]:
         """
         计算下次运行时间并考虑最大循环次数。
 

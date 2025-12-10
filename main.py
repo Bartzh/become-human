@@ -1,25 +1,25 @@
 from become_human import init_graphs, close_graphs, command_processing, init_thread, event_queue, stream_graph_updates
+from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 import os
 import asyncio
 
-thread_id = "default_thread"
-config = {"configurable": {"thread_id": thread_id}}
+thread_id = "default_thread_1"
 user_name = os.getenv('USER_NAME')
 
 last_message = ''
 def _print(item: dict):
     global last_message
-    if item['name'] == 'send_message' or item['name'] == 'log':
+    if item['name'] == SEND_MESSAGE or item['name'] == 'log':
         if item.get('not_completed'):
-            print(item['args']['message'].replace(last_message, '', 1), end='', flush=True)
-            last_message = item['args']['message']
+            print(item['args'][SEND_MESSAGE_CONTENT].replace(last_message, '', 1), end='', flush=True)
+            last_message = item['args'][SEND_MESSAGE_CONTENT]
         else:
-            print(item['args']['message'].replace(last_message, '', 1), flush=True)
+            print(item['args'][SEND_MESSAGE_CONTENT].replace(last_message, '', 1), flush=True)
             last_message = ''
 
 async def main():
     await init_graphs(10)
-    await init_thread(config['configurable']['thread_id'])
+    await init_thread(thread_id)
     task = asyncio.create_task(event_listener())
 
     while True:

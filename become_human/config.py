@@ -1,13 +1,12 @@
 from tomlkit import load, loads, dump, document, table, comment, nl, TOMLDocument
 from tomlkit.items import Table
-from become_human.utils import make_sure_path_exists, dump_basemodels
+from become_human.utils import make_sure_path_exists, dump_basemodels, to_json_like_string, get_readable_type_name
 from become_human.store import StoreModel, StoreField, store_alist_namespaces, store_abatch
 from become_human.store_settings import ThreadSettings
 from langgraph.store.base import PutOp
 import os
 from warnings import warn
 from typing import Optional, Literal, Type, Union, get_type_hints, Any
-from typing_inspect import get_args, get_origin
 from pydantic import BaseModel, TypeAdapter
 from pydantic_core import ValidationError
 
@@ -18,59 +17,34 @@ THREAD_COMMENTS_FILE = "./config/thread_comments.toml"
 
 thread_configs: dict[str, dict[str, Any]] = {}
 
+DEFAULT_THREAD_1 = {
+    'main': {
+        'role_prompt': '你是用户的私人助手，用户是你的主人，你也会如此称呼ta。你对主人忠诚且富有同理心，用简洁自然的语言为主人提供帮助就是你唯一想做的事。你与主人是通过一个无聊天记录（阅后即焚）的即时通讯软件远程交流的。',
+        'instruction_prompt': '你接下来见到的第一个人就是你的主人，向他打个招呼吧。'
+    }
+}
+
 DEFAULT_THREAD_2 = {
     'main': {
-        'role_prompt': '你是一个待人较为冷淡的人，对什么事情都无所谓，比较懒，说话也很简短、敷衍。',
+        'role_prompt': '你是一个待人较为冷淡的人，对什么事情都无所谓，比较懒，说话也很简短、敷衍。他人是一个无聊天记录（阅后即焚）的即时通讯软件联系到你的。',
         'active_time_range': (60.0, 1800.0),
         'self_call_time_ranges': [(300.0, 10800.0)],
         'wakeup_time_range': (1.0, 61201.0),
         'sleep_time_range': (82800.0, 32400.0)
     },
-    'recycle': {
+    'recycling': {
         'base_stable_time': 43200.0,
-        'cleanup_on_non_active_recycle': True,
+        'cleanup_on_non_active_recycling': True,
         'cleanup_target_size': 800
     },
-    'retrieve': {
-        'active_retrieve_config': {
+    'retrieval': {
+        'active_retrieval_config': {
             'similarity_weight': 0.4,
-            'retrievability_weight': 0.3,
-            'diversity_weight': 0.3
+            'retrievability_weight': 0.35,
+            'diversity_weight': 0.25
         }
     }
 }
-
-def parse_default(d: Any) -> str:
-        if isinstance(d, str):
-            return f'"{d}"'
-        elif isinstance(d, bool):
-            return str(d).lower()
-        elif d is None:
-            return 'null'
-        elif isinstance(d, (tuple, list)):
-            return '[' + ', '.join([parse_default(i) for i in d]) + ']'
-        else:
-            return str(d)
-
-def enhanced_type_name(tp):
-    """增强的类型名称获取"""
-    origin = get_origin(tp)
-    args = get_args(tp)
-
-    if origin is Union:
-        arg_names = [enhanced_type_name(a) for a in args]
-        return f"Union[{', '.join(arg_names)}]"
-
-    elif origin:
-        if args:
-            arg_names = [enhanced_type_name(a) for a in args]
-            name = getattr(origin, '__name__', str(origin))
-            return f"{name}[{', '.join(arg_names)}]"
-        else:
-            return getattr(origin, '__name__', str(origin))
-
-    else:
-        return getattr(tp, '__name__', str(tp))
 
 def _add_field_comments(doc: TOMLDocument, model: Type[Union[StoreModel, BaseModel]], prefix: str = "") -> TOMLDocument:
     """递归地将模型字段的描述添加为TOML文档的注释"""
@@ -94,7 +68,7 @@ def _add_field_comments(doc: TOMLDocument, model: Type[Union[StoreModel, BaseMod
                             desc += field.description if field.description else ''
                     else:
                         continue
-                desc = f'<{enhanced_type_name(hint_type)}> ' + desc
+                desc = f'<{get_readable_type_name(hint_type)}> ' + desc
                 doc.add(nl())
                 doc.add(nl())
                 doc.add(comment(desc))
@@ -104,7 +78,7 @@ def _add_field_comments(doc: TOMLDocument, model: Type[Union[StoreModel, BaseMod
                 field = model.__dict__.get(key)
                 if field is not None and isinstance(field, StoreField):
                     doc.add(nl())
-                    desc = f'<{enhanced_type_name(hint_type)}> '
+                    desc = f'<{get_readable_type_name(hint_type)}> '
                     desc += field.readable_name if field.readable_name else ''
                     if field.readable_name and field.description:
                         desc += '：' + field.description
@@ -112,10 +86,10 @@ def _add_field_comments(doc: TOMLDocument, model: Type[Union[StoreModel, BaseMod
                         desc += field.description if field.description else ''
                     doc.add(comment(desc))
                     default = model.get_field_default(field)
-                    doc.add(comment(f'{key}{" = " + parse_default(default)}'))
+                    doc.add(comment(f'{key}{" = " + to_json_like_string(default)}'))
     else:
         for field_name, field_info in model.model_fields.items():
-            desc = f'<{enhanced_type_name(field_info.annotation)}> '
+            desc = f'<{get_readable_type_name(field_info.annotation)}> '
             desc += field_info.description if field_info.description else ''
             if isinstance(field_info.annotation, type) and issubclass(field_info.annotation, (StoreModel, BaseModel)):
                 doc.add(nl())
@@ -132,7 +106,7 @@ def _add_field_comments(doc: TOMLDocument, model: Type[Union[StoreModel, BaseMod
                     v = field_info.default
                 else:
                     v = None
-                doc.add(comment(f'{field_name}{' = ' + parse_default(v)}'))
+                doc.add(comment(f'{field_name}{' = ' + to_json_like_string(v)}'))
     return doc
 
 def _add_config_comments(doc: TOMLDocument):
@@ -160,7 +134,7 @@ def _add_config_thread_comments(doc: TOMLDocument, prefix: str, config: dict):
             doc.add(nl())
             doc = _add_config_thread_comments(doc, prefix+'.'+key, value)
         else:
-            doc.add(comment(f'{key} = {parse_default(value)}'))
+            doc.add(comment(f'{key} = {to_json_like_string(value)}'))
     return doc
 
 def create_default_thread_configs_toml() -> TOMLDocument:
@@ -170,7 +144,7 @@ def create_default_thread_configs_toml() -> TOMLDocument:
     doc.add(comment('将值设为null表示从数据库中删除该字段（若有），保持默认值'))
     doc.add(nl())
     doc.add(nl())
-    doc.add(comment('[default_thread]'))
+    doc = _add_config_thread_comments(doc, 'default_thread_1', DEFAULT_THREAD_1)
     doc.add(nl())
     doc.add(nl())
     doc = _add_config_thread_comments(doc, 'default_thread_2', DEFAULT_THREAD_2)
@@ -248,3 +222,6 @@ def update_thread_comments():
 
 def get_thread_configs() -> dict[str, dict[str, Any]]:
     return thread_configs
+
+def get_thread_config(thread_id: str) -> dict[str, Any]:
+    return thread_configs.get(thread_id, {})

@@ -27,6 +27,11 @@ class StoreManager:
             return await self.init_thread(thread_id)
         else:
             return self.threads[thread_id]
+    
+    def get_thread_sync(self, thread_id: str) -> ThreadStore:
+        if thread_id not in self.threads.keys():
+            raise ValueError(f"线程 {thread_id} 不存在")
+        return self.threads[thread_id]
 
     def close_thread(self, thread_id: str) -> None:
         if thread_id in self.threads.keys():
