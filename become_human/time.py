@@ -7,27 +7,32 @@ from tzlocal import get_localzone_name, get_localzone
 import re
 
 def nowtz() -> datetime:
-    """now() but with ZoneInfo"""
+    """now() but with local ZoneInfo"""
     return datetime.now(get_localzone())
 
 def utcnow() -> datetime:
+    """now() but with UTC"""
     return datetime.now(timezone.utc)
 
 def datetime_to_seconds(dt: datetime) -> float:
+    """将datetime转换为秒数，类似于timestamp但支持datetime的所有时间范围，与timestamp一样为UTC时区"""
     if dt.tzinfo is None:
        dt = dt.astimezone()
     # 会自动转换成utc然后计算秒数，时区偏移量会影响total_seconds，所以必须使用0偏移量的utc计算
     return (dt - datetime(1, 1, 1, tzinfo=timezone.utc)).total_seconds()
 
 def seconds_to_datetime(seconds: float) -> datetime:
-    """UTC时区"""
+    """将秒数转换为datetime，保持UTC时区"""
     return datetime(1, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=seconds)
 
 def now_seconds() -> float:
+    """获取当前时间的秒数"""
     return datetime_to_seconds(datetime.now(timezone.utc))
 
 class AgentTimeZone(BaseModel):
-    """不设定offset会被当成ZoneInfo"""
+    """agent的时区模型
+    
+    不设定offset的话会被当成ZoneInfo处理"""
     name: str = Field(description="时区名称")
     offset: Optional[float] = Field(default=None, gt=-86400.0, lt=86400.0, description="时区偏移，单位为秒")
 
@@ -38,12 +43,14 @@ class AgentTimeZone(BaseModel):
             return timezone(timedelta(seconds=self.offset), self.name)
 
 class AgentTimeSettings(BaseModel):
+    """agent的时间设置"""
     agent_time_anchor: float = Field(default=0.0, description="agent时间锚点，agent在此时间时真实世界的时间等于real_time_anchor。单位为秒")
     real_time_anchor: float = Field(default=0.0, description="真实时间锚点，真实世界在此时间时，agent时间等于agent_time_anchor。单位为秒")
     time_scale: float = Field(default=1.0, description="相对于真实世界的时间膨胀，控制时间流逝速度")
     time_zone: AgentTimeZone = Field(default_factory=lambda: AgentTimeZone(name=get_localzone_name()), description="agent时区")
 
 def parse_agent_time_zone(setting: Union[AgentTimeSettings, AgentTimeZone]) -> Union[timezone, ZoneInfo]:
+    """将agent时区模型解析为timezone或ZoneInfo"""
     if isinstance(setting, AgentTimeSettings):
         tz = setting.time_zone
     else:
@@ -51,7 +58,9 @@ def parse_agent_time_zone(setting: Union[AgentTimeSettings, AgentTimeZone]) -> U
     return tz.tz()
 
 def real_time_to_agent_time(real_time: Union[datetime, float], setting: AgentTimeSettings) -> datetime:
-    """使用agent自己的时区"""
+    """将真实世界时间datetime转换为agent时间datetime
+
+    返回的datetime将使用agent自己的时区"""
     if not setting.agent_time_anchor or not setting.real_time_anchor:
         if isinstance(real_time, (float, int)):
             real_time = seconds_to_datetime(real_time)
@@ -64,7 +73,9 @@ def real_time_to_agent_time(real_time: Union[datetime, float], setting: AgentTim
     return agent_time
 
 def agent_time_to_real_time(agent_time: Union[datetime, float], setting: AgentTimeSettings) -> datetime:
-    """返回UTC时区"""
+    """将agent时间datetime转换为真实世界时间datetime
+
+    返回的datetime将使用UTC时区"""
     if not setting.agent_time_anchor or not setting.real_time_anchor:
         if isinstance(agent_time, float):
             agent_time = seconds_to_datetime(agent_time)
@@ -77,29 +88,37 @@ def agent_time_to_real_time(agent_time: Union[datetime, float], setting: AgentTi
     return agent_time
 
 def real_seconds_to_agent_seconds(real_seconds: float, setting: AgentTimeSettings) -> float:
+    """将真实世界时间秒数转换为agent时间秒数"""
     if not setting.agent_time_anchor or not setting.real_time_anchor:
         return real_seconds
     return (real_seconds - setting.real_time_anchor) * setting.time_scale + setting.agent_time_anchor
 
 def agent_seconds_to_real_seconds(agent_seconds: float, setting: AgentTimeSettings) -> float:
+    """将agent时间秒数转换为真实世界时间秒数"""
     if not setting.agent_time_anchor or not setting.real_time_anchor:
         return agent_seconds
     return (agent_seconds - setting.agent_time_anchor) / setting.time_scale + setting.real_time_anchor
 
 def agent_seconds_to_datetime(seconds: float, time_zone: Union[AgentTimeSettings, AgentTimeZone]) -> datetime:
-    """agent_seconds已包含时间膨胀与偏移，但时区还是UTC，使用此函数将其转换至为agent时区的datetime"""
+    """将agent时间秒数转换为datetime
+
+    虽然agent_seconds已包含时间膨胀与偏移，但时区还是UTC，使用此函数将其转换为agent时区的datetime"""
     return seconds_to_datetime(seconds).astimezone(parse_agent_time_zone(time_zone))
 
 def now_agent_time(setting: AgentTimeSettings) -> datetime:
+    """获取当前agent时间datetime"""
     return real_time_to_agent_time(utcnow(), setting)
 
 def now_agent_seconds(setting: AgentTimeSettings) -> float:
+    """获取当前agent时间秒数"""
     return datetime_to_seconds(now_agent_time(setting))
 
 
 AnyTz = Union[timezone, ZoneInfo, float, timedelta, AgentTimeSettings, AgentTimeZone]
 def format_time(time: Optional[Union[datetime, float]], time_zone: Optional[AnyTz] = None) -> str:
-    """若输入是秒数，则可选地再输入一个时区，并输出时区转换后的时间。若无则是UTC时间。"""
+    """datetime格式化函数
+
+    若输入是秒数，则可以选择再输入一个时区，这将输出时区转换后的时间。若无则保持UTC时间。"""
     if time is None:
         return "未知时间"
     try:
@@ -120,6 +139,7 @@ def format_time(time: Optional[Union[datetime, float]], time_zone: Optional[AnyT
         return "时间信息损坏"
 
 def format_seconds(seconds: Union[datetime, float, int, timedelta]) -> str:
+    """时间差格式化函数"""
     decrease_one = False
     negative = False
     if isinstance(seconds, (float, int)):
@@ -191,7 +211,7 @@ def parse_timedelta(time_str: str) -> timedelta:
     # 构建参数
     delta_args = {}
     for value, unit in matches:
-        if delta_args.get([units[unit]]):
+        if delta_args.get(units[unit]):
             delta_args[units[unit]] += float(value)
         else:
             delta_args[units[unit]] = float(value)
@@ -200,7 +220,9 @@ def parse_timedelta(time_str: str) -> timedelta:
 
 
 class Times:
-    """通过提供四种时间之一（或留空取当前时间）快速获取其他三种时间"""
+    """旨在需要两个以上的时间种类时方便地完成各类型时间的转换
+
+    通过提供四种时间之一（或留空取当前时间）快速获取其他三种时间"""
     real_time: datetime
     real_time_seconds: float
     agent_time: datetime

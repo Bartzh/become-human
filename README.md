@@ -248,6 +248,8 @@ curl -fsSL https://deno.land/install.sh | sh
 
 TODO:
 - 测试
+- 日志
+- 增强模型支持
 - 记忆调参
 - 随机几秒等待
 - agent自主设置定时器，统一定时器

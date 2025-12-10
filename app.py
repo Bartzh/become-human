@@ -16,7 +16,7 @@ from warnings import warn
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.messages import AnyMessage, ToolMessage, BaseMessage, AIMessage, HumanMessage, RemoveMessage
 
-from become_human import init_graphs, close_graphs, command_processing, init_thread, event_queue, stream_graph_updates
+from become_human.agent_manager import AgentManager
 from become_human.utils import extract_text_parts
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 
@@ -25,16 +25,16 @@ from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph
-    llm_for_chat, llm_for_structured, embeddings, memory_manager, main_graph = await init_graphs()
-    event_listener_task = asyncio.create_task(event_listener())
+    global agent_manager
+    agent_manager = await AgentManager.create()
+    event_listener_task = asyncio.create_task(event_listener(agent_manager.event_queue))
     yield
     event_listener_task.cancel()
     try:
         await event_listener_task
     except asyncio.CancelledError:
         pass
-    await close_graphs()
+    await agent_manager.close_manager()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -85,9 +85,9 @@ private_key = os.getenv("APP_PRIVATE_KEY", "become-human")
 
 user_queues: dict[str, asyncio.Queue] = {}
 
-async def event_listener():
+async def event_listener(queue: asyncio.Queue):
     while True:
-        event = await event_queue.get()
+        event = await queue.get()
         for user_id in user_queues.keys():
             if event["thread_id"] in users_db[user_id]['accessible_threads']:
                 await user_queues[user_id].put(event)
@@ -108,8 +108,8 @@ async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
     user_id = payload['sub']
     await verify_thread_accessible(user_id, thread_id)
     user_queues[user_id] = asyncio.Queue()
-    await init_thread(thread_id)
-    main_messages = await main_graph.get_messages(thread_id)
+    await agent_manager.init_thread(thread_id)
+    main_messages = await agent_manager.main_graph.get_messages(thread_id)
     human_message_pattern = re.compile(r'^\[.*?\]\n.*?: ')
     messages = []
     for message in main_messages:
@@ -157,16 +157,16 @@ async def input_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
     is_admin = users_db[user_id].get('is_admin')
     if extracted_message[0].startswith("/"):
         if is_admin:
-            await command_processing(thread_id, extracted_message[0])
+            await agent_manager.command_processing(thread_id, extracted_message[0])
             return Response()
         else:
             if user_queues.get(thread_id):
                 await user_queues[thread_id].put({"name": "log", "args": {"message": "无权限执行此命令"}})
             return Response()
 
-    await stream_graph_updates(extracted_message, thread_id, user_name=user_input.get("user_name"))
+    await agent_manager.call_agent(extracted_message, thread_id, user_name=user_input.get("user_name"))
 
-    main_state = await main_graph.graph.aget_state(config)
+    main_state = await agent_manager.main_graph.graph.aget_state(config)
     main_messages = main_state.values["messages"]
     new_messages = main_state.values["new_messages"]
     print(new_messages)
@@ -213,7 +213,7 @@ async def sse(token: str = Depends(oauth2_scheme)):
             raise
         finally:
             print(f"SSE连接已关闭: {connection_id}")
-    
+
     # 添加更多防止缓存的头部
     return StreamingResponse(
         event_generator(), 
