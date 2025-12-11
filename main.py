@@ -3,7 +3,7 @@ from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 import os
 import asyncio
 
-thread_id = "default_thread_1"
+agent_id = "default_agent_1"
 user_name = os.getenv('USER_NAME')
 
 last_message = ''
@@ -19,7 +19,7 @@ def _print(item: dict):
 
 async def main():
     agent_manager = await AgentManager.create(10)
-    await agent_manager.init_thread(thread_id)
+    await agent_manager.init_agent(agent_id)
     task = asyncio.create_task(event_listener(agent_manager.event_queue))
 
     while True:
@@ -28,9 +28,9 @@ async def main():
             print("Goodbye!")
             break
         elif user_input.startswith("/"):
-            await agent_manager.command_processing(thread_id, user_input)
+            await agent_manager.command_processing(agent_id, user_input)
             continue
-        asyncio.create_task(agent_manager.call_agent(user_input, thread_id, user_name=user_name))
+        asyncio.create_task(agent_manager.call_agent(user_input, agent_id, user_name=user_name))
 
     task.cancel()
     await agent_manager.close_manager()

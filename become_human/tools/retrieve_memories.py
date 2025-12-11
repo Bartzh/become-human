@@ -1,13 +1,13 @@
 from typing import Annotated, Optional, Any
 from datetime import datetime
 from langchain_core.messages import AnyMessage
-from langchain.tools import InjectedState, tool
+from langchain.tools import tool, ToolRuntime
 from langchain_core.runnables import RunnableConfig
 from langchain.messages import HumanMessage, ToolMessage, AIMessage
 
 from become_human.store_manager import store_manager
 from become_human.memory import get_activated_memory_types, memory_manager, parse_retrieved_memory_groups
-from become_human.types_main import get_retrieved_memory_ids
+from become_human.types_main import get_retrieved_memory_ids, MainState, MainContext
 
 backup_schema = {
     '$defs': {
@@ -189,8 +189,7 @@ rm_schema = {
 }
 @tool(response_format="content_and_artifact", args_schema=rm_schema)
 async def retrieve_memories(
-    messages: Annotated[list[AnyMessage], InjectedState('messages')],
-    config: RunnableConfig,
+    runtime: ToolRuntime[MainContext, MainState],
     search_string: str,
     memory_type: str = '',
     #creation_time_range_start: str = '',
@@ -210,7 +209,9 @@ async def retrieve_memories(
             end_time = datetime.strptime(creation_time_range_end.strip(), "%Y-%m-%d %H:%M:%S")
         except ValueError:
             raise ValueError(f'无法解析输入中的 creation_time_range_end！请重新检查你的输入是否符合"2023-01-01 23:59:59"这样的格式！(也即%Y-%m-%d %H:%M:%S)。若不需要此功能请留空。')
-    thread_id = config["configurable"]["thread_id"]
+
+    agent_id = runtime.context.agent_id
+    messages = runtime.state.messages
 
     # 本次循环中调用此工具次数越多，强度越高
     invoke_count = 0
@@ -220,7 +221,7 @@ async def retrieve_memories(
         elif isinstance(m, ToolMessage) and m.name == "retrieve_memories":
             invoke_count += 1
     strength = 1 + min(invoke_count * 0.5, 1) # 目前主动检索的强度固定初始为1
-    store_settings = await store_manager.get_settings(thread_id)
+    store_settings = await store_manager.get_settings(agent_id)
     retrieval_config = store_settings.retrieval.active_retrieval_config.model_copy(update={"strength": strength})
 
     # 剔除已检索过的记忆
@@ -257,7 +258,7 @@ async def retrieve_memories(
             repeat_content = '由于你使用了之前上下文中使用过的该工具的调用参数，触发了重复检索，但是没有找到之前检索到的记忆，该次检索将依然剔除任何已被召回到当前上下文的记忆。这可能是由于当时的检索出错了，又或者是其他未知错误。\n\n'
 
     groups = await memory_manager.retrieve_memories(
-        thread_id=thread_id,
+        agent_id=agent_id,
         retrieval_config=retrieval_config,
         memory_type=memory_type if memory_type else None,
         search_string=search_string,

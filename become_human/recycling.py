@@ -300,8 +300,8 @@ extract_reflective_memories_schema = {
 
 
 
-async def recycle_original_memories(thread_id: str, input_messages: list[AnyMessage]):
-    store_settings = await store_manager.get_settings(thread_id)
+async def recycle_original_memories(agent_id: str, input_messages: list[AnyMessage]):
+    store_settings = await store_manager.get_settings(agent_id)
     time_settings = store_settings.main.time_settings
     messages = filtering_messages(input_messages, exclude_do_not_store=True, exclude_extracted=False)
     content_and_kwargs: list[dict[str, Any]] = []
@@ -333,15 +333,15 @@ async def recycle_original_memories(thread_id: str, input_messages: list[AnyMess
             next_memory_id=None if i == messages_len - 1 else message_ids[i+1]
         ))
 
-    await memory_manager.add_memories(extracted_memories, thread_id)
+    await memory_manager.add_memories(extracted_memories, agent_id)
 
 
-async def recycle_episodic_memories(thread_id: str, input_messages: list[AnyMessage], model: BaseChatModel):
+async def recycle_episodic_memories(agent_id: str, input_messages: list[AnyMessage], model: BaseChatModel):
     messages = filtering_messages(input_messages)
 
     extracted_memories = []
 
-    store_settings = await store_manager.get_settings(thread_id)
+    store_settings = await store_manager.get_settings(agent_id)
     time_settings = store_settings.main.time_settings
     current_agent_time_seconds = now_agent_seconds(time_settings)
     base_stable_time = store_settings.recycling.base_stable_time
@@ -376,12 +376,12 @@ async def recycle_episodic_memories(thread_id: str, input_messages: list[AnyMess
                 next_memory_id=None if i == episodic_memories_len - 1 else episodic_memory_ids[i+1]
             ))
 
-    await memory_manager.add_memories(extracted_memories, thread_id)
+    await memory_manager.add_memories(extracted_memories, agent_id)
 
 
-async def recycle_reflective_memories(thread_id: str, input_messages: list[AnyMessage], model: BaseChatModel) -> list[BaseMessage]:
+async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMessage], model: BaseChatModel) -> list[BaseMessage]:
     messages = filtering_messages(input_messages)
-    store_settings = await store_manager.get_settings(thread_id)
+    store_settings = await store_manager.get_settings(agent_id)
     parsed_character_settings = format_character_settings(store_settings.main)
     role_prompt = f'基本信息：\n{parsed_character_settings if parsed_character_settings.strip() else '无'}\n\n详细设定：\n{store_settings.main.role_prompt}'
     #llm_with_structure = self.llm.with_structured_output(ExtractReflectiveMemories, method="function_calling")
@@ -435,19 +435,19 @@ async def recycle_reflective_memories(thread_id: str, input_messages: list[AnyMe
         previous_memory_id=None if i == 0 else ids[i-1],
         next_memory_id=None if i == reflective_memories_len - 1 else ids[i+1]
     ) for i, memory in enumerate(reflective_memories)]
-    await memory_manager.add_memories(memories, thread_id)
+    await memory_manager.add_memories(memories, agent_id)
     return process
 
 
-async def recycle_memories(memory_type: AnyMemoryType, thread_id: str, input_messages: list[AnyMessage], model: Optional[BaseChatModel] = None) -> Optional[list[BaseMessage]]:
+async def recycle_memories(memory_type: AnyMemoryType, agent_id: str, input_messages: list[AnyMessage], model: Optional[BaseChatModel] = None) -> Optional[list[BaseMessage]]:
     if model is None and (memory_type == "reflective" or memory_type == "episodic"):
         raise ValueError("model is required for episodic or reflective memories")
     elif memory_type == "original":
-        return await recycle_original_memories(thread_id, input_messages)
+        return await recycle_original_memories(agent_id, input_messages)
     elif memory_type == "episodic":
-        return await recycle_episodic_memories(thread_id, input_messages, model)
+        return await recycle_episodic_memories(agent_id, input_messages, model)
     elif memory_type == "reflective":
-        return await recycle_reflective_memories(thread_id, input_messages, model)
+        return await recycle_reflective_memories(agent_id, input_messages, model)
     else:
         raise ValueError(f"Unknown memory type: {memory_type}")
 

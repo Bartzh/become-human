@@ -205,7 +205,7 @@ flowchart TD
 4. 每条记忆会关联其相邻的记忆，检索时会根据提供的深度获取到目标记忆及其相邻的记忆
 5. 最后生成向量存至向量数据库
 
-**heartbeat，每x秒为每个在线的thread（agent）触发：**
+**heartbeat，每x秒为每个在线的 agent 触发：**
 
 1. 为每条记忆更新可检索性（稳定时长越长触发频率越低）
 	1. 可检索性 = 1 - (上一次访问以来经过的时间 / 稳定时长) ** 0.4
@@ -228,7 +228,7 @@ flowchart TD
 
 使用`uv sync`安装依赖，或直接使用`uv run main.py/app.py`运行，uv会自动安装依赖
 
-检查`config/thread_comments.toml`以了解自定义配置，可在`threads.toml`中设置自定义线程配置（每个线程就是一个agent）
+检查`config/agent_comments.toml`以了解自定义配置，可在`agents.toml`中设置自定义agent配置
 
 ~~安装deno，linux或mac使用：~~
 
@@ -249,12 +249,12 @@ curl -fsSL https://deno.land/install.sh | sh
 TODO:
 - 测试
 - 日志
+- 双向检索
 - 增强模型支持
 - 记忆调参
 - 随机几秒等待
 - agent自主设置定时器，统一定时器
 - bh_标签安全
-- agent_id替代thread_id
 - 全天总结，按时间段的总结
 - 连接所有记忆
 - 自动计算距上次对话流逝时间

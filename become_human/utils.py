@@ -1,10 +1,10 @@
 import json
-from typing import Union, Optional, Any, Type
+from typing import Union, Optional, Any
 from typing_inspect import get_args, get_origin
 import os
 from pydantic import BaseModel
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, AnyMessage, BaseMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, AnyMessage
 
 from become_human.time import format_time, AnyTz
 
@@ -18,7 +18,6 @@ def is_valid_json(json_string: str) -> bool:
 
 def format_human_message_for_ai(message: HumanMessage) -> str:
     return '<others>\n' + "\n".join(extract_text_parts(message.content)) + '\n</others>'
-    #return f"{message.name}: {message.text()}"
 
 def format_ai_message_for_ai(message: AIMessage, time_zone: Optional[AnyTz] = None) -> str:
     message_string = f"<me>\n我的思考: {"\n".join(extract_text_parts(message.content))}\n\n"
@@ -39,7 +38,7 @@ def format_message_for_ai(message: AnyMessage, time_zone: Optional[AnyTz] = None
         return format_ai_message_for_ai(message, time_zone)
     elif isinstance(message, ToolMessage):
         return format_tool_message_for_ai(message, time_zone)
-    return ""
+    return "<unsupported_message_type />"
 
 def format_messages_for_ai(messages: list[AnyMessage], time_zone: Optional[AnyTz] = None) -> str:
     return '\n\n\n'.join([format_message_for_ai(message, time_zone) for message in messages])

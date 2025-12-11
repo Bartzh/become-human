@@ -171,14 +171,14 @@ class StoreModel:
 
     在使用时，注意只能使用StoreModel.xxx = xxx 的方式改变属性值。"""
 
-    _thread_id: str
+    _agent_id: str
     _namespace: tuple[str, ...] = ()
     _readable_name: Optional[str] = None
     _description: Optional[str] = None
     _cache: dict[str, StoreItem]
 
-    def __init__(self, thread_id: str, search_items: list[SearchItem], namespace: Optional[tuple[str, ...]] = None):
-        self._thread_id = thread_id
+    def __init__(self, agent_id: str, search_items: list[SearchItem], namespace: Optional[tuple[str, ...]] = None):
+        self._agent_id = agent_id
         if namespace:
             self._namespace = namespace + super().__getattribute__('_namespace')
         self_namespace = self._namespace
@@ -205,12 +205,12 @@ class StoreModel:
 
         for attr_name, attr_type in type_hints.items():
             if not hasattr(self_cls, attr_name) and isinstance(attr_type, type) and issubclass(attr_type, StoreModel):
-                nested_model = attr_type(thread_id, not_cached, super().__getattribute__('_namespace'))
+                nested_model = attr_type(agent_id, not_cached, super().__getattribute__('_namespace'))
                 super().__setattr__(attr_name, nested_model)
 
     def __getattribute__(self, name: str):
         if name == '_namespace':
-            return ('threads', self._thread_id) + super().__getattribute__('_namespace')
+            return ('agents', self._agent_id) + super().__getattribute__('_namespace')
         attr = super().__getattribute__(name)
         if not isinstance(attr, StoreField):
             return attr

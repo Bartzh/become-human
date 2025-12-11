@@ -136,7 +136,7 @@ class Timer(BaseModel):
 class MemoryUpdateTimer(Timer):
     stable_time_range: list[dict[str, float]] = Field(description="指定稳定时间范围，单位为秒")
 
-class ThreadTimers(StoreModel):
+class AgentTimers(StoreModel):
     _namespace = ("timers",)
     memory_update_timers: list[MemoryUpdateTimer] = StoreField(default_factory=lambda: [
         MemoryUpdateTimer(interval=5.0, stable_time_range=[{'$gte': 0.0}, {'$lt': 43200.0}]),

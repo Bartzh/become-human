@@ -4,7 +4,6 @@ from become_human.store import StoreField, StoreModel
 from pydantic import BaseModel, Field
 from typing import Literal, Any, Optional, Union, Type
 from datetime import datetime, date
-from warnings import warn
 
 
 # 也许这些东西都不该是结构化的，除了性别
@@ -20,7 +19,7 @@ class MainSettings(StoreModel):
     _readable_name = "主要设置"
     role_prompt: str = StoreField(default="你是一个友善且富有同理心的助手，用简洁自然的语言为用户提供帮助。你与他人是通过一个无聊天记录（阅后即焚）的即时通讯软件远程交流的。", readable_name="角色提示词")
     instruction_prompt: str = StoreField(default='打个招呼吧！', readable_name="指示提示词，作为agent的第一条用户消息出现，对其说明情况，指示其初始行为。")
-    role_description: str = StoreField(default="应该是一个有用的助手", readable_name="直接向用户显示的一段文本，描述这个角色")
+    role_description: str = StoreField(default="应该是一个有用的助手吧。", readable_name="直接向用户显示的一段文本，描述这个角色")
     active_time_range: tuple[float, float] = StoreField(default=(1800.0, 7200.0), readable_name='活跃时长随机范围', description="活跃时间随机范围（最小值和最大值），在这之后进入休眠状态")
     always_active: bool = StoreField(default=False, readable_name="保持活跃", description="是否一直处于活跃状态，也即不存在agent因不活跃而不回复消息的情况。若是，则active_time_range将仅用作回收消息等功能，且self_call依然有效，只有wakeup_call会失效")
     temporary_active_time_range: tuple[float, float] = StoreField(default=(30.0, 600.0), readable_name='临时活跃时长随机范围', description="在无新消息时self_call后agent获得的临时活跃时间的随机范围（最小值和最大值），单位为秒。")
@@ -76,9 +75,9 @@ class RetrievalSettings(StoreModel):
         strength=0.4
     ), readable_name="被动检索配置")
 
-class ThreadSettings(StoreModel):
+class AgentSettings(StoreModel):
     _namespace = ('settings',)
-    _readable_name = "线程设置"
+    _readable_name = "agent设置"
     main: MainSettings
     recycling: RecyclingSettings
     retrieval: RetrievalSettings

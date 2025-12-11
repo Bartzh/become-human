@@ -1,11 +1,9 @@
 from typing import Sequence, Dict, Any, Union, Callable, Optional, Literal
-from pydantic import BaseModel, Field
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.runtime import Runtime
 #from langgraph.graph.message import add_messages
 
-from langchain_core.runnables import RunnableConfig
 from langchain.tools import BaseTool
 from langchain_core.messages import (
     BaseMessage,
@@ -19,7 +17,6 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.utils import trim_messages, count_tokens_approximately
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 
@@ -58,17 +55,13 @@ class StreamingTools:
     pass
 
 
-class ThreadRunInfo(BaseModel):
-    run_id: str = Field(default='', description="每次运行的唯一标识符。为空表示没有正在运行")
-    interrupt_ids: dict[str, str] = Field(default_factory=dict, description="key为run_id，value为被打断时已经输出的tokens")
-
 class MainGraph(BaseGraph):
 
     llm_for_structured_output: BaseChatModel
     streaming_tools: StreamingTools
-    thread_run_ids: dict[str, str] # 所有线程的当前运行id
-    thread_interrupt_datas: dict[str, dict[str, Union[AIMessageChunk, list[ToolMessage]]]] # 所有线程被打断后留下的'chunk'与'called_tool_messages'
-    thread_messages_to_update: dict[str, list[BaseMessage]] # 所有线程的待更新（进state）消息
+    agent_run_ids: dict[str, str] # 所有agent的当前运行id
+    agent_interrupt_datas: dict[str, dict[str, Union[AIMessageChunk, list[ToolMessage]]]] # 所有agent被打断后留下的'chunk'与'called_tool_messages'
+    agent_messages_to_update: dict[str, list[BaseMessage]] # 所有agent的待更新（进state）消息
 
     def __init__(
         self,
@@ -81,9 +74,9 @@ class MainGraph(BaseGraph):
         if llm_for_structured_output is None:
             self.llm_for_structured_output = self.llm
         self.streaming_tools = StreamingTools()
-        self.thread_run_ids = {}
-        self.thread_interrupt_datas = {}
-        self.thread_messages_to_update = {}
+        self.agent_run_ids = {}
+        self.agent_interrupt_datas = {}
+        self.agent_messages_to_update = {}
 
         graph_builder = StateGraph(MainState, context_schema=MainContext)
 
@@ -119,20 +112,20 @@ class MainGraph(BaseGraph):
         return instance
 
 
-    async def final(self, state: MainState, runtime: Runtime[MainContext], config: RunnableConfig):
-        thread_run_id = runtime.context.thread_run_id
-        thread_id = config["configurable"]["thread_id"]
-        messages_to_update, new_messages_to_update = self._pop_messages_to_update(thread_id, thread_run_id, state.messages, state.new_messages)
+    async def final(self, state: MainState, runtime: Runtime[MainContext]):
+        agent_run_id = runtime.context.agent_run_id
+        agent_id = runtime.context.agent_id
+        messages_to_update, new_messages_to_update = self._pop_messages_to_update(agent_id, agent_run_id, state.messages, state.new_messages)
         if messages_to_update:
             return {"messages": messages_to_update, "new_messages": new_messages_to_update}
         else:
             return
 
 
-    async def begin(self, state: MainState, runtime: Runtime[MainContext], config: RunnableConfig) -> Command[Literal["prepare_to_generate", "final"]]:
-        thread_id = config["configurable"]["thread_id"]
-        store_settings = await store_manager.get_settings(thread_id)
-        store_states = await store_manager.get_states(thread_id)
+    async def begin(self, state: MainState, runtime: Runtime[MainContext]) -> Command[Literal["prepare_to_generate", "final"]]:
+        agent_id = runtime.context.agent_id
+        store_settings = await store_manager.get_settings(agent_id)
+        store_states = await store_manager.get_states(agent_id)
         main_config = store_settings.main
         time_settings = main_config.time_settings
         current_time = utcnow()
@@ -157,6 +150,7 @@ class MainGraph(BaseGraph):
                 },
                 name='system'
             )]
+            store_states.is_first_time = False
         else:
             new_state["messages"] = []
 
@@ -173,15 +167,15 @@ class MainGraph(BaseGraph):
         #if not state.self_call_time_secondses and not is_self_call and current_time_seconds >= active_time_seconds and not state.wakeup_call_time_seconds:
         # 第二种逻辑，只要在活跃时间之外发送消息，都会生成wakeup_call_time_seconds，增加self_call的机会
         if not is_self_call and current_agent_time_seconds >= active_time_seconds and not state.wakeup_call_time_seconds:
-            wakeup_call_time_seconds = await generate_new_wakeup_call_time_seconds(thread_id, current_agent_time)
+            wakeup_call_time_seconds = await generate_new_wakeup_call_time_seconds(agent_id, current_agent_time)
             new_state["wakeup_call_time_seconds"] = wakeup_call_time_seconds
         else:
             wakeup_call_time_seconds = state.wakeup_call_time_seconds
 
-        # 
+        # 获取在外的更新消息
         messages = []
-        thread_run_id = runtime.context.thread_run_id
-        update_messages = self._pop_messages_to_update(thread_id, thread_run_id)[0]
+        agent_run_id = runtime.context.agent_run_id
+        update_messages = self._pop_messages_to_update(agent_id, agent_run_id)[0]
         if update_messages:
             # 添加至messages
             messages.extend(update_messages)
@@ -191,7 +185,7 @@ class MainGraph(BaseGraph):
             if update_input_messages:
                 new_state["input_messages"] = update_input_messages
 
-        interrupt_data = self.thread_interrupt_datas.get(thread_id)
+        interrupt_data = self.agent_interrupt_datas.get(agent_id)
         if interrupt_data:
             chunk = interrupt_data.get('chunk')
             if chunk:
@@ -221,9 +215,9 @@ class MainGraph(BaseGraph):
                                 tool_call_id=tool_call_id,
                                 additional_kwargs={"bh_creation_time_seconds": last_creation_time, "bh_creation_agent_time_seconds": last_agent_creation_time}
                             ))
-                del self.thread_interrupt_datas[thread_id]
+                del self.agent_interrupt_datas[agent_id]
             else:
-                del self.thread_interrupt_datas[thread_id]
+                del self.agent_interrupt_datas[agent_id]
             messages.append(HumanMessage(
                 content=f'''**这条消息来自系统（system）自动发送**
 由于在你刚才输出时出现了“双重短信”（Double-texting，一般是由于用户在你输出期间又发送了一条或多条新的消息）的情况，你刚才的输出已被终止并截断，包括工具调用。
@@ -263,7 +257,7 @@ class MainGraph(BaseGraph):
             return Command(update=new_state, goto='final')
 
 
-    async def prepare_to_generate(self, state: MainState, runtime: Runtime[MainContext], config: RunnableConfig) -> Command[Literal["chatbot", "final"]]:
+    async def prepare_to_generate(self, state: MainState, runtime: Runtime[MainContext]) -> Command[Literal["chatbot", "final"]]:
 
         new_state = {}
         new_state["generated"] = True
@@ -271,8 +265,8 @@ class MainGraph(BaseGraph):
         input_messages = state.input_messages
 
 
-        thread_id = config["configurable"]["thread_id"]
-        store_settings = await store_manager.get_settings(thread_id)
+        agent_id = runtime.context.agent_id
+        store_settings = await store_manager.get_settings(agent_id)
         main_config = store_settings.main
         new_messages = []
 
@@ -297,7 +291,7 @@ class MainGraph(BaseGraph):
             # 有新的消息
             if input_messages:
                 new_state["last_chat_time_seconds"] = current_agent_time_seconds
-                new_state["self_call_time_secondses"] = await generate_new_self_call_time_secondses(thread_id, current_time=current_agent_time)
+                new_state["self_call_time_secondses"] = await generate_new_self_call_time_secondses(agent_id, current_time=current_agent_time)
                 new_state["wakeup_call_time_seconds"] = 0.0
                 new_state["active_time_seconds"] = current_agent_time_seconds + random.uniform(main_config.active_time_range[0], main_config.active_time_range[1])
                 if self_call_type == 'active':
@@ -353,7 +347,7 @@ class MainGraph(BaseGraph):
         # 直接响应
         else:
             new_state["last_chat_time_seconds"] = current_agent_time_seconds
-            new_state["self_call_time_secondses"] = await generate_new_self_call_time_secondses(thread_id, current_time=current_agent_time)
+            new_state["self_call_time_secondses"] = await generate_new_self_call_time_secondses(agent_id, current_time=current_agent_time)
             new_state["wakeup_call_time_seconds"] = 0.0
             active_time_range = store_settings.main.active_time_range
             new_state["active_time_seconds"] = current_agent_time_seconds + random.uniform(active_time_range[0], active_time_range[1])
@@ -366,7 +360,7 @@ class MainGraph(BaseGraph):
             retrieved_memory_ids = get_retrieved_memory_ids(state.messages)
             exclude_memory_ids = list(set(message_ids + retrieved_memory_ids))
             passive_retrieve_groups = await memory_manager.retrieve_memories(
-                thread_id=thread_id,
+                agent_id=agent_id,
                 retrieval_config=store_settings.retrieval.passive_retrieval_config,
                 search_string=search_string,
                 exclude_memory_ids=exclude_memory_ids
@@ -390,9 +384,9 @@ class MainGraph(BaseGraph):
         new_state["new_messages"] = input_messages + new_messages
 
 
-        thread_run_id = runtime.context.thread_run_id
-        if self.thread_run_ids.get(thread_id) and self.thread_run_ids.get(thread_id) == thread_run_id:
-            update_messages, update_new_messages = self._pop_messages_to_update(thread_id, thread_run_id, state.messages, state.new_messages)
+        agent_run_id = runtime.context.agent_run_id
+        if self.agent_run_ids.get(agent_id) and self.agent_run_ids.get(agent_id) == agent_run_id:
+            update_messages, update_new_messages = self._pop_messages_to_update(agent_id, agent_run_id, state.messages, state.new_messages)
             if update_messages:
                 new_state["messages"] = update_messages + new_messages
                 new_state["new_messages"] = input_messages + update_new_messages + new_messages
@@ -401,12 +395,12 @@ class MainGraph(BaseGraph):
             return Command(goto="final")
 
 
-    async def chatbot(self, state: MainState, runtime: Runtime[MainContext], config: RunnableConfig) -> Command[Literal['tools', 'final']]:
-        thread_id = config["configurable"]["thread_id"]
+    async def chatbot(self, state: MainState, runtime: Runtime[MainContext]) -> Command[Literal['tools', 'final']]:
+        agent_id = runtime.context.agent_id
         llm_with_tools = self.llm.bind_tools(self.tools, parallel_tool_calls=True)
         unicode_prompt = '- 不要使用 Unicode 编码，所有工具均支持中文及其他语言直接输入，使用 Unicode 编码会导致输出速度下降。'
         thought_prompt = '- 也因此，在`content`也就是正常的输出内容中，你可以自由地进行推理（思维链），制定计划，评估工具调用结果等。又或者如果你有什么想记下来给未来的自己看的，也可以放在这里。但请记住，就如刚才所说，除你自己之外没人看得到这些内容。'
-        store_settings = await store_manager.get_settings(thread_id)
+        store_settings = await store_manager.get_settings(agent_id)
         parsed_character_settings = format_character_settings(store_settings.main, prefix='- ')
         role_prompt = f'### 基本信息：\n{parsed_character_settings if parsed_character_settings.strip() else '无'}\n\n### 详细设定：\n{store_settings.main.role_prompt}'
         role_prompt_with_state = f'''{role_prompt}
@@ -425,16 +419,19 @@ class MainGraph(BaseGraph):
 - 有些工具会被标注为「即时工具」（如`{SEND_MESSAGE}`），这些工具执行后的返回结果一般来说并不重要。如果你只调用了这些工具，系统不会再次唤醒你（除非工具执行出错或遇到其他特殊情况）。
 - 而其他大部分未特别说明的工具（如搜索工具）都需要返回结果。调用这些工具后，系统会再次唤醒你并传递工具执行结果，以便你继续处理。
 - 支持并行工具调用，这意味着你可以一次连续调用多个工具，而不会被打断。这些工具会按你调用的顺序被一个个执行。
-{unicode_prompt}
 - **错误处理**：
     - 当工具执行时发生错误，系统会记录错误信息并返回给你，请根据错误信息尝试修复错误（可能是因为你给工具的输入参数有错误）。
     - 如果多次尝试后仍然无法解决错误，应放弃调用工具，因为这可能已经让用户等待了较长时间（可以通过时间戳判断）。
     - 同样，不能向用户暴露内部错误信息，以免产生不必要的误会。
 
 3. **记忆系统**：
-- **被动检索（潜意识）**：每次你被调用时，系统会自动使用用户输入的消息检索相关记忆（以一条Human消息也就是用户消息的形式呈现）。这条消息是自动生成的，可以参考它来提供更准确的回答。注意：被动检索可能不够精确。
-- **主动检索**：如果你需要更精确的记忆，请调用`retrieve_memories`工具。该工具允许你主动检索记忆，你可以使用更合适的查询语句来获取更好的结果。
-- **记忆机制**：记忆是自动存储的（无需你主动存储），并且遵循“用进废退”原则。经常被检索的记忆会被强化，而很少被检索的记忆会被逐渐遗忘。
+- **被动检索（潜意识）**：
+    - 每次你被调用时，系统会自动使用用户输入的消息检索相关记忆（以一条Human消息也就是用户消息的形式呈现）。这条消息是自动生成的，可以参考它来提供更准确的回答。
+    - 但请注意：被动检索可能不够精确，比如当用户提到模糊的时间点如“上周”时，被动检索因无法以准确时间点进行检索很有可能获取不到多少有用的信息，请注意甄别。
+- **主动检索**：
+    - 如果你需要更精确的记忆，请调用`retrieve_memories`工具。该工具允许你主动检索记忆，你可以使用更合适的查询语句来获取更好的结果。
+- **记忆机制**：
+    - 记忆是自动存储的（无需你主动存储），并且遵循“用进废退”原则。经常被检索的记忆会被强化，而很少被检索的记忆会被逐渐遗忘。
 - 请充分利用被动检索和主动检索工具提供的记忆来提供更优质的回答。
 
 4. **时间感知**：
@@ -454,7 +451,7 @@ class MainGraph(BaseGraph):
     - 执行记忆检索相当于你的大脑在进行回忆
 - 在角色设定中，你可以拥有情感、性格等。你可以根据情感状态决定是否回复用户（例如，生气时可以不回复）。
 - 如果角色设定中没有特别说明，请以自然、人性化的方式与用户互动。
-- **最重要的一点，你需要先输出以你所扮演的角色的第一人称视角的心理活动，再依此考虑角色会做出什么动作（调用工具）。**
+- **最重要的一件事，你需要先输出以你所扮演的角色的第一人称视角的心理活动（不需要括号或是前缀，直接输出），再依此考虑角色会做出什么动作（调用工具）。**
 
 ## 角色设定
 {role_prompt}'''
@@ -484,11 +481,11 @@ class MainGraph(BaseGraph):
         response.additional_kwargs["bh_creation_agent_time_seconds"] = current_agent_time_seconds
         new_state = {"messages": response, "new_messages": response}
 
-        thread_run_id = runtime.context.thread_run_id
-        if self.thread_run_ids.get(thread_id) and self.thread_run_ids.get(thread_id) == thread_run_id:
+        agent_run_id = runtime.context.agent_run_id
+        if self.agent_run_ids.get(agent_id) and self.agent_run_ids.get(agent_id) == agent_run_id:
             if not isinstance(response, AIMessage):
                 raise ValueError("WTF the response is not an AIMessage???")
-            update_messages, update_new_messages = self._pop_messages_to_update(thread_id, thread_run_id, state.messages, state.new_messages)
+            update_messages, update_new_messages = self._pop_messages_to_update(agent_id, agent_run_id, state.messages, state.new_messages)
             if update_messages:
                 new_state["messages"] = update_messages + [response]
                 new_state["new_messages"] = update_new_messages + [response]
@@ -500,16 +497,16 @@ class MainGraph(BaseGraph):
             return Command(goto="final")
 
 
-    async def tool_node_post_process(self, state: MainState, runtime: Runtime[MainContext], config: RunnableConfig) -> Command[Literal['chatbot', 'prepare_to_recycle']]:
+    async def tool_node_post_process(self, state: MainState, runtime: Runtime[MainContext]) -> Command[Literal['chatbot', 'prepare_to_recycle']]:
         #tool_messages = []
         #for message in reversed(state.messages):
         #    if isinstance(message, ToolMessage):
         #        tool_messages.append(message)
         #    else:
         #        break
-        thread_id = config["configurable"]["thread_id"]
+        agent_id = runtime.context.agent_id
         tool_messages = state.tool_messages[1:]
-        settings = await store_manager.get_settings(thread_id)
+        settings = await store_manager.get_settings(agent_id)
         current_time = utcnow()
         current_time_seconds = datetime_to_seconds(current_time)
         current_agent_time = real_time_to_agent_time(current_time, settings.main.time_settings)
@@ -520,8 +517,8 @@ class MainGraph(BaseGraph):
                 not message.additional_kwargs.get("bh_creation_time_seconds")):
                 message.additional_kwargs["bh_creation_agent_time_seconds"] = current_agent_time_seconds
                 message.additional_kwargs["bh_creation_time_seconds"] = current_time_seconds
-        thread_run_id = runtime.context.thread_run_id
-        update_messages, update_new_messages = self._pop_messages_to_update(thread_id, thread_run_id, state.messages, state.new_messages)
+        agent_run_id = runtime.context.agent_run_id
+        update_messages, update_new_messages = self._pop_messages_to_update(agent_id, agent_run_id, state.messages, state.new_messages)
         if update_messages:
             new_state = {"new_messages": update_new_messages + tool_messages, "messages": update_messages + tool_messages}
         else:
@@ -540,11 +537,11 @@ class MainGraph(BaseGraph):
         else:
             return Command(update=new_state, goto='chatbot')
 
-    async def prepare_to_recycle(self, state: MainState, config: RunnableConfig):
-        thread_id = config["configurable"]["thread_id"]
+    async def prepare_to_recycle(self, state: MainState, runtime: Runtime[MainContext]):
+        agent_id = runtime.context.agent_id
         new_state = {}
         messages = state.messages
-        settings = await store_manager.get_settings(thread_id)
+        settings = await store_manager.get_settings(agent_id)
         memory_types = get_activated_memory_types()
 
         # 没被回收的滚去回收
@@ -604,16 +601,16 @@ class MainGraph(BaseGraph):
         new_state["recycle_messages"] = recycle_messages
         return new_state
 
-    async def recycle_messages(self, state: MainState, runtime: Runtime[MainContext], config: RunnableConfig):
-        thread_id = config["configurable"]["thread_id"]
+    async def recycle_messages(self, state: MainState, runtime: Runtime[MainContext]):
+        agent_id = runtime.context.agent_id
         if state.recycle_messages:
-            recycles = [recycle_memories('original', thread_id, state.recycle_messages)]
+            recycles = [recycle_memories('original', agent_id, state.recycle_messages)]
             if state.overflow_messages:
-                recycles.append(recycle_memories('episodic', thread_id, state.overflow_messages, self.llm_for_structured_output))
+                recycles.append(recycle_memories('episodic', agent_id, state.overflow_messages, self.llm_for_structured_output))
             await asyncio.gather(*recycles)
 
-        thread_run_id = runtime.context.thread_run_id
-        update_messages, update_new_messages = self._pop_messages_to_update(thread_id, thread_run_id, state.messages, state.new_messages)
+        agent_run_id = runtime.context.agent_run_id
+        update_messages, update_new_messages = self._pop_messages_to_update(agent_id, agent_run_id, state.messages, state.new_messages)
         if update_messages:
             return {"messages": update_messages, "new_messages": update_new_messages}
         return
@@ -651,17 +648,17 @@ class MainGraph(BaseGraph):
         return {"agent_state": extractor_result["responses"]}
 
 
-    async def update_messages(self, thread_id: str, messages: list[BaseMessage]):
+    async def update_messages(self, agent_id: str, messages: list[BaseMessage]):
         """外部更新`messages`的唯一方式，避免了在图运行时无法修改messages的问题"""
-        if not thread_id or not messages:
+        if not agent_id or not messages:
             return
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {"configurable": {"thread_id": agent_id}}
         state = await self.graph.aget_state(config)
         if state.next:
-            if self.thread_messages_to_update.get(thread_id):
-                self.thread_messages_to_update[thread_id].extend(messages)
+            if self.agent_messages_to_update.get(agent_id):
+                self.agent_messages_to_update[agent_id].extend(messages)
             else:
-                self.thread_messages_to_update[thread_id] = messages
+                self.agent_messages_to_update[agent_id] = messages
         else:
             input_messages: list[AnyMessage] = state.values.get("input_messages", [])
             if input_messages:
@@ -672,26 +669,26 @@ class MainGraph(BaseGraph):
                 await self.graph.aupdate_state(config, {"messages": messages})
         return
 
-    async def get_messages(self, thread_id: str) -> list[BaseMessage]:
+    async def get_messages(self, agent_id: str) -> list[BaseMessage]:
         """外部获取`messages`的唯一方式，返回会包括使用`update_messages`但还没来得及更新的消息"""
-        state = await self.graph.aget_state({"configurable": {"thread_id": thread_id}})
+        state = await self.graph.aget_state({"configurable": {"thread_id": agent_id}})
         messages: list[AnyMessage] = state.values.get("messages", [])
         if not messages:
             return []
-        update_messages = self.thread_messages_to_update.get(thread_id, [])
+        update_messages = self.agent_messages_to_update.get(agent_id, [])
         if update_messages:
             messages = add_messages(messages, update_messages)
         return messages
 
-    def _pop_messages_to_update(self, thread_id: str, thread_run_id: str, current_messages: Optional[list[AnyMessage]] = None, current_new_messages: list[AnyMessage] = []) -> tuple[list[BaseMessage], list[BaseMessage]]:
-        """仅限图节点使用。用于在图运行时获取`thread_messages_to_update`中可能存在的消息
+    def _pop_messages_to_update(self, agent_id: str, agent_run_id: str, current_messages: Optional[list[AnyMessage]] = None, current_new_messages: list[AnyMessage] = []) -> tuple[list[BaseMessage], list[BaseMessage]]:
+        """仅限图节点使用。用于在图运行时获取`agent_messages_to_update`中可能存在的消息
         
         返回一个元组，第一个元素是需要更新至`messages`的消息列表，第二个元素是需要更新至`new_messages`的消息列表
 
         如果未提供`current_messages`和`current_new_messages`参数，则第二个元素返回空列表"""
-        # 首先验证线程运行ID是否能对应上，对不上意味着已开启新的运行，取消pop
-        if self.thread_run_ids.get(thread_id) and self.thread_run_ids.get(thread_id) == thread_run_id:
-            update_messages = self.thread_messages_to_update.pop(thread_id, [])
+        # 首先验证agent运行ID是否能对应上，对不上意味着已开启新的运行，取消pop
+        if self.agent_run_ids.get(agent_id) and self.agent_run_ids.get(agent_id) == agent_run_id:
+            update_messages = self.agent_messages_to_update.pop(agent_id, [])
             update_new_messages: list[BaseMessage] = []
             # 如果提供了current_messages和current_new_messages
             if update_messages and current_messages is not None:
@@ -713,7 +710,7 @@ def parse_agent_state(agent_state: list[StateEntry]) -> str:
     return '- ' + '\n- '.join([string for string in agent_state])
 
 
-async def generate_new_self_call_time_secondses(thread_id: str, current_time: datetime, is_wakeup: bool = False) -> list[float]:
+async def generate_new_self_call_time_secondses(agent_id: str, current_time: datetime, is_wakeup: bool = False) -> list[float]:
     def is_sleep_time(seconds: float) -> bool:
         if no_sleep_time:
             return False
@@ -726,7 +723,7 @@ async def generate_new_self_call_time_secondses(thread_id: str, current_time: da
                 result = True
         return result
 
-    store_settings = await store_manager.get_settings(thread_id)
+    store_settings = await store_manager.get_settings(agent_id)
     main_config = store_settings.main
     if is_wakeup:
         if main_config.always_active or not main_config.wakeup_time_range:
@@ -775,8 +772,8 @@ async def generate_new_self_call_time_secondses(thread_id: str, current_time: da
         self_call_time_secondses.append(datetime_to_seconds(current_date + _delta))
     return self_call_time_secondses
 
-async def generate_new_wakeup_call_time_seconds(thread_id: str, current_time: datetime) -> float:
-    result = await generate_new_self_call_time_secondses(thread_id, current_time, is_wakeup=True)
+async def generate_new_wakeup_call_time_seconds(agent_id: str, current_time: datetime) -> float:
+    result = await generate_new_self_call_time_secondses(agent_id, current_time, is_wakeup=True)
     if result:
         return result[0]
     else:

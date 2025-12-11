@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import os
 import re
 import json
+from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -57,7 +58,7 @@ DEFAULT_USERS = {
     "default_user": {
         "password": "donotchangeifyouwantme",
         "is_admin": True,
-        "accessible_threads": ["default_thread_1", "default_thread_2"]
+        "accessible_agents": ["default_agent_1", "default_agent_2"]
     }
 }
 
@@ -89,27 +90,27 @@ async def event_listener(queue: asyncio.Queue):
     while True:
         event = await queue.get()
         for user_id in user_queues.keys():
-            if event["thread_id"] in users_db[user_id]['accessible_threads']:
+            if event["agent_id"] in users_db[user_id]['accessible_agents']:
                 await user_queues[user_id].put(event)
 
 
-@app.get("/api/get_accessible_threads")
-async def get_accessible_threads(token: str = Depends(oauth2_scheme)):
+@app.get("/api/get_accessible_agents")
+async def get_accessible_agents(token: str = Depends(oauth2_scheme)):
     payload = verify_token(token)
     user_id = payload["sub"]
-    return {'accessible_threads': users_db[user_id]['accessible_threads']}
+    return {'accessible_agents': users_db[user_id]['accessible_agents']}
 
 
 @app.post("/api/init")
 async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
     payload = verify_token(token)
     api_input = await request.json()
-    thread_id = api_input.get("thread_id")
+    agent_id = api_input.get("agent_id")
     user_id = payload['sub']
-    await verify_thread_accessible(user_id, thread_id)
+    await verify_agent_accessible(user_id, agent_id)
     user_queues[user_id] = asyncio.Queue()
-    await agent_manager.init_thread(thread_id)
-    main_messages = await agent_manager.main_graph.get_messages(thread_id)
+    await agent_manager.init_agent(agent_id)
+    main_messages = await agent_manager.main_graph.get_messages(agent_id)
     human_message_pattern = re.compile(r'^\[.*?\]\n.*?: ')
     messages = []
     for message in main_messages:
@@ -124,7 +125,7 @@ async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
                         warn(f'{SEND_MESSAGE}意外的没有参数，也可能是打断导致的概率问题')
         elif isinstance(message, HumanMessage):
             if isinstance(message.content, str):
-                content = human_message_pattern.sub('', message.text())
+                content = human_message_pattern.sub('', message.text)
                 messages.append({"role": message.type, "content": content, "id": message.id, "name": message.name})
             elif isinstance(message.content, list):
                 count = 0
@@ -138,7 +139,7 @@ async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
                             messages.append({"role": message.type, "content": content, "id": f'{message.id}.{count}', "name": message.name})
                     count += 1
         else:
-            messages.append({"role": message.type, "content": message.text(), "id": message.id, "name": message.name})
+            messages.append({"role": message.type, "content": message.text, "id": message.id, "name": message.name})
     return {"messages": messages}
 
 @app.post("/api/input")
@@ -150,21 +151,21 @@ async def input_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
     if not extracted_message:
         raise HTTPException(status_code=400, detail="message is required")
     user_id = payload['sub']
-    thread_id = user_input.get("thread_id")
-    await verify_thread_accessible(user_id, thread_id)
-    config = {"configurable": {"thread_id": thread_id}}
+    agent_id = user_input.get("agent_id")
+    await verify_agent_accessible(user_id, agent_id)
+    config = {"configurable": {"thread_id": agent_id}}
 
     is_admin = users_db[user_id].get('is_admin')
     if extracted_message[0].startswith("/"):
         if is_admin:
-            await agent_manager.command_processing(thread_id, extracted_message[0])
+            await agent_manager.command_processing(agent_id, extracted_message[0])
             return Response()
         else:
-            if user_queues.get(thread_id):
-                await user_queues[thread_id].put({"name": "log", "args": {"message": "无权限执行此命令"}})
+            if user_queues.get(agent_id):
+                await user_queues[agent_id].put({"name": "log", "args": {"message": "无权限执行此命令"}, "id": "command-" + str(uuid4())})
             return Response()
 
-    await agent_manager.call_agent(extracted_message, thread_id, user_name=user_input.get("user_name"))
+    await agent_manager.call_agent(extracted_message, agent_id, user_name=user_input.get("user_name"))
 
     main_state = await agent_manager.main_graph.graph.aget_state(config)
     main_messages = main_state.values["messages"]
@@ -245,15 +246,15 @@ def verify_token(token: str):
         raise HTTPException(status_code=400, detail="User not found")
     return payload
 
-async def verify_thread_accessible(user_id: Optional[str] = None, thread_id: Optional[str] = None):
+async def verify_agent_accessible(user_id: Optional[str] = None, agent_id: Optional[str] = None):
     if not user_id:
         raise HTTPException(status_code=400, detail="User id is required")
-    if not thread_id:
-        raise HTTPException(status_code=400, detail="thread id is required")
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent id is required")
     if user_id not in users_db.keys():
         raise HTTPException(status_code=400, detail="User not found")
-    if thread_id not in users_db[user_id]['accessible_threads']:
-        raise HTTPException(status_code=400, detail="thread is not accessible")
+    if agent_id not in users_db[user_id]['accessible_agents']:
+        raise HTTPException(status_code=400, detail="agent is not accessible")
 
 
 @app.post("/api/login")

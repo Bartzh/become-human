@@ -260,8 +260,8 @@ def messages_post_processing(messages: list[BaseMessage]):
 
 @dataclass
 class MainContext:
-    thread_id: str
-    thread_run_id: str
+    agent_id: str
+    agent_run_id: str
     is_self_call: bool = False
     self_call_type: Literal['passive', 'active'] = 'passive'
 
