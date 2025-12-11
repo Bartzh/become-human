@@ -20,6 +20,7 @@ node_modules
 deno.exe
 
 /test_*
+.pytest_cache
 
 config
 data

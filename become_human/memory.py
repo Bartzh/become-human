@@ -1,8 +1,9 @@
 import chromadb
-from chromadb.api.types import ID, OneOrMany, Where, WhereDocument, GetResult, QueryResult
+from chromadb.api.types import ID, OneOrMany, Where, WhereDocument, GetResult, QueryResult, IDs, Embedding, PyEmbedding, Image, URI, Include
 from chromadb.api.models.Collection import Collection
 from chromadb.config import Settings
-from langchain_core.embeddings import Embeddings
+from langchain.embeddings import Embeddings
+from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_core.documents import Document
 from datetime import datetime, timezone, timedelta
 from typing import Any, Literal, Union, Optional
@@ -11,16 +12,50 @@ from uuid import uuid4
 import numpy as np
 import jieba
 from warnings import warn
+import random
+import os
 
-from become_human.time import seconds_to_datetime, AgentTimeSettings, parse_agent_time_zone, now_seconds, AgentTimeZone, parse_time, utcnow
+from become_human.time import format_time, utcnow, real_time_to_agent_time, now_agent_seconds, datetime_to_seconds, now_agent_time, AnyTz
+from become_human.store_settings import MemoryRetrievalConfig
 from become_human.store_manager import store_manager
+from become_human.utils import parse_env_array
 
 from langchain_core.runnables.config import run_in_executor
 
 
-AnyMemory = Literal["original", "summary", "semantic"]
-MEMORY_TYPES = set(["original", "summary", "semantic"])
+AnyMemoryType = Literal["original", "episodic", "reflective"]
+MEMORY_TYPES = set(["original", "episodic", "reflective"])
 
+_cached_memory_types: list[AnyMemoryType] = []
+def get_activated_memory_types() -> list[AnyMemoryType]:
+    global _cached_memory_types
+    if _cached_memory_types:
+        return _cached_memory_types
+    memory_types = parse_env_array(os.getenv('MEMORY_TYPES'))
+    memory_types = [t.lower() for t in set(memory_types) if t.lower() in MEMORY_TYPES]
+    if not memory_types:
+        memory_types = ['original', 'episodic', 'reflective']
+    _cached_memory_types = memory_types
+    return _cached_memory_types
+
+class InitialMemory(BaseModel):
+    content: str = Field(description="The content of the memory")
+    type: AnyMemoryType = Field(description="The type of the memory")
+    #creation_time_seconds: float = Field(description="The creation time seconds of the memory")
+    creation_agent_datetime: datetime = Field(description="The creation agent datetime of the memory")
+    stable_time: float = Field(description="The stable time of the memory", gt=0.0)
+    id: str = Field(default_factory=lambda: str(uuid4()), description="The id of the memory")
+    previous_memory_id: Optional[str] = Field(default=None, description="The previous memory id")
+    next_memory_id: Optional[str] = Field(default=None, description="The next memory id")
+
+class RetrievedMemory(BaseModel):
+    doc: Document = Field(description="The memory document")
+    retrievability: float = Field(description="The retrievability of the memory")
+    is_source_memory: bool = Field(default=False, description="The source memory of memories")
+
+class RetrievedMemoryGroup(BaseModel):
+    memories: list[RetrievedMemory] = Field(description="The memories")
+    source_memory: RetrievedMemory = Field(description="The source memory")
 
 class MemoryManager():
     vector_store_client: chromadb.ClientAPI
@@ -34,73 +69,77 @@ class MemoryManager():
         self.embeddings = embeddings
         self.vector_store_client = chromadb.PersistentClient(db_path, settings=Settings(anonymized_telemetry=False))
 
-    @classmethod
-    async def create(cls, embeddings: Embeddings, db_path: str = './data/aimemory_chroma_db'):
-        instance = cls(embeddings, db_path)
-        #await instance.init_db()
-        return instance
 
-
-    async def update_timers(self, thread_id: str):
-        states = await store_manager.get_states(thread_id)
-        types = states.memory_types
+    async def update_timers(self, agent_id: str):
+        agent_model = await store_manager.get_agent(agent_id)
 
         update_count = 0
-        timers = await store_manager.get_timers(thread_id)
+        timers = agent_model.timers
 
+        settings = agent_model.settings
+        types = get_activated_memory_types()
+        time_settings = settings.main.time_settings
         current_time = utcnow()
+        current_agent_time = real_time_to_agent_time(current_time, time_settings)
         new_timers = []
         for timer in timers.memory_update_timers:
             if timer.is_agent_time:
-                warn(f'不支持MemoryUpdateTimer使用agent时间。')
-                continue
-            next_timer, triggered = timer.calculate_next_timer(current_time)
+                time = current_agent_time
+            else:
+                time = current_time
+            next_timer, triggered = timer.calculate_next_timer(time)
             if triggered:
                 for t in types:
                     where = validated_where({'$and': [{'stable_time': item} for item in timer.stable_time_range]})
                     result = await self.aget(
-                        thread_id=thread_id,
+                        agent_id=agent_id,
                         memory_type=t,
                         where=where,
                         include=['metadatas']
                     )
                     if result['ids']:
-                        await self.update_memories(result, t, thread_id)
+                        await self.update_memories(result, t, agent_id)
                         update_count += len(result['ids'])
             if next_timer is not None:
                 new_timers.append(next_timer)
         timers.memory_update_timers = new_timers
 
-        print(f'updated {update_count} memories for thread "{thread_id}".')
+        print(f'updated {update_count} memories for agent "{agent_id}".')
 
 
-    def update(self, metadata: dict, current_time_seconds: float) -> dict:
+    def update(self, metadata: dict, current_agent_time: Union[float, datetime]) -> dict:
         """
         更新记忆的可检索性（模拟时间流逝）
         """
         #retrievability = metadata["retrievability"] * math.exp(-delta_t / metadata["stability"])
 
+        if isinstance(current_agent_time, datetime):
+            current_agent_time_seconds = datetime_to_seconds(current_agent_time)
+        else:
+            current_agent_time_seconds = current_agent_time
+
         if metadata["stable_time"] == 0.0:
             print('意外的stable_time为0，metadata：' + str(metadata))
             return {"forgot": True}
 
-        x = (current_time_seconds - metadata["last_accessed_time_seconds"]) / metadata["stable_time"]
+        x = (current_agent_time_seconds - metadata["last_accessed_agent_time_seconds"]) / metadata["stable_time"]
         if x >= 1:
             return {"forgot": True}
         retrievability = 1 - x ** 0.4
 
         return {"retrievability": retrievability}
 
-    def recall(self, metadata: dict, current_time_seconds: float, time_settings: Union[AgentTimeSettings, AgentTimeZone], strength: float = 1.0) -> dict:
+    def recall(self, metadata: dict, current_agent_time: datetime, strength: float = 1.0) -> dict:
         """
         调用记忆时重置可检索性并增强稳定性
         """
         # 更新可检索性
-        updated_metadata = self.update(metadata, current_time_seconds)
+        current_agent_time_seconds = datetime_to_seconds(current_agent_time)
+        updated_metadata = self.update(metadata, current_agent_time_seconds)
         if updated_metadata.get("forgot"):
             return {"forgot": True}
 
-        datetime_alpha = calculate_memory_datetime_alpha(seconds_to_datetime(current_time_seconds).astimezone(parse_agent_time_zone(time_settings)))
+        datetime_alpha = calculate_memory_datetime_alpha(current_agent_time)
         stable_strength = calculate_stability_curve(updated_metadata["retrievability"])
         stable_time_diff = metadata["stable_time"] * stable_strength - metadata["stable_time"]
         if stable_time_diff >= 0:
@@ -110,7 +149,7 @@ class MemoryManager():
         retrievability = min(1.0, updated_metadata["retrievability"] + strength * datetime_alpha)
 
         metadata_patch = {
-            "last_accessed_time_seconds": current_time_seconds,
+            "last_accessed_agent_time_seconds": current_agent_time_seconds,
             "retrievability": retrievability,
             "stable_time": stable_time
         }
@@ -121,8 +160,9 @@ class MemoryManager():
 
         return metadata_patch
 
-    async def update_memories(self, results: GetResult, memory_type: str, thread_id: str) -> None:
-        current_time_seconds = now_seconds()
+    async def update_memories(self, results: GetResult, memory_type: str, agent_id: str) -> None:
+        time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
+        current_agent_time_seconds = now_agent_seconds(time_settings)
         if not results["ids"]:
             return
         ids = results["ids"]
@@ -133,44 +173,53 @@ class MemoryManager():
         ids_new = []
         ids_to_delete = set()
         for i in range(len(ids)):
-            metadata_patch = self.update(metadatas[i], current_time_seconds)
+            metadata_patch = self.update(metadatas[i], current_agent_time_seconds)
             if metadata_patch.get("forgot"):
                 ids_to_delete.add(ids[i])
             else:
                 ids_new.append(ids[i])
                 metadatas_new.append(metadata_patch)
         if ids_to_delete:
-            self.get_collection(thread_id, memory_type).delete(ids=list(ids_to_delete))
-        await self.aupdate_metadatas(ids_new, metadatas_new, memory_type, thread_id)
+            await self.adelete(agent_id, memory_type, ids=list(ids_to_delete))
+        await self.aupdate_metadatas(ids_new, metadatas_new, memory_type, agent_id)
 
 
-    class InitialMemory(BaseModel):
-        content: str = Field(description="The content of the memory")
-        creation_time_seconds: float = Field(description="The creation time seconds of the memory")
-        type: AnyMemory = Field(description="The type of the memory")
-        id: str = Field(default_factory=lambda: str(uuid4()), description="The id of the memory")
-        stable_time: float = Field(description="The stable time base of the memory", gt=0.0)
-
-    async def add_memories(self, memories: list[InitialMemory], thread_id: str) -> None:
+    async def add_memories(self, memories: list[InitialMemory], agent_id: str) -> None:
         docs: dict[str, list[Document]] = {t: [] for t in MEMORY_TYPES}
-        current_time_seconds = now_seconds()
-        time_settings = (await store_manager.get_settings(thread_id)).main.time_settings
+        time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
+        current_agent_time_seconds = now_agent_seconds(time_settings)
         for memory in memories:
             # 使用jieba对memory.content进行分词并过滤掉重复词
             words = set(jieba.cut(memory.content))
             max_words_length = 200
             difficulty = 1 - min(1.0, (len(words) / max_words_length) ** 3)
-            datetime_alpha = calculate_memory_datetime_alpha(seconds_to_datetime(memory.creation_time_seconds).astimezone(parse_agent_time_zone(time_settings)))
+            creation_agent_datetime = memory.creation_agent_datetime
+            datetime_alpha = calculate_memory_datetime_alpha(creation_agent_datetime)
             stable_time = memory.stable_time * difficulty * datetime_alpha # 稳定性，决定了可检索性的衰减速度
+            creation_agent_time_seconds = datetime_to_seconds(creation_agent_datetime)
+            creation_agent_datetime_isocalendar = creation_agent_datetime.isocalendar()
             metadata = {
-                "creation_time_seconds": memory.creation_time_seconds,
-                "stable_time": stable_time,
+                "creation_agent_time_seconds": creation_agent_time_seconds,
+                "creation_agent_time_year": creation_agent_datetime.year,
+                "creation_agent_time_month": creation_agent_datetime.month,
+                "creation_agent_time_week": creation_agent_datetime_isocalendar.week,
+                "creation_agent_time_day": creation_agent_datetime.day,
+                "creation_agent_time_hour": creation_agent_datetime.hour,
+                "creation_agent_time_minute": creation_agent_datetime.minute,
+                "creation_agent_time_second": creation_agent_datetime.second,
+                "creation_agent_time_weekday": creation_agent_datetime_isocalendar.weekday,
+                "stable_time": stable_time, # 稳定时长，单位为秒
                 "retrievability": 1.0, # 可检索性，决定了检索的概率
                 "difficulty": difficulty, # 难度，决定了稳定性基数增长的多少。可能会出现无法长期保留的记忆，如整本书的内容。
-                "last_accessed_time_seconds": memory.creation_time_seconds,
-                "type": memory.type
+                "last_accessed_agent_time_seconds": creation_agent_time_seconds,
+                "memory_type": memory.type,
+                "memory_id": memory.id, # 用于在检索时剔除记忆，由于chroma的限制，只能使用元数据来实现
             }
-            r = self.update(metadata, current_time_seconds)
+            if memory.previous_memory_id:
+                metadata["previous_memory_id"] = memory.previous_memory_id
+            if memory.next_memory_id:
+                metadata["next_memory_id"] = memory.next_memory_id
+            r = self.update(metadata, current_agent_time_seconds)
             if not r.get("forgot"):
                 metadata["retrievability"] = r["retrievability"]
                 document = Document(
@@ -181,197 +230,317 @@ class MemoryManager():
                 docs[memory.type].append(document)
         for t in docs.keys():
             if docs[t]:
-                await self.aadd_documents(docs[t], thread_id, t)
+                await self.aadd_documents(docs[t], agent_id, t)
 
 
+    async def retrieve_memories(
+        self,
+        agent_id: str,
+        retrieval_config: MemoryRetrievalConfig,
+        memory_type: Optional[AnyMemoryType] = None,
+        search_string: Optional[str] = None,
+        creation_time_range_start: Optional[Union[datetime, float]] = None,
+        creation_time_range_end: Optional[Union[datetime, float]] = None,
+        exclude_memory_ids: Optional[list[str]] = None
+    ) -> list[RetrievedMemoryGroup]:
+        """检索记忆向量库中的文档并返回排序结果。
 
-    class RetrieveInput(BaseModel):
-        search_string: Optional[str] = Field(default=None, description="检索字符串")
-        search_type: AnyMemory = Field(description="检索类型")
-        search_method: Literal["similarity", "mmr"] = Field(default="similarity", description="检索方法")
-        k: int = Field(description="返回的记忆数量", ge=0)
-        fetch_k: int = Field(description="从多少个结果中筛选出最终结果(fetch_k>k)，目前只有mmr使用", ge=0)
-        similarity_weight: float = Field(description="相似性权重", ge=0, le=1),
-        retrievability_weight: float = Field(description="可检索性权重", ge=0, le=1),
-        diversity_weight: float = Field(description="多样性权重，这是mmr的参数", ge=0, le=1)
-        metadata_filter: list = Field(default_factory=list, description="元数据过滤条件")
-        strength: float = Field(description="检索强度，作为stable_time和retrievability的乘数", ge=0)
-    async def retrieve_memories(self,
-                                inputs: list[RetrieveInput],
-                                thread_id: str
-                                ) -> list[tuple[Document, float]]:
-        """检索记忆向量库中的文档并返回排序结果。"""
+        exclude_memory_ids: 在结果中不返回这些记忆，也不会使用这些记忆检索相邻记忆。对纯时间检索不生效"""
 
-        # 构建有效输入字典：过滤掉无效输入（无搜索字符串或k<=0）
-        #inputs: list[dict] = [i.model_dump() for i in inputs]
-        inputs_dict: list[dict] = []
-        gets = []
-        for i in inputs:
-            if i.k <= 0 or i.fetch_k < i.k:
-                continue
-            elif not i.search_string:
-                if i.metadata_filter:
-                    gets.append(i.model_dump())
-                else:
-                    continue
-            else:
-                inputs_dict.append(i.model_dump())
-        inputs: list[dict] = inputs_dict
+        if not search_string and not (creation_time_range_start or creation_time_range_end):
+            raise ValueError("在search_string和creation_time_range中至少需要一个有效输入参数")
+
+        inputs = {t: {} for t in get_activated_memory_types()}
+        filters = []
+
+        total_ratio = 0.0
+        for key, value in inputs.items():
+            ratio = getattr(retrieval_config, key+'_ratio', 0.0)
+            if key == memory_type:
+                ratio *= (1.8 + max((retrieval_config.strength - 1.0), 0.0)) # 基于strength超过1的部分额外增加权重
+                if memory_type == "original":
+                    ratio *= 1.2 # 给original类型的记忆权重额外一些补偿，由于其search_string可能不那么通用
+            total_ratio += ratio
+            value['ratio'] = ratio
+        if total_ratio == 0.0:
+            raise ValueError("所有检索类型的权重和为0，配置存在错误，请忽略并暂停使用此工具。")
+        for key, value in inputs.items():
+            value['proportion'] = value['ratio'] / total_ratio
+            value['k'] = int(retrieval_config.k * value['proportion'])
+            value['fetch_k'] = int(retrieval_config.fetch_k * value['proportion'])
+
+        if creation_time_range_start:
+            if isinstance(creation_time_range_start, datetime):
+                creation_time_range_start = datetime_to_seconds(creation_time_range_start)
+            filters.append({"creation_agent_time_seconds": {"$gte": creation_time_range_start}})
+        if creation_time_range_end:
+            if isinstance(creation_time_range_end, datetime):
+                creation_time_range_end = datetime_to_seconds(creation_time_range_end)
+            filters.append({"creation_agent_time_seconds": {"$lte": creation_time_range_end}})
+
+        if exclude_memory_ids:
+            # 使用exclude_memory_ids过滤，一般用于过滤掉与消息id相同的original记忆
+            filters.append({"memory_id": {"$nin": exclude_memory_ids}})
+
+        filters = validated_where(filters)
 
 
-        # 至少需要一个有效输入参数
-        if not inputs and not gets:
-                raise ValueError("没有要检索的记忆！")
-
-        combined_docs_and_scores: list[tuple[Document, float]] = []
-
-        current_time_seconds = now_seconds()
-        agent_time_settings = (await store_manager.get_settings(thread_id)).main.time_settings
-
+        combined_memories_and_scores: list[tuple[RetrievedMemoryGroup, float]] = []
         ids_to_delete = {t: set() for t in MEMORY_TYPES}
 
         # 这里是纯时间过滤的检索
-        if gets:
-            for g in gets:
-                results = await self.aget(
-                    thread_id=thread_id,
-                    memory_type=g["search_type"],
-                    where=validated_where({"$and": g["metadata_filter"]}),
-                    limit=g["k"],
+        if (creation_time_range_start or creation_time_range_end) and not search_string:
+            agent_time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
+            current_agent_time = now_agent_time(agent_time_settings)
+
+            for key, value in inputs:
+                get_results = await self.aget(
+                    agent_id=agent_id,
+                    memory_type=key,
+                    where=filters,
+                    limit=value["k"],
                 )
-                docs = get_result_to_docs(results)
+                docs = get_result_to_docs(get_results)
                 ids = []
                 metadatas = []
-                strength = g["strength"]
+                retrievabilities = []
+                final_docs = []
+                first_memory = None
                 for doc in docs:
                     patched_metadata = self.recall(
                         metadata=doc.metadata,
-                        current_time_seconds=current_time_seconds,
-                        time_settings=agent_time_settings,
-                        strength=strength
+                        current_agent_time=current_agent_time,
+                        strength=retrieval_config.strength
                     )
                     if patched_metadata.get("forgot"):
-                        ids_to_delete[g["search_type"]].add(doc.id)
+                        ids_to_delete[key].add(doc.id)
                     else:
                         ids.append(doc.id)
                         metadatas.append(patched_metadata)
-                        doc.metadata.update(patched_metadata)
-                await self.aupdate_metadatas(ids, metadatas, g["search_type"], thread_id)
-                combined_docs_and_scores.extend([(doc, doc.metadata["retrievability"]) for doc in docs if doc.id not in ids_to_delete[g["search_type"]]])
-    
-        if not inputs:
-            return combined_docs_and_scores
+                        retrievabilities.append(doc.metadata["retrievability"])
+                        if first_memory is None:
+                            final_docs.append(RetrievedMemory(
+                                doc=doc,
+                                retrievability=doc.metadata["retrievability"],
+                                is_source_memory=True
+                            ))
+                            first_memory = final_docs[-1]
+                        else:
+                            final_docs.append(RetrievedMemory(
+                                doc=doc,
+                                retrievability=doc.metadata["retrievability"]
+                            ))
+                await self.aupdate_metadatas(ids, metadatas, key, agent_id)
+                if first_memory:
+                    retrievabilities_avg = sum(retrievabilities) / len(retrievabilities)
+                    combined_memories_and_scores.append((RetrievedMemoryGroup(
+                        memories=final_docs,
+                        source_memory=first_memory),
+                        retrievabilities_avg
+                    ))
 
+            for memory_type, delete_ids in ids_to_delete.items():
+                if delete_ids:
+                    await self.adelete(agent_id, memory_type, ids=list(delete_ids))
+            combined_memories = [doc for doc, score in combined_memories_and_scores]
 
-        search_strings = []
-        last_input = {}
-
-        # 收集唯一搜索字符串并标记重复项
-        for input in inputs:
-            if last_input:
-
-                # 如果当前搜索字符串与前一个相同，则标记为重复项
-                if input["search_string"] == last_input["search_string"]:
-                    input["same_as_last"] = True
-                else:
-                    search_strings.append(input["search_string"])
-            else:
-                search_strings.append(input["search_string"])
-            last_input = input
-
-        # 批量生成嵌入向量：多个字符串使用aembed_documents，单个使用aembed_query
-        if len(search_strings) > 1:
-            search_embeddings = await self.embeddings.aembed_documents(search_strings)
         else:
-            search_embeddings = [await self.embeddings.aembed_query(search_strings[0])]
+            search_embedding = await self.embeddings.aembed_query(search_string)
 
-        embeddings_index = 0
-        first_loop = True
+            agent_time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
+            current_agent_time = now_agent_time(agent_time_settings)
 
-        # 将嵌入向量分配给对应的输入类型
-        for input in inputs:
-            if first_loop:
-                first_loop = False
-            elif not input.get("same_as_last"):
-                embeddings_index += 1
-            input["search_embedding"] = search_embeddings[embeddings_index]
-
-
-        current_time_seconds = now_seconds()
-
-        # 对每个输入类型执行向量搜索
-        for input in inputs:
-            if input["search_method"] == "similarity":
-                docs_and_scores = await self.asimilarity_search_by_vector_with_score_and_retrievability(
-                    embedding=input["search_embedding"],
-                    thread_id=thread_id,
-                    memory_type=input["search_type"],
-                    k=input["k"],
-                    similarity_weight=input["similarity_weight"],
-                    retrievability_weight=["retrievability_weight"],
-                    filter=validated_where({"$and": input.get("metadata_filter", [])}) if input.get("metadata_filter") else None
-                )
-            elif input["search_method"] == "mmr":
-                docs_and_scores = await self.amax_marginal_relevance_search_by_vector_with_retrievability(
-                    embedding=input["search_embedding"],
-                    thread_id=thread_id,
-                    memory_type=input["search_type"],
-                    k=input["k"],
-                    fetch_k=input["fetch_k"],
-                    similarity_weight=input["similarity_weight"],
-                    retrievability_weight=input["retrievability_weight"],
-                    diversity_weight=input["diversity_weight"],
-                    filter=validated_where({"$and": input.get("metadata_filter", [])}) if input.get("metadata_filter") else None
-                )
-            ids = []
-            metadatas = []
-            strength = input["strength"]
-            for doc, score in docs_and_scores:
-                patched_metadata = self.recall(
-                    metadata=doc.metadata,
-                    current_time_seconds=current_time_seconds,
-                    time_settings=agent_time_settings,
-                    strength=strength
-                )
-                if patched_metadata.get("forgot"):
-                    ids_to_delete[input["search_type"]].add(doc.id)
+            # 对每个输入类型执行向量搜索
+            for key, value in inputs.items():
+                if retrieval_config.search_method == "similarity":
+                    docs_and_scores = await self.asimilarity_search_by_vector_with_score_and_retrievability(
+                        embedding=search_embedding,
+                        agent_id=agent_id,
+                        memory_type=key,
+                        k=value["k"],
+                        fetch_k=value["fetch_k"],
+                        similarity_weight=retrieval_config.similarity_weight,
+                        retrievability_weight=retrieval_config.retrievability_weight,
+                        filter=filters
+                    )
+                elif retrieval_config.search_method == "mmr":
+                    docs_and_scores = await self.amax_marginal_relevance_search_by_vector_with_retrievability(
+                        embedding=search_embedding,
+                        agent_id=agent_id,
+                        memory_type=key,
+                        k=value["k"],
+                        fetch_k=value["fetch_k"],
+                        similarity_weight=retrieval_config.similarity_weight,
+                        retrievability_weight=retrieval_config.retrievability_weight,
+                        diversity_weight=retrieval_config.diversity_weight,
+                        filter=filters
+                    )
                 else:
-                    ids.append(doc.id)
-                    metadatas.append(patched_metadata)
-            await self.aupdate_metadatas(ids, metadatas, input["search_type"], thread_id)
-            combined_docs_and_scores.extend([_ for _ in docs_and_scores if _[0].id not in ids_to_delete[input["search_type"]]])
+                    raise ValueError("未知的检索方法: "+str(retrieval_config.search_method))
+
+                ids = []
+                metadatas = []
+                strength = retrieval_config.strength
+                memories_list = []
+                for doc, score in docs_and_scores:
+                    # 先检查记忆是否已遗忘
+                    patched_metadata = self.recall(
+                        metadata=doc.metadata,
+                        current_agent_time=current_agent_time,
+                        strength=strength
+                    )
+                    if patched_metadata.get("forgot"):
+                        ids_to_delete[key].add(doc.id)
+                    else:
+                        # 加入待更新列表，若已存在则不加入
+                        if doc.id not in ids:
+                            ids.append(doc.id)
+                            metadatas.append(patched_metadata)
+
+                        # 根据深度寻找源记忆相邻的n个记忆
+                        # 超过1的strength会增加深度，并在0之间随机取值
+                        depth = random.randint(0, int(retrieval_config.depth * max(strength, 1.0)))
+                        source_retrievability = doc.metadata["retrievability"]
+                        source_memory = RetrievedMemory(
+                            doc=doc,
+                            retrievability=source_retrievability,
+                            is_source_memory=True
+                        )
+                        memories = [source_memory]
+                        loop_count = 0
+                        # weight用来计算检索强度和可检索性，递减。初始值就会小于原始值，根据单向深度最小值为原始值的一半
+                        current_docs_and_weights: dict[str, Optional[dict[str, Union[Document, list[float]]]]] = {
+                            'previous': {'doc': doc, 'weights': [i * (1 / depth) * 0.5 + 0.5 for i in range(depth)]},
+                            'next': {'doc': doc, 'weights': [i * (1 / depth) * 0.5 + 0.5 for i in range(depth)]}
+                        }
+                        while (
+                            loop_count < depth and
+                            (
+                                current_docs_and_weights["next"] is not None or
+                                current_docs_and_weights["previous"] is not None
+                            )
+                        ):
+                            loop_count += 1
+                            if current_docs_and_weights["next"] is not None and random.randint(0, 1):
+                                direction = 'next'
+                            elif current_docs_and_weights["previous"] is not None:
+                                direction = 'previous'
+                            else:
+                                current_docs_and_weights["next"] = None
+                                current_docs_and_weights["previous"] = None
+                                break
+                            current_doc = current_docs_and_weights[direction]['doc']
+                            if current_doc.metadata.get(f'{direction}_memory_id'):
+                                get_result = await self.aget(
+                                    agent_id,
+                                    current_doc.metadata['memory_type'],
+                                    current_doc.metadata['next_memory_id']
+                                )
+                                if get_result["ids"]:
+                                    weight = current_docs_and_weights[direction]['weights'].pop()
+                                    patched_metadata = self.recall(
+                                        metadata=get_result["metadatas"][0],
+                                        current_agent_time=current_agent_time,
+                                        strength=strength * weight
+                                    )
+                                    if patched_metadata.get("forgot"):
+                                        ids_to_delete[key].add(get_result["ids"][0])
+                                        current_docs_and_weights[direction] = None
+                                    else:
+                                        related_doc = Document(
+                                            page_content=get_result["documents"][0],
+                                            metadata=get_result["metadatas"][0],
+                                            id=get_result["ids"][0]
+                                        )
+                                        memories.append(RetrievedMemory(
+                                            doc=related_doc,
+                                            retrievability=source_retrievability * weight
+                                        ))
+                                        current_docs_and_weights[direction]['doc'] = related_doc
+                                        # 加入待更新列表，如果已经存在，则不加入
+                                        if get_result["ids"][0] not in ids:
+                                            ids.append(get_result["ids"][0])
+                                            metadatas.append(patched_metadata)
+                                else:
+                                    current_docs_and_weights[direction] = None
+                            else:
+                                current_docs_and_weights[direction] = None
+                        memories_list.append((RetrievedMemoryGroup(
+                            memories=memories,
+                            source_memory=source_memory
+                        ), score))
+
+                await self.aupdate_metadatas(ids, metadatas, key, agent_id)
+                combined_memories_and_scores.extend(memories_list)
 
 
-        for memory_type, delete_ids in ids_to_delete.items():
-            if delete_ids:
-                self.get_collection(thread_id, memory_type).delete(ids=list(delete_ids))
+            for memory_type, delete_ids in ids_to_delete.items():
+                if delete_ids:
+                    await self.adelete(agent_id, memory_type, ids=list(delete_ids))
 
 
-        # 按照score降序排序（score越大索引越小）
-        combined_docs_and_scores.sort(key=lambda x: x[1], reverse=True)
+            # 按照score降序排序（score越大索引越小）
+            combined_memories_and_scores.sort(key=lambda x: x[1], reverse=True)
 
-        #TODO：可以做一个最大token限制，如果超出限制，则删除掉token最多的文档再试一次
-
-
-        #combined_docs = [doc for doc, score in combined_docs_and_scores] + combined_docs
+            #TODO：可以考虑做一个最大token限制，如果超出限制，则删除掉token最多的文档再试一次
 
 
-        return combined_docs_and_scores
+            combined_memories = [doc for doc, score in combined_memories_and_scores]
 
 
-    def update_metadatas(self, ids: list[str], metadatas: list[dict], memory_type: str, thread_id: str) -> None:
+        index = 0
+        for groups in combined_memories:
+            # 根据分数对每条记忆随机将字符替换为星号（模糊化）
+            for memory in groups.memories:
+                doc = memory.doc
+                # 以retrievability计算
+                score = memory.retrievability
+                content = doc.page_content
+                content_length = len(content)
+                # 对于stable的n个记忆
+                if index < retrieval_config.stable_k and score < 0.35:
+                    # 计算要替换的字符比例，score从0.35到0对应替换比例从0到1
+                    replacement_ratio = min(1 - (score / 0.35), 0.8)  # 0.35->0, 0->1
+                # 对于非stable的记忆，超过15个字符后长度越长，被消掉的字符的比例会越高
+                elif index >= retrieval_config.stable_k and content_length > 15:
+                    length_scale = min((content_length - 15) / 35, 1.0)
+                    replacement_ratio = length_scale * random.uniform(0.6, 0.9)
+                else:
+                    continue
+                # 计算要替换的字符数量
+                num_chars_to_replace = int(content_length * replacement_ratio)
+                if num_chars_to_replace <= 0:
+                    continue
+
+                # 将字符串转换为列表以便修改
+                content_list = list(content)
+                # 随机选择要替换的字符位置
+                chars_to_replace = random.sample(range(content_length), num_chars_to_replace)
+                # 将选中的字符替换为星号
+                for i in chars_to_replace:
+                    content_list[i] = '*'
+                # 重新组合成字符串
+                new_content = '「模糊的记忆」' + ''.join(content_list)
+                memory.doc.page_content = new_content
+            index += 1
+
+
+        return combined_memories
+
+
+    def update_metadatas(self, ids: list[str], metadatas: list[dict], memory_type: str, agent_id: str) -> None:
         if not ids:
             return
         if len(ids) != len(metadatas):
             raise ValueError("ids and metadatas must have the same length")
-        self.get_collection(thread_id, memory_type).update(ids=ids, metadatas=metadatas)
+        self.get_collection(agent_id, memory_type).update(ids=ids, metadatas=metadatas)
 
-    async def aupdate_metadatas(self, ids: list[str], metadatas: list[dict], memory_type: str, thread_id: str) -> None:
-        await run_in_executor(None, self.update_metadatas, ids, metadatas, memory_type, thread_id)
+    async def aupdate_metadatas(self, ids: list[str], metadatas: list[dict], memory_type: str, agent_id: str) -> None:
+        await run_in_executor(None, self.update_metadatas, ids, metadatas, memory_type, agent_id)
 
     def get(
         self,
-        thread_id: str,
+        agent_id: str,
         memory_type: str,
         ids: Optional[OneOrMany[ID]] = None,
         where: Optional[Where] = None,
@@ -390,12 +559,11 @@ class MemoryManager():
 
         if include is not None:
             kwargs["include"] = include
-        return self.get_collection(thread_id, memory_type).get(**kwargs)
-
+        return self.get_collection(agent_id, memory_type).get(**kwargs)
 
     async def aget(
         self,
-        thread_id: str,
+        agent_id: str,
         memory_type: str,
         ids: Optional[OneOrMany[ID]] = None,
         where: Optional[Where] = None,
@@ -404,34 +572,97 @@ class MemoryManager():
         where_document: Optional[WhereDocument] = None,
         include: Optional[list[str]] = None,
     ) -> GetResult:
-        return await run_in_executor(None, self.get, thread_id, memory_type, ids, where, limit, offset, where_document, include)
+        return await run_in_executor(None, self.get, agent_id, memory_type, ids, where, limit, offset, where_document, include)
+
+    def delete(
+        self,
+        agent_id: str,
+        memory_type: str,
+        ids: Optional[IDs] = None,
+        where: Optional[Where] = None,
+        where_document: Optional[WhereDocument] = None,
+    ) -> None:
+        self.get_collection(agent_id, memory_type).delete(ids=ids, where=where, where_document=where_document)
+
+    async def adelete(
+        self,
+        agent_id: str,
+        memory_type: str,
+        ids: Optional[IDs] = None,
+        where: Optional[Where] = None,
+        where_document: Optional[WhereDocument] = None,
+    ) -> None:
+        await run_in_executor(None, self.delete, agent_id, memory_type, ids, where, where_document)
+
+    def query(
+        self,
+        agent_id: str,
+        memory_type: str,
+        query_embeddings: Optional[
+            Union[
+                OneOrMany[Embedding],
+                OneOrMany[PyEmbedding],
+            ]
+        ] = None,
+        query_texts: Optional[OneOrMany[Document]] = None,
+        query_images: Optional[OneOrMany[Image]] = None,
+        query_uris: Optional[OneOrMany[URI]] = None,
+        ids: Optional[OneOrMany[ID]] = None,
+        n_results: int = 10,
+        where: Optional[Where] = None,
+        where_document: Optional[WhereDocument] = None,
+        include: Include = [
+            "metadatas",
+            "documents",
+            "distances",
+        ],
+    ) -> QueryResult:
+        collection = self.get_collection(agent_id, memory_type)
+        collection.modify(configuration={
+            "hnsw": {
+                "ef_search": max(n_results, 100)
+            }
+        })
+        return collection.query(
+            query_embeddings=query_embeddings,
+            query_texts=query_texts,
+            query_images=query_images,
+            query_uris=query_uris,
+            ids=ids,
+            n_results=n_results,
+            where=where,
+            where_document=where_document,
+            include=include
+        )
+
 
     async def aadd_documents(
         self,
         documents: list[Document],
-        thread_id: str,
+        agent_id: str,
         memory_type: str
     ) -> None:
         contents = [doc.page_content for doc in documents]
         metadatas = [doc.metadata for doc in documents]
         ids = [doc.id if doc.id else str(uuid4()) for doc in documents]
         embeddings = await self.embeddings.aembed_documents(contents)
-        collection = self.get_collection(thread_id, memory_type)
+        collection = self.get_collection(agent_id, memory_type)
         await run_in_executor(None, collection.add, ids, embeddings, metadatas, contents, None, None)
 
 
     def similarity_search_by_vector_with_score(
         self,
-        thread_id: str,
+        agent_id: str,
         memory_type: str,
         embedding: list[float],
         k: int = 5,
-        filter: Optional[dict[str, str]] = None,
-        where_document: Optional[dict[str, str]] = None,
+        filter: Optional[dict[str, Any]] = None,
+        where_document: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> list[tuple[Document, float]]:
-        collection = self.get_collection(thread_id, memory_type)
-        result = collection.query(
+        result = self.query(
+            agent_id=agent_id,
+            memory_type=memory_type,
             query_embeddings=embedding,
             n_results=k,
             where=filter if filter else None,
@@ -443,35 +674,36 @@ class MemoryManager():
 
     async def asimilarity_search_by_vector_with_score(
         self,
-        thread_id: str,
+        agent_id: str,
         memory_type: str,
         embedding: list[float],
         k: int = 5,
-        filter: Optional[dict[str, str]] = None,
-        where_document: Optional[dict[str, str]] = None,
+        filter: Optional[dict[str, Any]] = None,
+        where_document: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> list[tuple[Document, float]]:
-        return await run_in_executor(None, self.similarity_search_by_vector_with_score, thread_id, memory_type, embedding, k, filter, where_document, **kwargs)
+        return await run_in_executor(None, self.similarity_search_by_vector_with_score, agent_id, memory_type, embedding, k, filter, where_document, **kwargs)
 
 
 
     async def asimilarity_search_by_vector_with_score_and_retrievability(
         self,
         embedding: list[float],
-        thread_id: str,
+        agent_id: str,
         memory_type: str,
         k: int = 5,
+        fetch_k: int = 20,
         similarity_weight: float = 0.6,
         retrievability_weight: float = 0.4,
-        filter: Optional[dict[str, str]] = None,
-        where_document: Optional[dict[str, str]] = None,
+        filter: Optional[dict[str, Any]] = None,
+        where_document: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> list[tuple[Document, float]]:
         docs_and_scores = await self.asimilarity_search_by_vector_with_score(
-            thread_id=thread_id,
+            agent_id=agent_id,
             memory_type=memory_type,
             embedding=embedding,
-            k=k,
+            k=fetch_k,
             filter=filter,
             where_document=where_document,
             **kwargs)
@@ -479,21 +711,21 @@ class MemoryManager():
             return []
         docs_and_scores_with_retrievability = [(doc, score * similarity_weight + doc.metadata.get("retrievability", 0) * retrievability_weight) for doc, score in docs_and_scores]
         docs_and_scores_with_retrievability.sort(key=lambda x: x[1], reverse=True)
-        return docs_and_scores_with_retrievability
+        return docs_and_scores_with_retrievability[-k:]
 
 
     async def amax_marginal_relevance_search_with_retrievability(
         self,
         query: str,
-        thread_id: str,
+        agent_id: str,
         memory_type: str,
         k: int = 5,
         fetch_k: int = 20,
         similarity_weight: float = 0.4,
         retrievability_weight: float = 0.3,
         diversity_weight: float = 0.3,
-        filter: Optional[dict[str, str]] = None,
-        where_document: Optional[dict[str, str]] = None,
+        filter: Optional[dict[str, Any]] = None,
+        where_document: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> list[tuple[Document, float]]:
         """Return docs selected using the maximal marginal relevance.
@@ -528,7 +760,7 @@ class MemoryManager():
         embedding = await self.embeddings.aembed_query(query)
         return await self.amax_marginal_relevance_search_by_vector_with_retrievability(
             embedding=embedding,
-            thread_id=thread_id,
+            agent_id=agent_id,
             memory_type=memory_type,
             k=k,
             fetch_k=fetch_k,
@@ -543,7 +775,7 @@ class MemoryManager():
 
     async def amax_marginal_relevance_search_by_vector_with_retrievability(
         self,
-        thread_id: str,
+        agent_id: str,
         memory_type: str,
         embedding: list[float],
         k: int = 5,
@@ -551,14 +783,14 @@ class MemoryManager():
         similarity_weight: float = 0.4,
         retrievability_weight: float = 0.3,
         diversity_weight: float = 0.3,
-        filter: Optional[dict[str, str]] = None,
-        where_document: Optional[dict[str, str]] = None,
+        filter: Optional[dict[str, Any]] = None,
+        where_document: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> list[tuple[Document, float]]:
         return await run_in_executor(
             None,
             self.max_marginal_relevance_search_by_vector_with_retrievability,
-            thread_id,
+            agent_id,
             memory_type,
             embedding,
             k,
@@ -575,7 +807,7 @@ class MemoryManager():
 
     def max_marginal_relevance_search_by_vector_with_retrievability(
         self,
-        thread_id: str,
+        agent_id: str,
         memory_type: str,
         embedding: list[float],
         k: int = 5,
@@ -583,8 +815,8 @@ class MemoryManager():
         similarity_weight: float = 0.4,
         retrievability_weight: float = 0.3,
         diversity_weight: float = 0.3,
-        filter: Optional[dict[str, str]] = None,
-        where_document: Optional[dict[str, str]] = None,
+        filter: Optional[dict[str, Any]] = None,
+        where_document: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> list[tuple[Document, float]]:
         """Return docs selected using the maximal marginal relevance.
@@ -609,10 +841,9 @@ class MemoryManager():
         Returns:
             List of Documents selected by maximal marginal relevance.
         """
-        collection = self.get_collection(thread_id, memory_type)
-        if collection is None:
-            raise ValueError(f"Collection {thread_id}_{memory_type} does not exist or cannot create.")
-        results = collection.query(
+        results = self.query(
+            agent_id=agent_id,
+            memory_type=memory_type,
             query_embeddings=embedding,
             n_results=fetch_k,
             where=filter if filter else None,
@@ -734,15 +965,15 @@ class MemoryManager():
             similarity = np.dot(X, Y.T) / np.outer(X_norm, Y_norm)
         similarity[np.isnan(similarity) | np.isinf(similarity)] = 0.0
         return similarity
-    
+
 
     def get_collection(
         self,
-        thread_id: str,
-        memory_type: AnyMemory,
+        agent_id: str,
+        memory_type: AnyMemoryType,
     ) -> Collection:
         return self.vector_store_client.get_or_create_collection(
-            name=f"{thread_id}_{memory_type}",
+            name=f"{agent_id}_{memory_type}",
             configuration={
                 "hnsw": {
                     "space": "cosine"
@@ -752,17 +983,19 @@ class MemoryManager():
 
     def delete_collection(
         self,
-        thread_id: str,
-        memory_type: AnyMemory,
+        agent_id: str,
+        memory_type: AnyMemoryType,
     ) -> bool:
         try:
-            self.vector_store_client.delete_collection(name=f"{thread_id}_{memory_type}")
+            self.vector_store_client.delete_collection(name=f"{agent_id}_{memory_type}")
             return True
         except ValueError:
             return False
 
-def validated_where(where: dict) -> Optional[dict]:
-    '''只解决在and或or时列表里不能只有一个元素的问题'''
+def validated_where(where: Union[dict, list]) -> Optional[dict]:
+    '''只解决在and或or时列表里不能只有一个元素的问题。若输入list会被当做and处理'''
+    if isinstance(where, list):
+        where = {"$and": where}
     key = list(where.keys())[0]
     if (key == "$and" or key == "$or"):
         filters = where[key]
@@ -887,19 +1120,30 @@ def calculate_memory_datetime_alpha(current_time: datetime) -> float:
     return alpha
 
 
-def parse_memory_documents(documents: list[Document], time_zone: Optional[Union[timezone, float, timedelta, AgentTimeSettings, AgentTimeZone]] = None) -> str:
+def parse_retrieved_memory_groups(groups: list[RetrievedMemoryGroup], time_zone: AnyTz) -> str:
     """将记忆文档列表转换为(AI)可读的字符串"""
     output = []
     # 反过来从分数最低的开始读取
-    for doc in reversed(documents):
-        content = doc.page_content
-        memory_type = doc.metadata["type"]
-        time_seconds = doc.metadata.get("creation_time_seconds")
-        if isinstance(time_seconds, (float, int)):
-            readable_time = parse_time(time_seconds, time_zone)
-        else:
-            readable_time = "未知时间"
-        output.append(f"记忆类型：{memory_type}\n记忆创建时间: {readable_time}\n记忆内容: {content}")
+    for i in reversed(range(len(groups))):
+        group = groups[i]
+        memories_len = len(group.memories)
+        for memory in group.memories:
+            content = memory.doc.page_content
+            memory_type = memory.doc.metadata["memory_type"]
+            time_seconds = memory.doc.metadata.get("creation_agent_time_seconds")
+            if isinstance(time_seconds, (float, int)):
+                readable_time = format_time(time_seconds, time_zone)
+            else:
+                readable_time = "未知时间"
+            # TODO: 太啰嗦，待优化
+            output.append(f"{'<记忆组>\n' if i == 0 else ''}{'<记忆>\n「源记忆」' if memory.is_source_memory else '「相邻记忆」'}记忆类型：{memory_type}\n记忆创建时间: {readable_time}\n<记忆内容>\n{content}\n</记忆内容>\n</记忆>{'\n</记忆组>' if i == memories_len - 1 else ''}")
     if not output:
         return "没有找到任何匹配的记忆。"
-    return "（可能会出现模糊的记忆，其中的`*`星号意味着暂时没想起来的细节）\n\n\n" + "\n\n".join(output)
+    # TODO: 也很啰嗦
+    return '''记忆检索结果说明：\n1. 检索中得分越高的记忆越靠后。
+2.「源记忆」指被检索到的记忆，这条记忆才是与检索语句相关的；「相邻记忆」（若有）则是指「源记忆」在创建时间上相邻的一些记忆，虽与检索语句没有关联，但与「源记忆」结合在一起可能会得到相关联的其他信息，或还原当时情景。
+3. 在这些记忆中还可能会出现「模糊的记忆」，其中的`*`星号意味着暂时没想起来的细节，这是由于该记忆检索时的得分过低，如检索语句不够相关，或记忆本身不够新鲜。如果再次检索这些记忆，由于记忆的新鲜度提升了，所以`*`星号应当会减少。
+\n\n''' + "\n\n".join(output)
+
+
+memory_manager = MemoryManager(DashScopeEmbeddings(model="text-embedding-v4"))
