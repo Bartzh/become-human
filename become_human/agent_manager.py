@@ -706,7 +706,7 @@ __all__: 加载所有agent配置
             else:
                 main_state = await self.main_graph.graph.aget_state(config)
                 if main_messages := main_state.values.get("messages"):
-                    message = count_tokens_approximately(main_messages)
+                    message = str(count_tokens_approximately(main_messages))
                 else:
                     message = "agent消息列表为空，无法计算token数量。"
 
