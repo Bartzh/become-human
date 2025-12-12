@@ -367,7 +367,7 @@ class MainGraph(BaseGraph):
             )
             passive_retrieve_content = parse_retrieved_memory_groups(passive_retrieve_groups, main_config.time_settings)
             new_messages.append(HumanMessage(
-                content=f'以下是根据用户输入自动从你的记忆（数据库）中检索到的内容，可能会出现无关信息，如果需要进一步检索请调用工具`retrieve_memories`：\n\n\n{passive_retrieve_content}',
+                content=f'以下是根据用户输入自动从你的记忆（数据库）中检索到的内容，可能会出现无关信息（但依然可作为谈资），如果需要进一步检索请调用工具`retrieve_memories`：\n\n\n{passive_retrieve_content}',
                 name="system",
                 additional_kwargs={
                     "bh_do_not_store": True,

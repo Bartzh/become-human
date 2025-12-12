@@ -257,9 +257,9 @@ class MemoryManager():
         for key, value in inputs.items():
             ratio = getattr(retrieval_config, key+'_ratio', 0.0)
             if key == memory_type:
-                ratio *= (1.8 + max((retrieval_config.strength - 1.0), 0.0)) # 基于strength超过1的部分额外增加权重
+                ratio *= (2.0 + max((retrieval_config.strength - 1.0), 0.0)) # 基于strength超过1的部分额外增加权重
                 if memory_type == "original":
-                    ratio *= 1.2 # 给original类型的记忆权重额外一些补偿，由于其search_string可能不那么通用
+                    ratio *= 1.5 # 给original类型的记忆权重额外一些补偿，由于其比较少见且search_string可能不那么通用
             total_ratio += ratio
             value['ratio'] = ratio
         if total_ratio == 0.0:
@@ -392,8 +392,11 @@ class MemoryManager():
                     if patched_metadata.get("forgot"):
                         ids_to_delete[key].add(doc.id)
                     else:
-                        # 加入待更新列表，若已存在则不加入
-                        if doc.id not in ids:
+                        # 加入待更新列表，若已存在则替换为新的metadata
+                        if doc.id in ids:
+                            repeated_index = ids.index(doc.id)
+                            metadatas[repeated_index] = patched_metadata
+                        else:
                             ids.append(doc.id)
                             metadatas.append(patched_metadata)
 
