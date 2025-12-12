@@ -104,7 +104,7 @@ class MemoryManager():
                 new_timers.append(next_timer)
         timers.memory_update_timers = new_timers
 
-        print(f'updated {update_count} memories for agent "{agent_id}".')
+        #print(f'updated {update_count} memories for agent "{agent_id}".')
 
 
     def update(self, metadata: dict, current_agent_time: Union[float, datetime]) -> dict:
