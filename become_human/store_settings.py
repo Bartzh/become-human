@@ -38,15 +38,15 @@ class RecyclingSettings(StoreModel):
     _namespace = ('recycling',)
     _readable_name = "回收设置"
     base_stable_time: float = StoreField(default=259200.0, readable_name='记忆稳定时长基值', description="记忆初始化时stable_time的初始值，单位为秒。目前会乘以一个0~3的随机数")
-    recycling_trigger_threshold: int = StoreField(default=10000, readable_name='溢出回收阈值', description="触发溢出回收的阈值，单位为Tokens")
-    recycling_target_size: int = StoreField(default=6000, readable_name='溢出回收目标大小', description="溢出回收后目标大小，单位为Tokens")
+    recycling_trigger_threshold: int = StoreField(default=24000, readable_name='溢出回收阈值', description="触发溢出回收的阈值，单位为Tokens")
+    recycling_target_size: int = StoreField(default=8000, readable_name='溢出回收目标大小', description="溢出回收后目标大小，单位为Tokens")
     cleanup_on_non_active_recycling: bool = StoreField(default=False, readable_name='非活跃回收时清理', description="是否在非活跃自动回收的同时清理回收的消息")
     cleanup_target_size: int = StoreField(default=1000, readable_name='非活跃清理目标大小', description="非活跃清理后目标大小，单位为Tokens")
 
 class MemoryRetrievalConfig(BaseModel):
-    k: int = Field(default=20, ge=0, description="检索返回的记忆数量")
+    k: int = Field(default=18, ge=0, description="检索返回的记忆数量")
     fetch_k: int = Field(default=100, ge=0, description="从多少个结果中筛选出最终的结果")
-    stable_k: int = Field(default=10, ge=0, description="最终显示几个完整的记忆，剩下的记忆会被简略化")
+    stable_k: int = Field(default=9, ge=0, description="最终显示几个完整的记忆，剩下的记忆会被简略化")
     depth: int = Field(default=2, ge=0, description="检索的记忆深度，会在0之间随机取值，指被检索记忆的相邻n个记忆也会被召回")
     original_ratio: float = Field(default=1.5, description="检索结果中原始记忆出现的初始比例", ge=0.0)
     episodic_ratio: float = Field(default=3.5, description="检索结果中情景记忆出现的初始比例", ge=0.0)
@@ -62,9 +62,9 @@ class RetrievalSettings(StoreModel):
     _readable_name = "检索设置"
     active_retrieval_config: MemoryRetrievalConfig = StoreField(default_factory=MemoryRetrievalConfig, readable_name="主动检索配置")
     passive_retrieval_config: MemoryRetrievalConfig = StoreField(default_factory=lambda: MemoryRetrievalConfig(
-        k=12,
+        k=10,
         fetch_k=100,
-        stable_k=6,
+        stable_k=5,
         depth=1,
         original_ratio=2.5,
         episodic_ratio=3.5,

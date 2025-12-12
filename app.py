@@ -185,7 +185,6 @@ async def sse(token: str = Depends(oauth2_scheme)):
     user_id = payload['sub']
     sse_heartbeat_string = "event: heartbeat\ndata: feelmyheartbeat\n\n"
     async def event_generator():
-        first_time = True
         connection_id = user_id + '_' + str(id(asyncio.current_task()))
         try:
             while True:
@@ -194,12 +193,10 @@ async def sse(token: str = Depends(oauth2_scheme)):
                 if queue:
                     try:
                         # 使用 asyncio.wait_for 设置超时，避免长时间阻塞
-                        event = await asyncio.wait_for(queue.get(), timeout=0.1 if first_time else 25.0)# 第一次get会卡住
+                        event = await asyncio.wait_for(queue.get(), timeout=2.5)
                         yield f"event: message\ndata: {json.dumps(event)}\n\n"  # 按照 SSE 格式发送消息
                     except asyncio.TimeoutError:
                         # 发送心跳消息防止连接超时
-                        if first_time:
-                            first_time = False
                         yield sse_heartbeat_string
                 else:
                     # 如果没有队列，也发送心跳防止连接超时
