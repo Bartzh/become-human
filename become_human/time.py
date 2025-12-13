@@ -15,9 +15,12 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 def datetime_to_seconds(dt: datetime) -> float:
-    """将datetime转换为秒数，类似于timestamp但支持datetime的所有时间范围，与timestamp一样为UTC时区"""
+    """将datetime转换为秒数，类似于timestamp但支持datetime的所有时间范围，与timestamp一样为UTC时区
+
+    **注意**，如果提供的datetime没有时区信息，则会被当成本地时区"""
+    # 如果没有时区信息，默认它为本地时间。对于now()来说会很有用
     if dt.tzinfo is None:
-       dt = dt.astimezone()
+       dt = dt.replace(tzinfo=get_localzone())
     # 会自动转换成utc然后计算秒数，时区偏移量会影响total_seconds，所以必须使用0偏移量的utc计算
     return (dt - datetime(1, 1, 1, tzinfo=timezone.utc)).total_seconds()
 

@@ -22,7 +22,7 @@ class MainSettings(StoreModel):
     role_description: str = StoreField(default="应该是一个有用的助手吧。", readable_name="直接向用户显示的一段文本，描述这个角色")
     active_time_range: tuple[float, float] = StoreField(default=(1800.0, 7200.0), readable_name='活跃时长随机范围', description="活跃时间随机范围（最小值和最大值），在这之后进入休眠状态")
     always_active: bool = StoreField(default=False, readable_name="保持活跃", description="是否一直处于活跃状态，也即不存在agent因不活跃而不回复消息的情况。若是，则active_time_range将仅用作回收消息等功能，且self_call依然有效，只有wakeup_call会失效")
-    temporary_active_time_range: tuple[float, float] = StoreField(default=(30.0, 600.0), readable_name='临时活跃时长随机范围', description="在无新消息时self_call后agent获得的临时活跃时间的随机范围（最小值和最大值），单位为秒。")
+    temporary_active_time_range: tuple[float, float] = StoreField(default=(120.0, 1200.0), readable_name='临时活跃时长随机范围', description="在无新消息时self_call后agent获得的临时活跃时间的随机范围（最小值和最大值），单位为秒。")
     self_call_time_ranges: list[tuple[float, float]] = StoreField(default_factory=lambda: [
         (1800.0, 10800.0),
         (5400.0, 32400.0),

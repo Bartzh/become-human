@@ -547,8 +547,8 @@ def sample_agent_settings():
 
 @pytest.fixture
 def sample_datetime():
-    """提供示例datetime"""
-    return datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    """提供示例datetime。在我的测试中，毫秒最高可以设置到999969微秒，再往上会溢出"""
+    return datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
 
 @pytest.fixture
 def sample_seconds():

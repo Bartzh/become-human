@@ -6,6 +6,7 @@ from datetime import datetime, timezone, time, timedelta
 from dateutil.relativedelta import relativedelta
 import random
 from warnings import warn
+from tzlocal import get_localzone
 
 class Timer(BaseModel):
     """如只设置interval，表示将按指定时间间隔运行；如设置了daily_time_seconds，则也至少需要设置each_day为True、weekdays或monthdays其中一项。"""
@@ -40,7 +41,7 @@ class Timer(BaseModel):
 
         # 确保current_time有时区信息
         if current_time.tzinfo is None:
-            current_time = current_time.astimezone()
+            current_time = current_time.replace(tzinfo=get_localzone())
 
         # 如果当前时间小于下次执行时间，则直接返回原Timer
         current_time_seconds = datetime_to_seconds(current_time)

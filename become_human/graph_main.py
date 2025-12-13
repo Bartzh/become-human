@@ -251,7 +251,8 @@ class MainGraph(BaseGraph):
                     new_state["wakeup_call_time_seconds"] = 0.0
 
 
-        if can_self_call or (not is_self_call and current_agent_time_seconds < active_time_seconds):
+        # 要么自我调用，要么在活跃状态时被用户调用
+        if can_self_call or (not is_self_call and (current_agent_time_seconds < active_time_seconds or main_config.always_active)):
             return Command(update=new_state, goto='prepare_to_generate')
         else:
             return Command(update=new_state, goto='final')
@@ -281,7 +282,8 @@ class MainGraph(BaseGraph):
         if runtime.context.is_self_call:
 
             self_call_type = runtime.context.self_call_type
-            is_active = current_agent_time_seconds < state.active_time_seconds
+            # 用来处理提示词
+            is_active = current_agent_time_seconds < state.active_time_seconds or main_config.always_active
 
             if self_call_type == 'active':
                 next_active_self_call_time_secondses_and_notes = [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds > current_agent_time_seconds]

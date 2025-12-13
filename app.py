@@ -4,7 +4,6 @@ from fastapi.security import OAuth2PasswordBearer
 import jwt
 import asyncio, uvicorn
 import bcrypt
-from dotenv import load_dotenv
 import os
 import re
 import json
@@ -80,7 +79,6 @@ def load_users_from_json() -> dict:
 users_db = load_users_from_json()
 
 
-load_dotenv()
 private_key = os.getenv("APP_PRIVATE_KEY", "become-human")
 
 

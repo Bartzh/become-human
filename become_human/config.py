@@ -37,7 +37,7 @@ DEFAULT_AGENTS = {
         'recycling': {
             'base_stable_time': 43200.0,
             'cleanup_on_non_active_recycling': True,
-            'cleanup_target_size': 1000
+            'cleanup_target_size': 800
         },
         'retrieval': {
             'active_retrieval_config': {
