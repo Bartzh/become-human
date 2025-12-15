@@ -238,11 +238,21 @@ curl -fsSL https://deno.land/install.sh | sh
 
 ~~windows可以直接用仓库里的脚本，稍微改了一下，只会下载deno.exe到根目录，不会添加环境变量。这样似乎就够了。~~
 
-网页服务`app.py`可以搭配 [become-human-app-assistant-ui](https://github.com/Bartzh/become-human-app-assistant-ui) 使用。还需设置`config/app_users.json`
+网页服务`app.py`需搭配 [become-human-app-assistant-ui](https://github.com/Bartzh/become-human-app-assistant-ui) 使用。还需设置`config/app_users.json`
+
+对于网页服务，如果要使用推送通知功能，需先运行`uv run vapid-gen`
+
+然后点击网页顶端的订阅小铃铛，弹出请求通知权限提示
+
+允许后将向后端订阅通知，再次点击则将取消当前订阅生成新的订阅，同一用户同时只会有一个订阅
+
+对于iOS来说，需要将网页添加至主屏幕，且必须以https与前端连接才会生效
+
+需注意只会通知agent在自我调用时调用的send_message
 
 ## TODO
 
-始终要做的：优化提示词，这个是真不会
+始终要做的：优化提示词
 
 已实现记忆管理、打断（double-texting）、自我调用、独立时间
 
@@ -252,14 +262,12 @@ TODO:
 - 双向检索
 - 增强模型支持
 - 记忆调参
-- 随机几秒等待
 - agent自主设置定时器，统一定时器
 - bh_标签安全
 - 全天总结，按时间段的总结
 - 连接所有记忆
-- 自动计算距上次对话流逝时间
+- 显示距上次对话流逝时间
 - 记忆初始化
-- 推送通知（或手动获取）
 - 使用模型计算初始stable_time
 
 ROADMAP:

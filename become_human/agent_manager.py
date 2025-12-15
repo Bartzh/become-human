@@ -542,6 +542,8 @@ class AgentManager:
                                     # 对于event来说名字固定为send_message
                                     #await self.event_queue.put({"agent_id": agent_id, "name": "send_message", "args": {"content": new_message.replace(last_message, '', 1)}, "not_completed": True})
                                     event_item = {"agent_id": agent_id, "name": "send_message", "args": {"content": new_message}, "id": tool_call_id}
+                                    # 暂时用来给app的通知服务使用，如果是自我调用就推送通知
+                                    event_item["is_self_call"] = is_self_call
                                     if not chunk_completed:
                                         event_item["not_completed"] = True
                                     else:

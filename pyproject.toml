@@ -23,6 +23,7 @@ dependencies = [
     "tzdata>=2025.2",
     "tzlocal>=5.3.1",
     "uvicorn>=0.34.2",
+    "webpush>=1.0.6",
 ]
 
 [dependency-groups]

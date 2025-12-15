@@ -13,6 +13,11 @@ from typing import Optional
 from contextlib import asynccontextmanager
 from warnings import warn
 
+from pathlib import Path
+import aiohttp
+import aiosqlite
+from webpush import WebPush, WebPushSubscription
+
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.messages import AnyMessage, ToolMessage, BaseMessage, AIMessage, HumanMessage, RemoveMessage
 
@@ -26,6 +31,8 @@ from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global agent_manager
+    # 初始化数据库
+    await init_db()
     agent_manager = await AgentManager.create()
     event_listener_task = asyncio.create_task(event_listener(agent_manager.event_queue))
     yield
@@ -57,7 +64,11 @@ DEFAULT_USERS = {
     "default_user": {
         "password": "donotchangeifyouwantme",
         "is_admin": True,
-        "accessible_agents": ["default_agent_1", "default_agent_2"]
+        "accessible_agents": [
+            "default_agent_1",
+            "default_agent_2",
+            "default_agent_3"
+        ]
     }
 }
 
@@ -192,6 +203,20 @@ async def sse(token: str = Depends(oauth2_scheme)):
                     try:
                         # 使用 asyncio.wait_for 设置超时，避免长时间阻塞
                         event = await asyncio.wait_for(queue.get(), timeout=2.5)
+                        # 在自我调用时发送的消息会同时推送通知
+                        if (
+                            event.get("is_self_call") and
+                            event.get("name") == "send_message" and
+                            (user_sub := await get_user_subscriptions(user_id)) and
+                            (message_content := event.get("args", {}).get("content", ""))
+                        ):
+                            message = wp.get(message=message_content, subscription=user_sub, ttl=600)
+                            async with aiohttp.ClientSession() as session:
+                                await session.post(
+                                    url=str(user_sub.endpoint),
+                                    data=message.encrypted,
+                                    headers=message.headers,
+                                )
                         yield f"event: message\ndata: {json.dumps(event)}\n\n"  # 按照 SSE 格式发送消息
                     except asyncio.TimeoutError:
                         # 发送心跳消息防止连接超时
@@ -274,6 +299,78 @@ async def login(request: Request):
 async def verify_route(token: str = Depends(oauth2_scheme)):
     payload = verify_token(token)
     return {"username": payload['sub']}
+
+
+
+wp = WebPush(
+    public_key=Path("./public_key.pem"),
+    private_key=Path("./private_key.pem"),
+    subscriber="admin@mail.com",
+)
+
+
+DATABASE_PATH = "./data/app_users.sqlite"
+
+async def init_db():
+    """初始化数据库和表"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                subscription TEXT
+            )
+        """)
+        await db.commit()
+
+async def get_user_subscriptions(user_id: str) -> Optional[WebPushSubscription]:
+    """从数据库获取用户的订阅"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute(
+            "SELECT subscription FROM users WHERE user_id = ?",
+            (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                subscription = WebPushSubscription.model_validate(row[0])
+                return subscription
+            return None
+
+async def save_subscription(user_id: str, subscription: WebPushSubscription):
+    """保存用户的订阅到数据库，新订阅会替换旧订阅"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO users
+            (user_id, subscription)
+            VALUES (?, ?)
+            """,
+            (
+                user_id,
+                subscription.model_dump_json()
+            )
+        )
+        await db.commit()
+
+@app.get("/api/notification/key")
+async def get_public_key(token: str = Depends(oauth2_scheme)):
+    verify_token(token)
+    if os.path.exists("./applicationServerKey"):
+        with open("./applicationServerKey", "r") as f:
+            return {"key": f.read()}
+    raise HTTPException(status_code=404, detail="applicationServerKey not found")
+
+
+@app.post("/api/notification/subscribe")
+async def subscribe_user(subscription: WebPushSubscription, token: str = Depends(oauth2_scheme)):
+    # global subscriptions
+    payload = verify_token(token)
+    user_id = payload['sub']
+    
+    # 保存订阅到数据库
+    await save_subscription(user_id, subscription)
+    
+    return Response()
+
 
 
 if __name__ == '__main__':

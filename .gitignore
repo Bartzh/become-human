@@ -25,4 +25,8 @@ deno.exe
 config
 data
 
-app_websocket.py
+app_*.py
+
+applicationServerKey
+private_key.pem
+public_key.pem
