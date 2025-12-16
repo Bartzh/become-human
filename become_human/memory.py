@@ -39,6 +39,7 @@ def get_activated_memory_types() -> list[AnyMemoryType]:
     return _cached_memory_types
 
 class InitialMemory(BaseModel):
+    """只作为add_memories的参数"""
     content: str = Field(description="The content of the memory")
     type: AnyMemoryType = Field(description="The type of the memory")
     #creation_time_seconds: float = Field(description="The creation time seconds of the memory")

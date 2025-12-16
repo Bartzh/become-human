@@ -9,7 +9,7 @@ import random
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
-from become_human.memory import InitialMemory, memory_manager, AnyMemoryType
+from become_human.memory import InitialMemory, memory_manager, AnyMemoryType, get_activated_memory_types
 from become_human.utils import format_message_for_ai, format_messages_for_ai
 from become_human.time import now_seconds, real_time_to_agent_time, datetime_to_seconds, now_agent_seconds, utcnow, format_time, agent_seconds_to_datetime
 from become_human.store_manager import store_manager
@@ -303,7 +303,7 @@ extract_reflective_memories_schema = {
 async def recycle_original_memories(agent_id: str, input_messages: list[AnyMessage]):
     store_settings = await store_manager.get_settings(agent_id)
     time_settings = store_settings.main.time_settings
-    messages = filtering_messages(input_messages, exclude_do_not_store=True, exclude_extracted=False)
+    messages = filtering_messages(input_messages, exclude_do_not_store=True, exclude_recycled=True, exclude_extracted=False)
     content_and_kwargs: list[dict[str, Any]] = []
     for m in messages:
         if isinstance(m, (HumanMessage, AIMessage)):
@@ -407,7 +407,7 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
     current_time_seconds = datetime_to_seconds(current_time)
     current_agent_time = real_time_to_agent_time(current_time, store_settings.main.time_settings)
     current_agent_time_seconds = datetime_to_seconds(current_agent_time)
-    process = [
+    process: list[BaseMessage] = [
         HumanMessage(
             content=f'''**这条消息来自系统（system）自动发送**
 当前时间是 {format_time(current_agent_time)}，距上次与用户聊天过去了一段时间，现在是一个反思刚才所发生的事情的好时机。请你以你所扮演的角色的视角，思考刚才所发生的事意味着什么，能得出什么样的结论或猜测，得出结果并留下思考过程。''',
@@ -423,6 +423,7 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
         AIMessage(content=extracted_reflective_memories["reflection_process"], id=str(uuid4()), additional_kwargs={
         "bh_creation_time_seconds": current_time_seconds,
         "bh_creation_agent_time_seconds": current_agent_time_seconds,
+        "bh_recycled": True
         })
     ]
     base_stable_time = store_settings.recycling.base_stable_time
@@ -435,6 +436,16 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
         previous_memory_id=None if i == 0 else ids[i-1],
         next_memory_id=None if i == reflective_memories_len - 1 else ids[i+1]
     ) for i, memory in enumerate(reflective_memories)]
+    if 'original' in get_activated_memory_types():
+        memories.append(InitialMemory(
+            content=process[1].content,
+            stable_time=random.expovariate(0.3) * base_stable_time,
+            type="original",
+            creation_agent_datetime=current_agent_time,
+            id=process[1].id,
+            previous_memory_id=None,
+            next_memory_id=None
+        ))
     await memory_manager.add_memories(memories, agent_id)
     return process
 
@@ -455,6 +466,7 @@ async def recycle_memories(memory_type: AnyMemoryType, agent_id: str, input_mess
 def filtering_messages(
         messages: list[AnyMessage],
         exclude_do_not_store: bool = False,
+        exclude_recycled: bool = False,
         exclude_extracted: bool = True,
         exclude_system: bool = True
     ) -> list[AnyMessage]:
@@ -464,6 +476,9 @@ def filtering_messages(
             if isinstance(message, ToolMessage) and message.artifact and isinstance(message.artifact, dict) and message.artifact.get("bh_do_not_store"):
                 continue
             elif message.additional_kwargs.get("bh_do_not_store"):
+                continue
+        if exclude_recycled:
+            if message.additional_kwargs.get("bh_recycled"):
                 continue
         if exclude_extracted:
             if message.additional_kwargs.get("bh_extracted"):
