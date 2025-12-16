@@ -165,25 +165,19 @@ async def input_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
     config = {"configurable": {"thread_id": agent_id}}
 
     is_admin = users_db[user_id].get('is_admin')
-    if extracted_message[0].startswith("/"):
-        if is_admin:
-            await agent_manager.command_processing(agent_id, extracted_message[0])
-            return Response()
-        else:
-            if user_queues.get(agent_id):
-                await user_queues[agent_id].put({"name": "log", "args": {"message": "无权限执行此命令"}, "id": "command-" + str(uuid4())})
-            return Response()
 
-    await agent_manager.call_agent(extracted_message, agent_id, user_name=user_input.get("user_name"))
+    await agent_manager.call_agent_with_command(
+        user_input=extracted_message,
+        agent_id=agent_id,
+        is_admin=is_admin,
+        user_name=user_input.get("user_name")
+    )
 
     main_state = await agent_manager.main_graph.graph.aget_state(config)
-    main_messages = main_state.values["messages"]
+    main_messages = await agent_manager.main_graph.get_messages(agent_id)
     new_messages = main_state.values["new_messages"]
     print(new_messages)
     print(f'{count_tokens_approximately(main_messages)} tokens')
-    #recycle_response = await recycle_graph.graph.ainvoke({"input_messages": main_messages}, config)
-    #if recycle_response.get("success"):
-    #    await main_graph.graph.aupdate_state(config, {"messages": recycle_response["remove_messages"]})
 
     return Response()
 

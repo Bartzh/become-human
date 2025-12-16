@@ -17,7 +17,7 @@ from become_human.graph_main import MainGraph, send_message_tool_content, MainCo
 from become_human.recycling import recycle_memories
 from become_human.memory import get_activated_memory_types, memory_manager
 from become_human.config import load_config, get_agent_configs
-from become_human.utils import is_valid_json, format_messages_for_ai
+from become_human.utils import is_valid_json, format_messages_for_ai, extract_text_parts
 from become_human.time import datetime_to_seconds, real_time_to_agent_time, now_seconds, format_time, utcnow, agent_seconds_to_datetime, format_seconds, Times, real_seconds_to_agent_seconds, parse_timedelta
 from become_human.store import store_setup, store_stop_listener, store_adelete_namespace
 from become_human.store_manager import store_manager
@@ -327,7 +327,20 @@ class AgentManager:
             is_self_call: Optional[bool] = None,
             self_call_type: Literal['passive', 'active'] = 'passive'
         ):
-        pass
+        extracted_message = extract_text_parts(user_input)
+        if extracted_message and extracted_message[0].startswith("/"):
+            if is_admin:
+                await self.command_processing(agent_id, extracted_message[0])
+            else:
+                await self.event_queue.put({"agent_id": agent_id, "name": "log", "args": {"content": "无权限执行此命令"}, "id": "command-" + str(uuid4())})
+        else:
+            await self.call_agent(
+                user_input=user_input,
+                agent_id=agent_id,
+                user_name=user_name,
+                is_self_call=is_self_call,
+                self_call_type=self_call_type
+            )
 
     async def call_agent(
             self,
@@ -706,8 +719,8 @@ __all__: 加载所有agent配置
                 message = """使用方法：/tokens
 计算agent消息列表的token数量。"""
             else:
-                main_state = await self.main_graph.graph.aget_state(config)
-                if main_messages := main_state.values.get("messages"):
+                main_messages = await self.main_graph.get_messages(agent_id)
+                if main_messages:
                     message = str(count_tokens_approximately(main_messages))
                 else:
                     message = "agent消息列表为空，无法计算token数量。"

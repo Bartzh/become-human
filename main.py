@@ -24,13 +24,12 @@ async def main():
 
     while True:
         user_input = await asyncio.to_thread(input)
-        if user_input.lower() in ["quit", "exit", "q"]:
-            print("Goodbye!")
-            break
-        elif user_input.startswith("/"):
-            await agent_manager.command_processing(agent_id, user_input)
-            continue
-        asyncio.create_task(agent_manager.call_agent(user_input, agent_id, user_name=user_name))
+        if user_input:
+            if user_input.lower() in ["quit", "exit", "q"]:
+                print("Goodbye!")
+                break
+            else:
+                asyncio.create_task(agent_manager.call_agent_with_command(user_input, agent_id, is_admin=True, user_name=user_name))
 
     task.cancel()
     await agent_manager.close_manager()
