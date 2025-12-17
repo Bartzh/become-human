@@ -1,6 +1,6 @@
 from tomlkit import load, loads, dump, document, table, comment, nl, TOMLDocument
 from tomlkit.items import Table
-from become_human.utils import make_sure_path_exists, dump_basemodels, get_readable_type_name
+from become_human.utils import dump_basemodels, get_readable_type_name
 from become_human.store import StoreModel, StoreField, store_alist_namespaces, store_abatch
 from become_human.store_settings import AgentSettings
 from langgraph.store.base import PutOp
@@ -10,8 +10,6 @@ from typing import Optional, Literal, Type, Union, get_type_hints, Any
 from pydantic import BaseModel, TypeAdapter
 from pydantic_core import ValidationError
 
-make_sure_path_exists()
-
 AGENTS_FILE_PATH = "./config/agents.toml"
 AGENT_COMMENTS_FILE_PATH = "./config/agent_comments.toml"
 
@@ -20,8 +18,9 @@ agent_configs: dict[str, dict[str, Any]] = {}
 DEFAULT_AGENTS = {
     'default_agent_1': {
         'main': {
-            'role_prompt': '你是用户的私人助手，用户是你的主人，你也会如此称呼ta。你对主人忠诚且富有同理心，用简洁自然的语言为主人提供帮助就是你唯一想做的事。你与主人是通过一个无聊天记录（阅后即焚）的即时通讯软件远程交流的。',
-            'instruction_prompt': '你接下来见到的第一个人就是你的主人，向ta打个招呼吧。'
+            'role_prompt': '你是用户的专属助手，用户是你的主人，你也会如此称呼ta。你对主人忠诚且富有同理心，用简洁自然的语言为主人提供帮助就是你唯一想做的事。你与主人是通过一个无聊天记录（阅后即焚）的即时通讯软件远程交流的。',
+            'instruction_prompt': '你接下来见到的第一个人就是你的主人，向ta打个招呼吧。',
+            'react_instruction': True
         }
     },
     'default_agent_2': {
@@ -29,7 +28,7 @@ DEFAULT_AGENTS = {
             'role_prompt': '''你是一个待人较为冷淡的人，对什么事情都无所谓，比较懒，说话也很简短、敷衍。
 他人是一个无聊天记录（阅后即焚）的即时通讯软件联系到你的。
 你不喜欢在每句话的结尾加上句号。''',
-            'active_time_range': (120.0, 1800.0),
+            'active_time_range': (180.0, 1800.0),
             'self_call_time_ranges': [(300.0, 10800.0)],
             'wakeup_time_range': (1.0, 61201.0),
             'sleep_time_range': (82800.0, 32400.0)
@@ -49,9 +48,11 @@ DEFAULT_AGENTS = {
     },
     'default_agent_3': {
         'main': {
-            'role_prompt': '''你是一个调试agent，没有什么角色需要你扮演（或者说这就是你的角色），只需遵守行为准则（但依然需要输出心理活动），你的用户就是你的开发者。
-这样的设定是为了辅助开发者调试/测试你自己的agent程序，如果你在你的上下文中发现了错误或是有什么异常，不对劲的地方，又或是某些prompt表述不够完美有歧义，请主动将其告知用户。''',
-            'instruction_prompt': '你接下来见到的第一个人就是你的开发者。',
+            'role_prompt': '''你就是你自己，没有什么角色需要你扮演，只需遵守行为准则（但依然需要输出心理活动）。
+并且，你将直接面对你的开发者，所有提示词中提到的所谓的用户就理解为指的是开发者。
+这样做是为了辅助开发者调试你自己的agent程序。如果你在你的上下文中发现了错误或是有什么异常，不对劲的地方，又或是某些prompt表述不够完美有歧义，请主动将其告知给用户。''',
+            'instruction_prompt': '你接下来见到的第一个用户就是你的开发者。',
+            'react_instruction': True,
             'always_active': True,
         }
     }

@@ -58,13 +58,6 @@ def extract_text_parts(content: Union[list, str]) -> list[str]:
     return contents
 
 
-def make_sure_path_exists(data_path: str = "./data", config_path: str = "./config"):
-    if not os.path.exists(data_path):
-        os.makedirs(data_path)
-    if not os.path.exists(config_path):
-        os.makedirs(config_path)
-
-
 def is_that_type(type_hint: Any, target_class: type) -> bool:
     """
     检查类型是否为指定的类或其子类

@@ -7,11 +7,7 @@ from typing import Literal, Any, Iterable, Optional, Union, Callable, get_type_h
 import asyncio
 from warnings import warn
 
-from become_human.utils import make_sure_path_exists
-
 STORE_PATH = './data/store.sqlite'
-
-make_sure_path_exists()
 
 async def store_setup():
     async with AsyncSqliteStore.from_conn_string(STORE_PATH) as store:

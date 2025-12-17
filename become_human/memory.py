@@ -51,47 +51,46 @@ class InitialMemory(BaseModel):
 
 class RetrievedMemory(BaseModel):
     doc: Document = Field(description="The memory document")
+    score: float = Field(description="检索综合得分")
     retrievability: float = Field(description="The retrievability of the memory")
-    is_source_memory: bool = Field(default=False, description="The source memory of memories")
+    is_source_memory: bool = Field(default=False, description="是否是组中唯一的源记忆（现改名目标记忆）")
 
 class RetrievedMemoryGroup(BaseModel):
     memories: list[RetrievedMemory] = Field(description="The memories")
-    source_memory: RetrievedMemory = Field(description="The source memory")
+    source_memory: RetrievedMemory = Field(description="组中唯一的源记忆（现改名目标记忆）")
 
 class MemoryManager():
     vector_store_client: chromadb.ClientAPI
     embeddings: Embeddings
     db_path: str
-    timer_db_path: str
 
     def __init__(self, embeddings: Embeddings, db_path: str = './data/aimemory_chroma_db') -> None:
         self.db_path = db_path
-        self.timer_db_path = f'{db_path}/memory_manager_timers.sqlite'
         self.embeddings = embeddings
         self.vector_store_client = chromadb.PersistentClient(db_path, settings=Settings(anonymized_telemetry=False))
 
 
-    async def update_timers(self, agent_id: str):
+    async def update_schedules(self, agent_id: str):
         agent_model = await store_manager.get_agent(agent_id)
 
         update_count = 0
-        timers = agent_model.timers
+        schedules = agent_model.schedules
 
         settings = agent_model.settings
         types = get_activated_memory_types()
         time_settings = settings.main.time_settings
         current_time = utcnow()
         current_agent_time = real_time_to_agent_time(current_time, time_settings)
-        new_timers = []
-        for timer in timers.memory_update_timers:
-            if timer.is_agent_time:
+        new_schedules = []
+        for schedule in schedules.memory_update_schedules:
+            if schedule.agent_time_based:
                 time = current_agent_time
             else:
                 time = current_time
-            next_timer, triggered = timer.calculate_next_timer(time)
+            next_schedule, triggered = schedule.tick(time)
             if triggered:
                 for t in types:
-                    where = validated_where({'$and': [{'stable_time': item} for item in timer.stable_time_range]})
+                    where = validated_where({'$and': [{'stable_time': item} for item in schedule.stable_time_range]})
                     result = await self.aget(
                         agent_id=agent_id,
                         memory_type=t,
@@ -101,9 +100,9 @@ class MemoryManager():
                     if result['ids']:
                         await self.update_memories(result, t, agent_id)
                         update_count += len(result['ids'])
-            if next_timer is not None:
-                new_timers.append(next_timer)
-        timers.memory_update_timers = new_timers
+            if next_schedule is not None:
+                new_schedules.append(next_schedule)
+        schedules.memory_update_schedules = new_schedules
 
         #print(f'updated {update_count} memories for agent "{agent_id}".')
 
@@ -322,6 +321,7 @@ class MemoryManager():
                         if first_memory is None:
                             final_docs.append(RetrievedMemory(
                                 doc=doc,
+                                score=doc.metadata["retrievability"],
                                 retrievability=doc.metadata["retrievability"],
                                 is_source_memory=True
                             ))
@@ -329,6 +329,7 @@ class MemoryManager():
                         else:
                             final_docs.append(RetrievedMemory(
                                 doc=doc,
+                                score=doc.metadata["retrievability"],
                                 retrievability=doc.metadata["retrievability"]
                             ))
                 await self.aupdate_metadatas(ids, metadatas, key, agent_id)
@@ -407,6 +408,7 @@ class MemoryManager():
                         source_retrievability = doc.metadata["retrievability"]
                         source_memory = RetrievedMemory(
                             doc=doc,
+                            score=score,
                             retrievability=source_retrievability,
                             is_source_memory=True
                         )
@@ -458,6 +460,7 @@ class MemoryManager():
                                         )
                                         memories.append(RetrievedMemory(
                                             doc=related_doc,
+                                            score=score * weight,
                                             retrievability=source_retrievability * weight
                                         ))
                                         current_docs_and_weights[direction]['doc'] = related_doc
@@ -1139,15 +1142,10 @@ def parse_retrieved_memory_groups(groups: list[RetrievedMemoryGroup], time_zone:
                 readable_time = format_time(time_seconds, time_zone)
             else:
                 readable_time = "未知时间"
-            # TODO: 太啰嗦，待优化
-            output.append(f"{'<记忆组>\n' if i == 0 else ''}{'<记忆>\n「源记忆」' if memory.is_source_memory else '「相邻记忆」'}记忆类型：{memory_type}\n记忆创建时间: {readable_time}\n<记忆内容>\n{content}\n</记忆内容>\n</记忆>{'\n</记忆组>' if i == memories_len - 1 else ''}")
+            output.append(f"{'<memory_group>\n' if i == 0 else ''}{'<memory>\n「目标记忆」' if memory.is_source_memory else '「相邻记忆」'}score: {round(memory.score, 3)}\ntype: {memory_type}\ncreation_time: {readable_time}\n<content>\n{content}\n</content>\n</memory>{'\n</memory_group>' if i == memories_len - 1 else ''}")
     if not output:
         return "没有找到任何匹配的记忆。"
-    # TODO: 也很啰嗦
-    return '''记忆检索结果说明：\n1. 检索中得分越高的记忆越靠后。
-2.「源记忆」指被检索到的记忆，这条记忆才是与检索语句相关的；「相邻记忆」（若有）则是指「源记忆」在创建时间上相邻的一些记忆，虽与检索语句没有关联，但与「源记忆」结合在一起可能会得到相关联的其他信息，或还原当时情景。
-3. 在这些记忆中还可能会出现「模糊的记忆」，其中的`*`星号意味着暂时没想起来的细节，这是由于该记忆检索时的得分过低，如检索语句不够相关，或记忆本身不够新鲜。如果再次检索这些记忆，由于记忆的新鲜度提升了，所以`*`星号应当会减少。
-\n\n''' + "\n\n".join(output)
+    return '主动记忆检索结果：\n\n\n' + "\n\n".join(output)
 
 
 memory_manager = MemoryManager(DashScopeEmbeddings(model="text-embedding-v4"))

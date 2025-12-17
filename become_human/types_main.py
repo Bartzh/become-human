@@ -52,6 +52,7 @@ class BHSystemMessageMetadata(BaseModel):
 class BHRetrievalMessageMetadata(BaseModel):
     """Metadata for a bh retrieval message."""
     retrieval_type: Optional[str] = Field(default=None)
+    retrieved_memory_ids: Optional[list[str]] = Field(default=None)
 
 def get_retrieved_memory_ids(messages: list[AnyMessage]) -> list[str]:
     ids = []
@@ -262,8 +263,9 @@ def messages_post_processing(messages: list[BaseMessage]):
 class MainContext:
     agent_id: str
     agent_run_id: str
-    is_self_call: bool = False
-    self_call_type: Literal['passive', 'active'] = 'passive'
+    # 系统调用，目前只给react_instruction使用，与human的区别只是不会因为不活跃而被搁置
+    call_type: Literal['human', 'self', 'system'] = 'human'
+    self_call_type: Literal['passive', 'active', 'wakeup'] = 'passive'
 
 class StateEntry(BaseModel):
     description: str = Field(description="状态描述")

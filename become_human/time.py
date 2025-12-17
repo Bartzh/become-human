@@ -225,7 +225,9 @@ def parse_timedelta(time_str: str) -> timedelta:
 class Times:
     """旨在需要两个以上的时间种类时方便地完成各类型时间的转换
 
-    通过提供四种时间之一（或留空取当前时间）快速获取其他三种时间"""
+    通过提供四种时间之一（或留空取当前时间）快速获取其他三种时间
+    
+    is_agent_time: 指提供的time是否是agent时间，若未提供则不要设置此项"""
     real_time: datetime
     real_time_seconds: float
     agent_time: datetime

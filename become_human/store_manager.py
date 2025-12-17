@@ -1,13 +1,13 @@
 from become_human.store import StoreModel, store_asearch
 from become_human.store_settings import AgentSettings
-from become_human.store_timers import AgentTimers
+from become_human.store_schedules import AgentSchedules
 from become_human.store_states import AgentStates
 
 class AgentStore(StoreModel):
     _namespace = ('model',)
     _readable_name = "agent存储模型"
     settings: AgentSettings
-    timers: AgentTimers
+    schedules: AgentSchedules
     states: AgentStates
 
 class StoreManager:
@@ -41,9 +41,9 @@ class StoreManager:
         agent_store = await self.get_agent(agent_id)
         return agent_store.settings
 
-    async def get_timers(self, agent_id: str) -> AgentTimers:
+    async def get_schedules(self, agent_id: str) -> AgentSchedules:
         agent_store = await self.get_agent(agent_id)
-        return agent_store.timers
+        return agent_store.schedules
 
     async def get_states(self, agent_id: str) -> AgentStates:
         agent_store = await self.get_agent(agent_id)

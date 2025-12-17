@@ -6,7 +6,7 @@ from typing import Literal, Any, Optional, Union, Type
 from datetime import datetime, date
 
 
-# 也许这些东西都不该是结构化的，除了性别
+# 新想法，通过结构化然后让AI生成所有没有指定的细节
 class Person(BaseModel):
     name: Optional[str] = Field(default=None, description="姓名")
     age: Optional[int] = Field(default=None, description="年龄")
@@ -17,20 +17,20 @@ class Person(BaseModel):
 class MainSettings(StoreModel):
     _namespace = ('main',)
     _readable_name = "主要设置"
-    role_prompt: str = StoreField(default="你是一个友善且富有同理心的助手，用简洁自然的语言为用户提供帮助。你与他人是通过一个无聊天记录（阅后即焚）的即时通讯软件远程交流的。", readable_name="角色提示词")
-    instruction_prompt: str = StoreField(default='打个招呼吧！', readable_name="指示提示词，作为agent的第一条用户消息出现，对其说明情况，指示其初始行为。")
-    role_description: str = StoreField(default="应该是一个有用的助手吧。", readable_name="直接向用户显示的一段文本，描述这个角色")
+    role_prompt: str = StoreField(default="你是一个对陌生人也抱有基本尊重的普通人。你与他人是通过一个无聊天记录（阅后即焚）的即时通讯软件远程交流的。", readable_name="角色提示词")
+    instruction_prompt: str = StoreField(default="打个招呼吧。", readable_name="引导提示词", description="作为agent的第一条用户消息出现，对agent进行引导。")
+    react_instruction: bool = StoreField(default=False, readable_name="反应引导", description="是否以instruction_prompt调用agent。")
+    role_description: str = StoreField(default="应该是一个有用的助手吧。", readable_name="展示用角色描述", description="直接向用户显示的一段文本，描述这个角色")
     active_time_range: tuple[float, float] = StoreField(default=(1800.0, 7200.0), readable_name='活跃时长随机范围', description="活跃时间随机范围（最小值和最大值），在这之后进入休眠状态")
     always_active: bool = StoreField(default=False, readable_name="保持活跃", description="是否一直处于活跃状态，也即不存在agent因不活跃而不回复消息的情况。若是，则active_time_range将仅用作回收消息等功能，且self_call依然有效，只有wakeup_call会失效")
-    temporary_active_time_range: tuple[float, float] = StoreField(default=(120.0, 1200.0), readable_name='临时活跃时长随机范围', description="在无新消息时self_call后agent获得的临时活跃时间的随机范围（最小值和最大值），单位为秒。")
+    temporary_active_time_range: tuple[float, float] = StoreField(default=(180.0, 1800.0), readable_name='临时活跃时长随机范围', description="在无新消息时self_call后agent获得的临时活跃时间的随机范围（最小值和最大值），单位为秒。")
     self_call_time_ranges: list[tuple[float, float]] = StoreField(default_factory=lambda: [
-        (1800.0, 10800.0),
-        (5400.0, 32400.0),
+        (1800.0, 32400.0),
         (16200.0, 97200.0),
         (97200.0, 388800.0)
     ], readable_name='休眠时自我调用时间随机范围', description="在活跃状态之后的休眠状态时self_call时间随机范围（最小值和最大值），单位为秒，睡觉期间不算时间")
     wakeup_time_range: Union[tuple[float, float], tuple[()]] = StoreField(default=(1.0, 10800.0), readable_name='苏醒随机时间范围', description="在进入休眠状态后（也算作self_call），通过发送消息唤醒agent需要的时间随机范围（最小值和最大值），单位为秒")
-    sleep_time_range: Union[tuple[float, float], tuple[()]] = StoreField(default=(259200.0, 18000.0), readable_name='睡眠时间段', description="agent进入睡眠的时间段，单位为秒。目前的作用是self_call的时间生成会跳过这个时间段。")
+    sleep_time_range: Union[tuple[float, float], tuple[()]] = StoreField(default=(79200.0, 18000.0), readable_name='睡眠时间段', description="agent进入睡眠的时间段，单位为秒。目前的作用是self_call的时间生成会跳过这个时间段。")
     time_settings: AgentTimeSettings = StoreField(default_factory=AgentTimeSettings, readable_name="时间设置")
     character_settings: Person = StoreField(default_factory=Person, readable_name="角色设定")
 

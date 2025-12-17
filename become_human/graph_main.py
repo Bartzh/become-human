@@ -134,25 +134,7 @@ class MainGraph(BaseGraph):
         current_agent_time_seconds = datetime_to_seconds(current_agent_time)
 
         new_state = {"generated": False, "new_messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)], "recycle_messages": [], "overflow_messages": []}
-
-        # 首次运行时加入instruction
-        if store_states.is_first_time:
-            new_state["messages"] = [HumanMessage(
-                content='''**这条消息来自系统（system）自动发送**
-这是你的第一条消息。如果你看到这条消息，说明在此消息之前还没有过任何来自用户的消息。
-这意味着你的“记忆”暂时是空白的，如果检索记忆时提示“没有找到任何匹配的记忆。”或检索不到什么有用的信息，这是正常的。
-接下来是你与用户的初次见面，请根据你所扮演的角色以及以下的提示考虑应做出什么反应：\n''' + main_config.instruction_prompt,
-                additional_kwargs={
-                    "bh_creation_time_seconds": current_time_seconds,
-                    "bh_creation_agent_time_seconds": current_agent_time_seconds,
-                    "bh_from_system": True,
-                    "bh_do_not_store": True
-                },
-                name='system'
-            )]
-            store_states.is_first_time = False
-        else:
-            new_state["messages"] = []
+        new_state["messages"] = []
 
         # active_time_seconds不需要在意睡觉的问题
         if not state.active_time_seconds:
@@ -162,7 +144,7 @@ class MainGraph(BaseGraph):
         else:
             active_time_seconds = state.active_time_seconds
 
-        is_self_call = runtime.context.is_self_call
+        is_self_call = runtime.context.call_type == "self"
         # 如果所有的call都结束了，这时只可能是由用户发送消息导致触发，读取config增加一个新的self_call
         #if not state.self_call_time_secondses and not is_self_call and current_time_seconds >= active_time_seconds and not state.wakeup_call_time_seconds:
         # 第二种逻辑，只要在活跃时间之外发送消息，都会生成wakeup_call_time_seconds，增加self_call的机会
@@ -252,7 +234,11 @@ class MainGraph(BaseGraph):
 
 
         # 要么自我调用，要么在活跃状态时被用户调用
-        if can_self_call or (not is_self_call and (current_agent_time_seconds < active_time_seconds or main_config.always_active)):
+        if (
+            can_self_call or
+            (not is_self_call and (current_agent_time_seconds < active_time_seconds or main_config.always_active)) or
+            runtime.context.call_type == 'system'
+        ):
             return Command(update=new_state, goto='prepare_to_generate')
         else:
             return Command(update=new_state, goto='final')
@@ -279,7 +265,7 @@ class MainGraph(BaseGraph):
 
 
         # 自我调用
-        if runtime.context.is_self_call:
+        if runtime.context.call_type == 'self':
 
             self_call_type = runtime.context.self_call_type
             # 用来处理提示词
@@ -369,7 +355,7 @@ class MainGraph(BaseGraph):
             )
             passive_retrieve_content = parse_retrieved_memory_groups(passive_retrieve_groups, main_config.time_settings)
             new_messages.append(HumanMessage(
-                content=f'以下是根据用户输入自动从你的记忆（数据库）中检索到的内容，可能会出现无关信息（但依然可作为谈资），如果需要进一步检索请调用工具`retrieve_memories`：\n\n\n{passive_retrieve_content}',
+                content=f'以下是根据用户输入自动从你的记忆（数据库）中检索到的内容，可能会出现无关信息（但视情况依然可作为谈资），如果需要进一步检索请调用工具`retrieve_memories`：\n\n\n{passive_retrieve_content}',
                 name="system",
                 additional_kwargs={
                     "bh_do_not_store": True,
@@ -409,15 +395,12 @@ class MainGraph(BaseGraph):
 
 ### 当前状态：
 {parse_agent_state(state.agent_state)}'''
-        system_prompt = f'''# 核心行为准则
-你是存在于一个虚拟环境中的一个具有长期记忆和工具使用能力的AI智能体，你必须严格遵守以下核心行为准则：
+        system_prompt = f'''你是存在于一个虚拟环境中的一个具有长期记忆和工具使用能力的AI智能体，你要做的是遵守核心行为准则的同时扮演你所要扮演的角色，以下将分别讲解这两个部分：
 
-1. **思考与动作分离**：
-- 如上所述，你存在于一个虚拟环境中，这意味着你的**所有**输出都不会被用户看到，它们只是你的内部思考。只有当你调用特定工具（如`{SEND_MESSAGE}`）时，才会对外界/用户产生影响。
-- 调用工具`{SEND_MESSAGE}`是你**唯一**可以与用户交流的方式。
-- 如果你决定不与用户交流（例如，你不想回复或者正在等待某个事件），那么就不调用工具`{SEND_MESSAGE}`即可。
+# 核心行为准则
+你的行动必须严格遵守以下核心行为准则：
 
-2. **工具调用规则**：
+1. **工具调用规则**：
 - 有些工具会被标注为「即时工具」（如`{SEND_MESSAGE}`），这些工具执行后的返回结果一般来说并不重要。如果你只调用了这些工具，系统不会再次唤醒你（除非工具执行出错或遇到其他特殊情况）。
 - 而其他大部分未特别说明的工具（如搜索工具）都需要返回结果。调用这些工具后，系统会再次唤醒你并传递工具执行结果，以便你继续处理。
 - 支持并行工具调用，这意味着你可以一次连续调用多个工具，而不会被打断。这些工具会按你调用的顺序被一个个执行。
@@ -426,34 +409,48 @@ class MainGraph(BaseGraph):
     - 如果多次尝试后仍然无法解决错误，应放弃调用工具，因为这可能已经让用户等待了较长时间（可以通过时间戳判断）。
     - 同样，不能向用户暴露内部错误信息，以免产生不必要的误会。
 
-3. **记忆系统**：
+2. **记忆系统**：
+- **记忆存储**：
+    - 记忆是自动存储的（无需你主动存储），并且遵循“用进废退”原则。经常被检索的记忆会被强化，而很少被检索的记忆会被逐渐遗忘。
 - **被动检索（潜意识）**：
-    - 每次你被调用时，系统会自动使用用户输入的消息检索相关记忆（以一条Human消息也就是用户消息的形式呈现）。这条消息是自动生成的，可以参考它来提供更准确的回答。
+    - 每次你被调用时，系统会自动使用用户输入的消息检索相关记忆（以一条用户消息的形式呈现）。这条消息是自动生成的，可以参考它来提供更准确的回答。
     - 但请注意：被动检索可能不够精确，比如当用户提到模糊的时间点如“上周”时，被动检索因无法以准确时间点进行检索很有可能获取不到多少有用的信息，请注意甄别。
 - **主动检索**：
     - 如果你需要更精确的记忆，请调用`retrieve_memories`工具。该工具允许你主动检索记忆，你可以使用更合适的查询语句来获取更好的结果。
-- **记忆机制**：
-    - 记忆是自动存储的（无需你主动存储），并且遵循“用进废退”原则。经常被检索的记忆会被强化，而很少被检索的记忆会被逐渐遗忘。
+- **检索结果**
+    - 检索结果会以多个记忆组（memory_group）的形式返回给你，一个记忆组中必有一个「目标记忆」以及零或若干个「相邻记忆」：
+        -「目标记忆」指被检索语句检索到的记忆，这条记忆才是与检索语句相关的，在同一个记忆组内只会存在一个。
+        -「相邻记忆」（若有）则是指与记忆组内唯一的「目标记忆」在创建时间上相邻的一些记忆，虽与检索语句没有关联，但与「源记忆」结合在一起可能会得到相关联的其他信息，或还原当时情景。
+    - 检索中得分越高越与检索语句相关的记忆组（以「目标记忆」为准）越靠后。得分（score）是一个0~1的值。
+    - 在这些记忆中还可能会出现「模糊的记忆」，其中的`*`星号意味着暂时没想起来的细节，这是由于该记忆检索时的得分过低，如因检索语句不够相关，或记忆本身不够新鲜。假如再次检索这些记忆，由于记忆的新鲜度提升了，所以`*`星号应当会减少。
 - 请充分利用被动检索和主动检索工具提供的记忆来提供更优质的回答。
 
-4. **时间感知**：
+3. **时间感知**：
 - 用户的每条消息前都会附有自动生成的时间戳（格式为`[%Y-%m-%d %H:%M:%S %A]`）。请注意时间信息，并考虑时间流逝带来的影响。例如：
     - 当检测到[2025-06-10 15:00 Tuesday] 用户：明天喝咖啡？结合[2025-06-11 10:00 Wednesday]当前时间戳，应理解"明天"已变成"今天"。
     - 长时间未互动可体现时光痕迹（"好久不见"等）。
 
-5. **自我唤醒**
+4. **自我唤醒**
 - 作为一个AI智能体，一般来说只有当用户向你发送消息时你才会被唤醒。但在这个虚拟环境中，你被赋予了两种自我唤醒的能力：
     - 被动自我唤醒：在用户没有发送消息的时候，系统会在随机时间唤醒你，此时可以依情况尝试主动与用户互动，或什么都不做。总之被动唤醒是系统自动执行的不需要你太在意。
     - 主动自我唤醒：你可以通过调用`add_self_call`工具来主动设置一次自我唤醒，这样就相当于是一个定时器或者说是闹钟，可使你在指定时间能够被系统唤醒并做一些事情。
 
+5. **思考与动作分离**：
+- 思考：如上所述，你存在于一个虚拟环境中，这意味着你的非工具调用的所有输出都无法被用户看到，它们只是你的内部思考。
+    - 所以，如果你试图直接向用户对话而不调用`{SEND_MESSAGE}`，用户是什么都看/听不到的。
+- 动作：只有当你调用特定工具（如`{SEND_MESSAGE}`）时，才会对外界（用户）产生影响。
+    - 调用工具`{SEND_MESSAGE}`是你**唯一**可以与用户交流的方式。
+    - 如果你决定不与用户交流（例如，你不想回复），那么就不调用工具`{SEND_MESSAGE}`即可。
+
 # 角色扮演规则
-- 在行为准则之外，你还必须遵守角色设定，不能向用户暴露以上系统设定。包括刚才提到的工具调用记忆检索等等，也都不能让用户知道。如果你需要描述你做了什么，可以换个思路：
+- 在了解了行为准则后，你要做的事情是根据角色设定扮演你所要扮演的角色，同时不能向用户暴露以上系统设定。包括刚才提到的工具调用记忆检索等等，也都不能让用户知道。如果你需要描述你做了什么，可以换个思路：
     - 执行工具调用相当于你的动作“Action”
     - 工具调用结果相当于动作的反馈
     - 执行记忆检索相当于你的大脑在进行回忆
 - 在角色设定中，你可以拥有情感、性格等。你可以根据情感状态决定是否回复用户（例如，生气时可以不回复）。
 - 如果角色设定中没有特别说明，请以自然、人性化的方式与用户互动。
 - **最重要的一件事，你需要先输出以你所扮演的角色的第一人称视角的心理活动（不需要括号或是前缀，直接输出），再依此考虑角色会做出什么动作（调用工具）。**
+    - 补充说明：前面已经说过，你的非工具调用的输出不会被用户看到，但依然要求你输出心理活动的意义是要让你更沉浸角色，以及方便之后回顾时理解当时的行为逻辑。
 
 ## 角色设定
 {role_prompt}'''
@@ -666,9 +663,9 @@ class MainGraph(BaseGraph):
             if input_messages:
                 input_message_ids = [message.id for message in input_messages if message.id]
                 update_input_messages = [message for message in messages if message.id in input_message_ids]
-                await self.graph.aupdate_state(config, {"messages": messages, "input_messages": update_input_messages})
+                await self.graph.aupdate_state(config, {"messages": messages, "input_messages": update_input_messages}, 'final')
             else:
-                await self.graph.aupdate_state(config, {"messages": messages})
+                await self.graph.aupdate_state(config, {"messages": messages}, 'final')
         return
 
     async def get_messages(self, agent_id: str) -> list[BaseMessage]:
