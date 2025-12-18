@@ -13,6 +13,8 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
+from langchain_dev_utils.chat_models import load_chat_model
+
 from become_human.graph_main import MainGraph, send_message_tool_content, MainContext
 from become_human.recycling import recycle_memories
 from become_human.memory import get_activated_memory_types, memory_manager
@@ -31,7 +33,7 @@ class AgentManager:
 
     event_queue: asyncio.Queue
 
-    activated_agent_ids: dict[str, Any]
+    activated_agent_ids: dict[str, dict[str, Any]]
     heartbeat_interval: float
     heartbeat_is_running: bool
     heartbeat_task: Optional[asyncio.Task]
@@ -90,26 +92,39 @@ class AgentManager:
         await load_config()
 
         def create_model(model_name: str, enable_thinking: Optional[bool] = None):
-            if model_name.startswith(('qwen-', 'qwen3-')):
-                return ChatQwen(
-                    model=model_name,
-                    max_retries=3,
-                    timeout=60.0,
-                    enable_thinking=enable_thinking,
-                    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-                )
-            elif model_name.startswith(('qwq-', 'qvq-')):
-                return ChatQwQ(
-                    model=model_name,
-                    max_retries=3,
-                    timeout=60.0,
-                    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-                )
+            splited_model_name = model_name.split(':', 1)
+            if len(splited_model_name) != 2:
+                raise ValueError(f"Invalid model name: {model_name}")
             else:
-                return ChatOpenAI(
-                    model_name=model_name,
-                    max_retries=3,
-                    timeout=60.0,
+                provider = splited_model_name[0]
+                model = splited_model_name[1]
+            kwargs = {}
+            if model == 'deepseek-v3.2':
+                kwargs['reasoning_keep_policy'] = 'current'
+            if provider == 'dashscope':
+                if model.startswith(('qwen-', 'qwen3-')):
+                    return ChatQwen(
+                        model=model_name,
+                        enable_thinking=enable_thinking,
+                    )
+                elif model.startswith(('qwq-', 'qvq-')):
+                    return ChatQwQ(
+                        model=model_name,
+                    )
+                else:
+                    if enable_thinking:
+                        kwargs['extra_body'] = {"enable_thinking": True}
+                    return load_chat_model(
+                        model=model,
+                        model_provider='openai',
+                        **kwargs,
+                    )
+            if model.startswith('deepseek-v3.') and enable_thinking:
+                kwargs['extra_body'] = {"thinking": {"type": "enabled"}}
+            else:
+                return load_chat_model(
+                    model=model_name,
+                    **kwargs
                     #extra_body={"enable_thinking": enable_thinking} if enable_thinking is not None else None,
                 )
 
@@ -152,7 +167,7 @@ class AgentManager:
 
 
     async def trigger_agents(self):
-        tasks = [self.trigger_agent(agent_id) for agent_id in self.activated_agent_ids.keys()]
+        tasks = [self.trigger_agent(agent_id) for agent_id, value in self.activated_agent_ids.items() if value.get("initialized")]
         await asyncio.gather(*tasks)
 
     async def trigger_agent(self, agent_id: str):
@@ -172,6 +187,7 @@ class AgentManager:
             agent_states.is_first_time = False
             instruction_message = HumanMessage(
                 content=f'''**这条消息来自系统（system）自动发送**
+当前时间是：{format_time(current_agent_datetime)}。
 这是你被初始化以来的第一条消息。如果你看到这条消息，说明在此消息之前你还没有收到过任何来自用户的消息。
 这意味着你的“记忆”暂时是空白的，如果检索记忆时提示“没有找到任何匹配的记忆。”或检索不到什么有用的信息，这是正常的。
 接下来是你与用户的初次见面，请根据你所扮演的角色以及以下的提示考虑应做出什么反应：\n''' + agent_settings.main.instruction_prompt,
@@ -304,11 +320,11 @@ class AgentManager:
 
 
     async def init_agent(self, agent_id: str):
-        if self.activated_agent_ids.get(agent_id):
-            del self.activated_agent_ids[agent_id]
+        self.activated_agent_ids[agent_id] = {"initialized": False, "created_at": now_seconds()}
         await store_manager.init_agent(agent_id)
         await self.trigger_agent(agent_id)
-        self.activated_agent_ids[agent_id] = {"created_at": now_seconds()}
+        if agent_id in self.activated_agent_ids:
+            self.activated_agent_ids[agent_id]["initialized"] = True
 
     def close_agent(self, agent_id: str):
         """手动关闭agent"""

@@ -1,10 +1,3 @@
-import chromadb
-from chromadb.api.types import ID, OneOrMany, Where, WhereDocument, GetResult, QueryResult, IDs, Embedding, PyEmbedding, Image, URI, Include
-from chromadb.api.models.Collection import Collection
-from chromadb.config import Settings
-from langchain.embeddings import Embeddings
-from langchain_community.embeddings import DashScopeEmbeddings
-from langchain_core.documents import Document
 from datetime import datetime, timezone, timedelta
 from typing import Any, Literal, Union, Optional
 from pydantic import BaseModel, Field
@@ -14,6 +7,15 @@ import jieba
 from warnings import warn
 import random
 import os
+
+import chromadb
+from chromadb.api.types import ID, OneOrMany, Where, WhereDocument, GetResult, QueryResult, IDs, Embedding, PyEmbedding, Image, URI, Include
+from chromadb.api.models.Collection import Collection
+from chromadb.config import Settings
+from langchain.embeddings import Embeddings
+from langchain_community.embeddings import DashScopeEmbeddings
+from langchain_core.documents import Document
+from langchain_dev_utils.embeddings import load_embeddings
 
 from become_human.time import format_time, utcnow, real_time_to_agent_time, now_agent_seconds, datetime_to_seconds, now_agent_time, AnyTz
 from become_human.store_settings import MemoryRetrievalConfig
@@ -1148,4 +1150,18 @@ def parse_retrieved_memory_groups(groups: list[RetrievedMemoryGroup], time_zone:
     return '主动记忆检索结果：\n\n\n' + "\n\n".join(output)
 
 
-memory_manager = MemoryManager(DashScopeEmbeddings(model="text-embedding-v4"))
+def create_embedding_model(model_name: str):
+    splited_model_name = model_name.split(":", 1)
+    if len(splited_model_name) != 2:
+        raise ValueError(f"Invalid embedding model name: {model_name}")
+    provider = splited_model_name[0]
+    model = splited_model_name[1]
+    if provider == 'dashscope':
+        return DashScopeEmbeddings(model=model)
+    else:
+        return load_embeddings(model_name)
+
+if not os.getenv("EMBEDDING_MODEL_NAME"):
+    raise ValueError("EMBEDDING_MODEL_NAME is not set!")
+
+memory_manager = MemoryManager(create_embedding_model(os.getenv("EMBEDDING_MODEL_NAME", "")))

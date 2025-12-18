@@ -7,6 +7,7 @@ from langchain_openai import ChatOpenAI
 
 baidu_api_key = os.getenv('QIANFAN_API_KEY')
 dashscope_api_key = os.getenv('DASHSCOPE_API_KEY')
+dashscope_api_base = os.getenv('DASHSCOPE_API_BASE')
 dashscope_search_model = os.getenv('DASHSCOPE_SEARCH_MODEL_NAME')
 
 @tool
@@ -47,7 +48,7 @@ async def web_search(query: Annotated[str, '使用自然语言的搜索语句'])
         # 创建具有网络搜索功能的代理
         llm = ChatOpenAI(
             model=dashscope_search_model,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            base_url=dashscope_api_base,
             api_key=dashscope_api_key,
             extra_body={
                 "enable_search": True,

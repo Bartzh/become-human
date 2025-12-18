@@ -10,7 +10,14 @@ CORE_TOOLS = [
     retrieve_memories,
     add_self_call,
 ]
-if os.getenv('QIANFAN_API_KEY') or (os.getenv('DASHSCOPE_API_KEY') and os.getenv('DASHSCOPE_SEARCH_MODEL_NAME')):
+if (
+    os.getenv('QIANFAN_API_KEY') or
+    (
+        os.getenv('DASHSCOPE_API_KEY') and
+        os.getenv('DASHSCOPE_API_BASE') and
+        os.getenv('DASHSCOPE_SEARCH_MODEL_NAME')
+    )
+):
     CORE_TOOLS.append(web_search)
 # CORE_TOOLS.append(PyodideSandboxTool(description='''一个安全的 Python 代码沙盒，使用此沙盒来执行 Python 命令，特别适合用于数学计算。
 # - 输入应该是有效的 Python 命令。
