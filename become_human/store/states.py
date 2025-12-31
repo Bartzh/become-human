@@ -1,4 +1,4 @@
-from become_human.store import StoreModel, StoreField
+from become_human.store.base import StoreModel, StoreField
 
 class AgentStates(StoreModel):
     _namespace = ('states',)

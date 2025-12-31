@@ -5,10 +5,10 @@ from langchain.tools import tool, ToolRuntime
 from langchain_core.runnables import RunnableConfig
 from langchain.messages import HumanMessage, ToolMessage, AIMessage
 
-from become_human.store_manager import store_manager
+from become_human.store.manager import store_manager
 from become_human.memory import get_activated_memory_types, memory_manager, format_retrieved_memory_groups
 from become_human.message import get_all_retrieved_memory_ids
-from become_human.types_main import MainState, MainContext
+from become_human.types.main import MainState, MainContext
 
 RETRIEVE_MEMORIES = 'retrieve_memories'
 

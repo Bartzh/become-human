@@ -5,8 +5,8 @@ from langchain.tools import tool, ToolRuntime, BaseTool
 from langgraph.types import Command
 
 from become_human.time import Times
-from become_human.store_manager import store_manager
-from become_human.types_main import MainContext, MainState
+from become_human.store.manager import store_manager
+from become_human.types.main import MainContext, MainState
 
 SEND_MESSAGE = "send_message"
 SEND_MESSAGE_CONTENT = "content"

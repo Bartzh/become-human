@@ -7,7 +7,6 @@ from uuid import uuid4
 import random
 
 from langchain_qwq import ChatQwen, ChatQwQ
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage, BaseMessage, AIMessage, AnyMessage, ToolMessage
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
@@ -15,15 +14,15 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from langchain_dev_utils.chat_models import load_chat_model
 
-from become_human.graph_main import MainGraph, SEND_MESSAGE_TOOL_CONTENT, MainContext
+from become_human.graphs.main import MainGraph, SEND_MESSAGE_TOOL_CONTENT, MainContext
 from become_human.recycling import recycle_memories
 from become_human.memory import get_activated_memory_types, memory_manager
 from become_human.config import load_config, get_agent_configs
 from become_human.utils import is_valid_json
 from become_human.time import now_seconds, format_time, agent_seconds_to_datetime, format_seconds, Times, real_seconds_to_agent_seconds, parse_timedelta
 from become_human.message import format_messages_for_ai, extract_text_parts, construct_system_message
-from become_human.store import store_setup, store_stop_listener, store_adelete_namespace
-from become_human.store_manager import store_manager
+from become_human.store.base import store_setup, store_stop_listener, store_adelete_namespace
+from become_human.store.manager import store_manager
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 
 

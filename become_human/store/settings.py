@@ -3,7 +3,7 @@ from typing import Literal, Any, Optional, Union, Type
 from datetime import datetime, date
 
 from become_human.time import AgentTimeSettings, seconds_to_datetime
-from become_human.store import StoreField, StoreModel
+from become_human.store.base import StoreField, StoreModel
 from become_human.message import InitalAIMessage
 
 
@@ -35,6 +35,40 @@ class MainSettings(StoreModel):
     sleep_time_range: Union[tuple[float, float], tuple[()]] = StoreField(default=(79200.0, 18000.0), readable_name='睡眠时间段', description="agent进入睡眠的时间段，单位为秒。目前的作用是self_call的时间生成会跳过这个时间段。")
     time_settings: AgentTimeSettings = StoreField(default_factory=AgentTimeSettings, readable_name="时间设置")
     character_settings: Person = StoreField(default_factory=Person, readable_name="角色设定")
+
+    def format_character_settings(self, indent: int = 4, prefix: str = '- ',) -> str:
+        def _format_character_setting(model: Type[BaseModel], source: dict) -> dict:
+            character_settings = {}
+            for key, value in source.items():
+                if value is None:
+                    continue
+                if key in model.model_fields.keys():
+                    if model.model_fields[key].description:
+                        cs_key = model.model_fields[key].description
+                    else:
+                        cs_key = key
+                    if isinstance(value, dict) and issubclass(model.model_fields[key].annotation, BaseModel):
+                        character_settings[cs_key] = _format_character_setting(model.model_fields[key].annotation, value)
+                    else:
+                        character_settings[cs_key] = value
+                elif key not in character_settings.keys():
+                    character_settings[key] = value
+            return character_settings
+        person = self.character_settings
+        character_settings = _format_character_setting(Person, person.model_dump())
+        # always_active的话就当它不会睡觉了
+        if self.sleep_time_range and not self.always_active:
+            character_settings["睡觉时间段"] = f"{seconds_to_datetime(self.sleep_time_range[0]).time()} ~ {seconds_to_datetime(self.sleep_time_range[1]).time()}"
+        def _dict_to_readable_string(d: dict, plus: int = 4, prefix: str = '- ', indent=0):
+            result = ""
+            for key, value in d.items():
+                if isinstance(value, dict):
+                    result += " " * indent + prefix + f"{key}:\n"
+                    result += _dict_to_readable_string(value, plus, prefix, indent + plus)
+                else:
+                    result += " " * indent + prefix + f"{key}: {value}\n"
+            return result.strip()
+        return _dict_to_readable_string(character_settings, indent, prefix)
 
 class RecyclingSettings(StoreModel):
     _namespace = ('recycling',)
@@ -84,39 +118,3 @@ class AgentSettings(StoreModel):
     main: MainSettings
     recycling: RecyclingSettings
     retrieval: RetrievalSettings
-
-
-
-def format_character_settings(settings: MainSettings, indent: int = 4, prefix: str = '- ',) -> str:
-    def _format_character_setting(model: Type[BaseModel], source: dict) -> dict:
-        character_settings = {}
-        for key, value in source.items():
-            if value is None:
-                continue
-            if key in model.model_fields.keys():
-                if model.model_fields[key].description:
-                    cs_key = model.model_fields[key].description
-                else:
-                    cs_key = key
-                if isinstance(value, dict) and issubclass(model.model_fields[key].annotation, BaseModel):
-                    character_settings[cs_key] = _format_character_setting(model.model_fields[key].annotation, value)
-                else:
-                    character_settings[cs_key] = value
-            elif key not in character_settings.keys():
-                character_settings[key] = value
-        return character_settings
-    person = settings.character_settings
-    character_settings = _format_character_setting(Person, person.model_dump())
-    # always_active的话就当它不会睡觉了
-    if settings.sleep_time_range and not settings.always_active:
-        character_settings["睡觉时间段"] = f"{seconds_to_datetime(settings.sleep_time_range[0]).time()} ~ {seconds_to_datetime(settings.sleep_time_range[1]).time()}"
-    def _dict_to_readable_string(d: dict, plus: int = 4, prefix: str = '- ', indent=0):
-        result = ""
-        for key, value in d.items():
-            if isinstance(value, dict):
-                result += " " * indent + prefix + f"{key}:\n"
-                result += _dict_to_readable_string(value, plus, prefix, indent + plus)
-            else:
-                result += " " * indent + prefix + f"{key}: {value}\n"
-        return result.strip()
-    return _dict_to_readable_string(character_settings, indent, prefix)

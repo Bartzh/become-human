@@ -25,15 +25,14 @@ from langchain_core.language_models.chat_models import BaseChatModel
 import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from become_human.graph_base import BaseGraph
+from become_human.graphs.base import BaseGraph
 from become_human.message import add_messages, get_all_retrieved_memory_ids
-from become_human.types_main import MainState, MainContext, StateEntry
+from become_human.types.main import MainState, MainContext, StateEntry
 from become_human.memory import get_activated_memory_types, memory_manager, format_retrieved_memory_groups
 from become_human.recycling import recycle_memories
 from become_human.time import datetime_to_seconds, format_time, format_seconds, Times
 from become_human.message import format_messages_for_ai, extract_text_parts, construct_system_message
-from become_human.store_manager import store_manager
-from become_human.store_settings import format_character_settings
+from become_human.store.manager import store_manager
 from become_human.tools import CORE_TOOLS
 from become_human.tools.send_message import SEND_MESSAGE_TOOL_CONTENT, SEND_MESSAGE, SEND_MESSAGE_CONTENT
 from become_human.tools.record_thoughts import RECORD_THOUGHTS
@@ -418,7 +417,7 @@ class MainGraph(BaseGraph):
         llm_with_tools = self.llm.bind_tools(self.tools, tool_choice=RECORD_THOUGHTS, parallel_tool_calls=True)
         unicode_prompt = '- 不要使用 Unicode 编码，所有工具均支持中文及其他语言直接输入，使用 Unicode 编码会导致输出速度下降。'
         thought_prompt = '- 也因此，在`content`也就是正常的输出内容中，你可以自由地进行推理（思维链），制定计划，评估工具调用结果等。又或者如果你有什么想记下来给未来的自己看的，也可以放在这里。但请记住，就如刚才所说，除你自己之外没人看得到这些内容。'
-        parsed_character_settings = format_character_settings(store_settings.main, prefix='- ')
+        parsed_character_settings = store_settings.main.format_character_settings()
         role_prompt = f'## 基本信息：\n{parsed_character_settings if parsed_character_settings.strip() else '无'}\n\n## 详细设定：\n{store_settings.main.role_prompt}'
         role_prompt_with_state = f'''{role_prompt}
 

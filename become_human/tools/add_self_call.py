@@ -4,8 +4,8 @@ from langchain.tools import tool, ToolRuntime
 from langchain.messages import ToolMessage
 from langgraph.types import Command
 from become_human.time import datetime_to_seconds, Times
-from become_human.store_manager import store_manager
-from become_human.types_main import MainContext, MainState
+from become_human.store.manager import store_manager
+from become_human.types.main import MainContext, MainState
 
 @tool
 async def add_self_call(

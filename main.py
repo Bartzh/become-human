@@ -1,9 +1,9 @@
-from become_human.agent_manager import AgentManager
-from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 import os
 import asyncio
+from become_human.agent_manager import AgentManager
+from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 
-agent_id = "default_agent_1"
+agent_id = os.getenv('MAIN_AGENT_ID', "default_agent_1")
 user_name = os.getenv('USER_NAME')
 
 last_message = ''

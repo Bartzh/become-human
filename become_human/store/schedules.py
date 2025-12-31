@@ -6,7 +6,7 @@ import random
 from warnings import warn
 from tzlocal import get_localzone
 
-from become_human.store import StoreModel, StoreField
+from become_human.store.base import StoreModel, StoreField
 from become_human.time import seconds_to_datetime, datetime_to_seconds
 
 

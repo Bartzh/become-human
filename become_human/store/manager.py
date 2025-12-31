@@ -1,7 +1,7 @@
-from become_human.store import StoreModel, store_asearch
-from become_human.store_settings import AgentSettings
-from become_human.store_schedules import AgentSchedules
-from become_human.store_states import AgentStates
+from become_human.store.base import StoreModel, store_asearch
+from become_human.store.settings import AgentSettings
+from become_human.store.schedules import AgentSchedules
+from become_human.store.states import AgentStates
 
 class AgentStore(StoreModel):
     _namespace = ('model',)

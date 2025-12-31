@@ -12,8 +12,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from become_human.memory import InitialMemory, memory_manager, AnyMemoryType, get_activated_memory_types
 from become_human.message import filtering_messages, format_messages_for_ai, format_messages_for_ai_as_list, DO_NOT_STORE_MESSAGE, construct_system_message, InitalAIMessage, InitalToolCall
 from become_human.time import Times, now_agent_seconds, agent_seconds_to_datetime, format_time
-from become_human.store_manager import store_manager
-from become_human.store_settings import format_character_settings
+from become_human.store.manager import store_manager
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT, SEND_MESSAGE_TOOL_CONTENT
 from become_human.tools.record_thoughts import RECORD_THOUGHTS, RECORD_THOUGHTS_CONTENT, RECORD_THOUGHTS_TOOL_CONTENT
 
@@ -437,7 +436,7 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
     messages = filtering_messages(input_messages)
     store_settings = await store_manager.get_settings(agent_id)
     times_before = Times(store_settings.main.time_settings)
-    parsed_character_settings = format_character_settings(store_settings.main)
+    parsed_character_settings = store_settings.main.format_character_settings()
     role_prompt = f'基本信息：\n{parsed_character_settings if parsed_character_settings.strip() else '无'}\n\n详细设定：\n{store_settings.main.role_prompt}'
     #llm_with_structure = self.llm.with_structured_output(ExtractReflectiveMemories, method="function_calling")
     llm_with_structure = create_agent(

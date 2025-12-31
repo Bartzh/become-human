@@ -40,8 +40,8 @@ from langchain_core.documents import Document
 from langchain_dev_utils.embeddings import load_embeddings
 
 from become_human.time import format_time, utcnow, real_time_to_agent_time, now_agent_seconds, datetime_to_seconds, now_agent_time, AnyTz
-from become_human.store_settings import MemoryRetrievalConfig
-from become_human.store_manager import store_manager
+from become_human.store.settings import MemoryRetrievalConfig
+from become_human.store.manager import store_manager
 from become_human.utils import parse_env_array
 
 from langchain_core.runnables.config import run_in_executor
