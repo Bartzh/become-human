@@ -1,11 +1,13 @@
 import os
 #from langchain_sandbox import PyodideSandboxTool
+from become_human.tools.record_thoughts import record_thoughts
 from become_human.tools.send_message import send_message
 from become_human.tools.retrieve_memories import retrieve_memories
 from become_human.tools.add_self_call import add_self_call
 from become_human.tools.web_search import web_search
 
 CORE_TOOLS = [
+    record_thoughts,
     send_message,
     retrieve_memories,
     add_self_call,

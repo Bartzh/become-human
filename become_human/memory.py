@@ -1,17 +1,39 @@
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import Any, Literal, Union, Optional
+from typing import Any, Iterator, Literal, Self, Union, Optional
 from pydantic import BaseModel, Field
 from uuid import uuid4
 import numpy as np
+from numpy.typing import NDArray
 import jieba
 from warnings import warn
 import random
 import os
 
-import chromadb
-from chromadb.api.types import ID, OneOrMany, Where, WhereDocument, GetResult, QueryResult, IDs, Embedding, PyEmbedding, Image, URI, Include
+from chromadb import ClientAPI, PersistentClient
+from chromadb.api.types import (
+    ID,
+    OneOrMany,
+    Where,
+    WhereDocument,
+    GetResult,
+    QueryResult,
+    IDs,
+    Embedding,
+    PyEmbedding,
+    PyEmbeddings,
+    Image,
+    URI,
+    URIs,
+    Documents,
+    Metadatas,
+    Metadata,
+    Include,
+    Loadable
+)
 from chromadb.api.models.Collection import Collection
 from chromadb.config import Settings
+from chromadb.errors import NotFoundError
 from langchain.embeddings import Embeddings
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_core.documents import Document
@@ -40,11 +62,194 @@ def get_activated_memory_types() -> list[AnyMemoryType]:
     _cached_memory_types = memory_types
     return _cached_memory_types
 
+
+@dataclass
+class ChromaResult:
+    id: ID
+    included: Include
+    embedding: Optional[Embedding] = None
+    document: Optional[str] = None
+    uri: Optional[URI] = None
+    data: Optional[Image] = None
+    metadata: Optional[Metadata] = None
+    distance: Optional[float] = None
+
+class ChromaResults:
+    ids: IDs
+    embeddings: NDArray[Union[np.int32, np.float32]]
+    documents: Documents
+    uris: URIs
+    data: Loadable
+    metadatas: Metadatas
+    distances: list[float]
+    included: Include
+    _results: list[ChromaResult]
+
+    def __init__(
+        self,
+        result: Optional[Union[QueryResult, GetResult, list[ChromaResult]]] = None,
+        default_included: Include = []
+    ):
+        self.included = default_included
+        if result is None or isinstance(result, list):
+            if result:
+                first_included = result[0].included
+                if all([r.included == first_included for r in result]):
+                    self.included = first_included
+                    self._results = result
+                else:
+                    raise ValueError("Cannot create ChromaResults from mixed included types")
+            else:
+                self._results = []
+        else:
+            self._results = self._parse_result(result)
+            if self._results:
+                self.included = result["included"]
+
+    def extend(self, result: Union[QueryResult, GetResult, list[ChromaResult], Self]):
+        if isinstance(result, self.__class__):
+            result = result._results
+        if isinstance(result, list):
+            if result:
+                if all([r.included == self.included for r in result]):
+                    included = result[0].included
+                else:
+                    raise ValueError("Cannot create ChromaResults from mixed included types")
+        else:
+            included = result["included"]
+            result = self._parse_result(result)
+        if result:
+            if not self.included:
+                self.included = included
+            elif included != self.included:
+                raise ValueError("Cannot add results with different included types")
+            self._results += [r for r in result if r not in self]
+
+    def append(self, result: ChromaResult) -> None:
+        if result in self:
+            return
+        if not self.included:
+            self.included = result.included
+        elif result.included != self.included:
+            raise ValueError("Cannot add results with different included types")
+        self._results.append(result)
+
+    def sort(self, key, reverse: bool = False) -> None:
+        self._results.sort(key=key, reverse=reverse)
+
+    def to_docs_and_scores(self) -> list[tuple[Document, float]]:
+        if (
+            "metadatas" in self.included and
+            "documents" in self.included and
+            "distances" in self.included
+        ):
+            return [(Document(page_content=r.document, metadata=r.metadata, id=r.id), r.distance) for r in self._results]
+        else:
+            raise ValueError("Cannot convert to docs and scores without documents and distances")
+
+    def to_docs(self) -> list[Document]:
+        if (
+            "metadatas" in self.included and
+            "documents" in self.included
+        ):
+            return [Document(page_content=r.document, metadata=r.metadata, id=r.id) for r in self._results]
+        else:
+            raise ValueError("Cannot convert to docs without documents and metadatas")
+
+    def __getattribute__(self, name: str):
+        if name in super().__getattribute__('included'):
+            if name in ["ids", "documents", "metadatas", "uris", "data", "distances"]:
+                return [getattr(r, name[:-1] if name != 'data' else name) for r in self._results]
+            elif name == "embeddings":
+                return np.stack([r.embedding for r in self._results], axis=0)
+        return super().__getattribute__(name)
+
+    def __setattr__(self, name, value):
+        if name in ["ids", "documents", "uris", "data", "metadatas", "distances", "embeddings"]:
+            if len(value) != len(self):
+                raise ValueError("Length of value must match length of results")
+            if name not in self.included:
+                self.included.append(name)
+            for i, r in enumerate(self._results):
+                if name == "embeddings":
+                    v = np.array(value[i])
+                elif name == "distances":
+                    v = float(value[i])
+                else:
+                    v = value[i]
+                setattr(r, name[:-1] if name != 'data' else name, v)
+                r.included = self.included
+            return
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name):
+        if name in ["ids", "documents", "uris", "data", "metadatas", "distances", "embeddings"]:
+            if name == "ids":
+                raise AttributeError("Cannot delete ids")
+            elif name in self.included:
+                self.included.remove(name)
+                for r in self._results:
+                    setattr(r, name[:-1] if name != 'data' else name, None)
+                    r.included = self.included
+                return
+            else:
+                raise AttributeError(f"{name} is not included")
+        super().__delattr__(name)
+
+
+    def _parse_result(self, result: Union[QueryResult, GetResult]) -> list[ChromaResult]:
+        if not result or not result['ids']:
+            return []
+        is_query = isinstance(result['ids'], list)
+        included = result["included"]
+        if is_query:
+            ids = result["ids"][0]
+        else:
+            ids = result["ids"]
+
+        results = []
+        for i, d in enumerate(ids):
+            datas = {"id": d, "included": included}
+            for t in included:
+                if is_query:
+                    v = result[t][0][i]
+                else:
+                    v = result[t][i]
+                if t == "embeddings":
+                    datas[t] = np.array(v)
+                else:
+                    datas[t] = v
+            results.append(ChromaResult(**datas))
+        return results
+
+    def __getitem__(self, index) -> Union[ChromaResult, Self]:
+        if isinstance(index, slice):
+            return self.__class__(self._results[index])
+        return self._results[index]
+
+    def __setitem__(self, index, value: ChromaResult) -> None:
+        self._results[index] = value
+
+    def __contains__(self, item: ChromaResult) -> bool:
+        return item.id in self.ids
+
+    def __iter__(self) -> Iterator[ChromaResult]:
+        return iter(self._results)
+
+    def __len__(self) -> int:
+        return len(self._results)
+
+    def __bool__(self) -> bool:
+        return bool(self._results)
+
+    def __repr__(self) -> str:
+        return f"ChromaResults({self._results})"
+
+
 class InitialMemory(BaseModel):
     """只作为add_memories的参数"""
     content: str = Field(description="The content of the memory")
     type: AnyMemoryType = Field(description="The type of the memory")
-    #creation_time_seconds: float = Field(description="The creation time seconds of the memory")
     creation_agent_datetime: datetime = Field(description="The creation agent datetime of the memory")
     stable_time: float = Field(description="The stable time of the memory", gt=0.0)
     id: str = Field(default_factory=lambda: str(uuid4()), description="The id of the memory")
@@ -62,14 +267,14 @@ class RetrievedMemoryGroup(BaseModel):
     source_memory: RetrievedMemory = Field(description="组中唯一的源记忆（现改名目标记忆）")
 
 class MemoryManager():
-    vector_store_client: chromadb.ClientAPI
+    vector_store_client: ClientAPI
     embeddings: Embeddings
     db_path: str
 
     def __init__(self, embeddings: Embeddings, db_path: str = './data/aimemory_chroma_db') -> None:
         self.db_path = db_path
         self.embeddings = embeddings
-        self.vector_store_client = chromadb.PersistentClient(db_path, settings=Settings(anonymized_telemetry=False))
+        self.vector_store_client = PersistentClient(db_path, settings=Settings(anonymized_telemetry=False))
 
 
     async def update_schedules(self, agent_id: str):
@@ -109,59 +314,6 @@ class MemoryManager():
         #print(f'updated {update_count} memories for agent "{agent_id}".')
 
 
-    def update(self, metadata: dict, current_agent_time: Union[float, datetime]) -> dict:
-        """
-        更新记忆的可检索性（模拟时间流逝）
-        """
-        #retrievability = metadata["retrievability"] * math.exp(-delta_t / metadata["stability"])
-
-        if isinstance(current_agent_time, datetime):
-            current_agent_time_seconds = datetime_to_seconds(current_agent_time)
-        else:
-            current_agent_time_seconds = current_agent_time
-
-        if metadata["stable_time"] == 0.0:
-            print('意外的stable_time为0，metadata：' + str(metadata))
-            return {"forgot": True}
-
-        x = (current_agent_time_seconds - metadata["last_accessed_agent_time_seconds"]) / metadata["stable_time"]
-        if x >= 1:
-            return {"forgot": True}
-        retrievability = 1 - x ** 0.4
-
-        return {"retrievability": retrievability}
-
-    def recall(self, metadata: dict, current_agent_time: datetime, strength: float = 1.0) -> dict:
-        """
-        调用记忆时重置可检索性并增强稳定性
-        """
-        # 更新可检索性
-        current_agent_time_seconds = datetime_to_seconds(current_agent_time)
-        updated_metadata = self.update(metadata, current_agent_time_seconds)
-        if updated_metadata.get("forgot"):
-            return {"forgot": True}
-
-        datetime_alpha = calculate_memory_datetime_alpha(current_agent_time)
-        stable_strength = calculate_stability_curve(updated_metadata["retrievability"])
-        stable_time_diff = metadata["stable_time"] * stable_strength - metadata["stable_time"]
-        if stable_time_diff >= 0:
-            stable_time_diff = stable_time_diff * metadata["difficulty"] * strength * datetime_alpha
-        stable_time = metadata["stable_time"] + stable_time_diff
-
-        retrievability = min(1.0, updated_metadata["retrievability"] + strength * datetime_alpha)
-
-        metadata_patch = {
-            "last_accessed_agent_time_seconds": current_agent_time_seconds,
-            "retrievability": retrievability,
-            "stable_time": stable_time
-        }
-
-        if metadata["difficulty"] < 1.0:
-            difficulty = min(1.0, metadata["difficulty"] + stable_strength * metadata["difficulty"] * strength * datetime_alpha * 0.5)
-            metadata_patch["difficulty"] = difficulty
-
-        return metadata_patch
-
     async def update_memories(self, results: GetResult, memory_type: str, agent_id: str) -> None:
         time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
         current_agent_time_seconds = now_agent_seconds(time_settings)
@@ -175,7 +327,7 @@ class MemoryManager():
         ids_new = []
         ids_to_delete = set()
         for i in range(len(ids)):
-            metadata_patch = self.update(metadatas[i], current_agent_time_seconds)
+            metadata_patch = tick_memory(metadatas[i], current_agent_time_seconds)
             if metadata_patch.get("forgot"):
                 ids_to_delete.add(ids[i])
             else:
@@ -198,10 +350,10 @@ class MemoryManager():
             creation_agent_datetime = memory.creation_agent_datetime
             datetime_alpha = calculate_memory_datetime_alpha(creation_agent_datetime)
             stable_time = memory.stable_time * difficulty * datetime_alpha # 稳定性，决定了可检索性的衰减速度
-            creation_agent_time_seconds = datetime_to_seconds(creation_agent_datetime)
+            creation_agent_timeseconds = datetime_to_seconds(creation_agent_datetime)
             creation_agent_datetime_isocalendar = creation_agent_datetime.isocalendar()
             metadata = {
-                "creation_agent_time_seconds": creation_agent_time_seconds,
+                "creation_agent_timeseconds": creation_agent_timeseconds,
                 "creation_agent_time_year": creation_agent_datetime.year,
                 "creation_agent_time_month": creation_agent_datetime.month,
                 "creation_agent_time_week": creation_agent_datetime_isocalendar.week,
@@ -213,7 +365,7 @@ class MemoryManager():
                 "stable_time": stable_time, # 稳定时长，单位为秒
                 "retrievability": 1.0, # 可检索性，决定了检索的概率
                 "difficulty": difficulty, # 难度，决定了稳定性基数增长的多少。可能会出现无法长期保留的记忆，如整本书的内容。
-                "last_accessed_agent_time_seconds": creation_agent_time_seconds,
+                "last_accessed_agent_timeseconds": creation_agent_timeseconds,
                 "memory_type": memory.type,
                 "memory_id": memory.id, # 用于在检索时剔除记忆，由于chroma的限制，只能使用元数据来实现
             }
@@ -221,7 +373,7 @@ class MemoryManager():
                 metadata["previous_memory_id"] = memory.previous_memory_id
             if memory.next_memory_id:
                 metadata["next_memory_id"] = memory.next_memory_id
-            r = self.update(metadata, current_agent_time_seconds)
+            r = tick_memory(metadata, current_agent_time_seconds)
             if not r.get("forgot"):
                 metadata["retrievability"] = r["retrievability"]
                 document = Document(
@@ -274,11 +426,11 @@ class MemoryManager():
         if creation_time_range_start:
             if isinstance(creation_time_range_start, datetime):
                 creation_time_range_start = datetime_to_seconds(creation_time_range_start)
-            filters.append({"creation_agent_time_seconds": {"$gte": creation_time_range_start}})
+            filters.append({"creation_agent_timeseconds": {"$gte": creation_time_range_start}})
         if creation_time_range_end:
             if isinstance(creation_time_range_end, datetime):
                 creation_time_range_end = datetime_to_seconds(creation_time_range_end)
-            filters.append({"creation_agent_time_seconds": {"$lte": creation_time_range_end}})
+            filters.append({"creation_agent_timeseconds": {"$lte": creation_time_range_end}})
 
         if exclude_memory_ids:
             # 使用exclude_memory_ids过滤，一般用于过滤掉与消息id相同的original记忆
@@ -309,7 +461,7 @@ class MemoryManager():
                 final_docs = []
                 first_memory = None
                 for doc in docs:
-                    patched_metadata = self.recall(
+                    patched_metadata = recall_memory(
                         metadata=doc.metadata,
                         current_agent_time=current_agent_time,
                         strength=retrieval_config.strength
@@ -380,7 +532,7 @@ class MemoryManager():
                         filter=filters
                     )
                 else:
-                    raise ValueError("未知的检索方法: "+str(retrieval_config.search_method))
+                    raise ValueError("未知的检索方法: " + str(retrieval_config.search_method))
 
                 ids = []
                 metadatas = []
@@ -388,7 +540,7 @@ class MemoryManager():
                 memories_list = []
                 for doc, score in docs_and_scores:
                     # 先检查记忆是否已遗忘
-                    patched_metadata = self.recall(
+                    patched_metadata = recall_memory(
                         metadata=doc.metadata,
                         current_agent_time=current_agent_time,
                         strength=strength
@@ -446,7 +598,7 @@ class MemoryManager():
                                 )
                                 if get_result["ids"]:
                                     weight = current_docs_and_weights[direction]['weights'].pop()
-                                    patched_metadata = self.recall(
+                                    patched_metadata = recall_memory(
                                         metadata=get_result["metadatas"][0],
                                         current_agent_time=current_agent_time,
                                         strength=strength * weight
@@ -488,8 +640,8 @@ class MemoryManager():
                     await self.adelete(agent_id, memory_type, ids=list(delete_ids))
 
 
-            # 按照score降序排序（score越大索引越小）
-            combined_memories_and_scores.sort(key=lambda x: x[1], reverse=True)
+            # 按照score升序序排序（score越大索引越大）
+            combined_memories_and_scores.sort(key=lambda x: x[1], reverse=False)
 
             #TODO：可以考虑做一个最大token限制，如果超出限制，则删除掉token最多的文档再试一次
 
@@ -659,6 +811,60 @@ class MemoryManager():
         await run_in_executor(None, collection.add, ids, embeddings, metadatas, contents, None, None)
 
 
+    def get_by_highest_retrievability(
+        self,
+        agent_id: str,
+        memory_type: str,
+        k: int = 5,
+        filter: Optional[dict[str, Any]] = None,
+        where_document: Optional[dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> ChromaResults:
+        step = 0.1
+        current_r = 1.0
+        last_r = 1.0
+        results = ChromaResults()
+        while current_r >= 0.0 and len(results) < k:
+            last_r = current_r
+            current_r -= step
+            r_filter = {"$and": [
+                {"retrievability": {"$gt": current_r}},
+                {"retrievability": {"$lte": last_r}},
+            ]}
+            if filter:
+                filter = validated_where(filter)
+                if filter:
+                    key = list(filter.keys())[0]
+                    if key == "$and":
+                        r_filter["$and"].extend(filter[key])
+                    else:
+                        r_filter["$and"].append(filter)
+
+            results.extend(self.get(
+                agent_id=agent_id,
+                memory_type=memory_type,
+                where=r_filter,
+                where_document=where_document if where_document else None,
+                include=["metadatas", "documents", "embeddings"]
+            ))
+
+        if results:
+            results.sort(key=lambda x: x.metadata["retrievability"], reverse=False)
+            return results[-k:]
+        return results
+
+    async def aget_by_highest_retrievability(
+        self,
+        agent_id: str,
+        memory_type: str,
+        k: int = 5,
+        filter: Optional[dict[str, Any]] = None,
+        where_document: Optional[dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> ChromaResults:
+        return await run_in_executor(None, self.get_by_highest_retrievability, agent_id, memory_type, k, filter, where_document, **kwargs)
+
+
     def similarity_search_by_vector_with_score(
         self,
         agent_id: str,
@@ -712,14 +918,37 @@ class MemoryManager():
             agent_id=agent_id,
             memory_type=memory_type,
             embedding=embedding,
-            k=fetch_k,
+            k=int(fetch_k / 2),
             filter=filter,
             where_document=where_document,
             **kwargs)
         if not docs_and_scores:
             return []
-        docs_and_scores_with_retrievability = [(doc, score * similarity_weight + doc.metadata.get("retrievability", 0) * retrievability_weight) for doc, score in docs_and_scores]
-        docs_and_scores_with_retrievability.sort(key=lambda x: x[1], reverse=True)
+        current_ids = [doc.id for doc, _ in docs_and_scores if doc.id]
+        r_get_results = await self.aget_by_highest_retrievability(
+            agent_id=agent_id,
+            memory_type=memory_type,
+            k=int(fetch_k / 2),
+            filter=filter,
+            where_document=where_document,
+            **kwargs
+        )
+        r_get_results = ChromaResults([r for r in r_get_results if r.id not in current_ids])
+        s_embedding = np.array(embedding, dtype=np.float32)
+        s_embedding = np.expand_dims(s_embedding, axis=0)
+        r_embeddings = r_get_results.embeddings
+        r_sims = self.cosine_similarity(s_embedding, r_embeddings)[0]
+        r_docs = r_get_results.to_docs()
+        docs_and_scores.extend([
+            (r_docs[i], float(r_sims[i]))
+            for i in range(len(r_get_results))
+        ])
+
+        docs_and_scores_with_retrievability = [
+            (doc, score * similarity_weight + doc.metadata["retrievability"] * retrievability_weight)
+            for doc, score in docs_and_scores
+        ]
+        docs_and_scores_with_retrievability.sort(key=lambda x: x[1], reverse=False)
         return docs_and_scores_with_retrievability[-k:]
 
 
@@ -850,29 +1079,42 @@ class MemoryManager():
         Returns:
             List of Documents selected by maximal marginal relevance.
         """
-        results = self.query(
+        search_embedding = np.array(embedding, dtype=np.float32)
+        search_embedding = np.expand_dims(search_embedding, axis=0)
+
+        results = ChromaResults(self.query(
             agent_id=agent_id,
             memory_type=memory_type,
             query_embeddings=embedding,
-            n_results=fetch_k,
+            n_results=int(fetch_k / 2),
             where=filter if filter else None,
             where_document=where_document if where_document else None,
-            include=["metadatas", "documents", "distances", "embeddings"],
+            include=["metadatas", "documents", "embeddings"],
             **kwargs,
-        )
-        if not results["ids"]:
+        ))
+        results.extend(self.get_by_highest_retrievability(
+            agent_id=agent_id,
+            memory_type=memory_type,
+            k=int(fetch_k / 2),
+            filter=filter if filter else None,
+            where_document=where_document if where_document else None,
+            **kwargs,
+        ))
+
+        if not results:
             return []
+
         mmr_selected = self.maximal_marginal_relevance_with_retrievability(
-            np.array(embedding, dtype=np.float32),
-            results["embeddings"][0],
-            results["metadatas"][0],
+            search_embedding,
+            results.embeddings,
+            results.metadatas,
             k=k,
             similarity_weight=similarity_weight,
             retrievability_weight=retrievability_weight,
             diversity_weight=diversity_weight
         )
 
-        candidates = query_result_to_docs(results)
+        candidates = results.to_docs()
 
         # 使用maximal_marginal_relevance_with_retrievability返回的实际分数
         selected_results = [(candidates[i], score) for i, score in mmr_selected]
@@ -915,7 +1157,7 @@ class MemoryManager():
         s_plus_r_weight = similarity_weight + retrievability_weight
         similarity_to_query = (
             similarity_to_query * (similarity_weight / s_plus_r_weight) +
-            np.array([m.get("retrievability", 0.0) for m in metadata_list]) * (retrievability_weight / s_plus_r_weight)
+            np.array([m["retrievability"] for m in metadata_list]) * (retrievability_weight / s_plus_r_weight)
         )
 
         most_similar = int(np.argmax(similarity_to_query))
@@ -998,7 +1240,7 @@ class MemoryManager():
         try:
             self.vector_store_client.delete_collection(name=f"{agent_id}_{memory_type}")
             return True
-        except ValueError:
+        except NotFoundError:
             return False
 
 def validated_where(where: Union[dict, list]) -> Optional[dict]:
@@ -1065,6 +1307,62 @@ def query_result_to_docs_and_scores(results: QueryResult) -> list[tuple[Document
     ]
 
 
+
+def tick_memory(metadata: dict, current_agent_time: Union[float, datetime]) -> dict:
+    """
+    更新记忆的可检索性（模拟时间流逝）
+    """
+    #retrievability = metadata["retrievability"] * math.exp(-delta_t / metadata["stability"])
+
+    if isinstance(current_agent_time, datetime):
+        current_agent_time_seconds = datetime_to_seconds(current_agent_time)
+    else:
+        current_agent_time_seconds = current_agent_time
+
+    if metadata["stable_time"] == 0.0:
+        print('意外的stable_time为0，metadata：' + str(metadata))
+        return {"forgot": True}
+
+    x = (current_agent_time_seconds - metadata["last_accessed_agent_timeseconds"]) / metadata["stable_time"]
+    if x >= 1:
+        return {"forgot": True}
+    retrievability = 1 - x ** 0.4
+
+    return {"retrievability": retrievability}
+
+def recall_memory(metadata: dict, current_agent_time: datetime, strength: float = 1.0) -> dict:
+    """
+    调用记忆时重置可检索性并增强稳定性
+    """
+    # 更新可检索性
+    current_agent_time_seconds = datetime_to_seconds(current_agent_time)
+    updated_metadata = tick_memory(metadata, current_agent_time_seconds)
+    if updated_metadata.get("forgot"):
+        return {"forgot": True}
+
+    datetime_alpha = calculate_memory_datetime_alpha(current_agent_time)
+    stable_strength = calculate_stability_curve(updated_metadata["retrievability"])
+    stable_time_diff = metadata["stable_time"] * stable_strength - metadata["stable_time"]
+    if stable_time_diff >= 0:
+        stable_time_diff = stable_time_diff * metadata["difficulty"] * strength * datetime_alpha
+    stable_time = metadata["stable_time"] + stable_time_diff
+
+    retrievability = min(1.0, updated_metadata["retrievability"] + strength * datetime_alpha)
+
+    metadata_patch = {
+        "last_accessed_agent_timeseconds": current_agent_time_seconds,
+        "retrievability": retrievability,
+        "stable_time": stable_time
+    }
+
+    if metadata["difficulty"] < 1.0:
+        difficulty = min(1.0, metadata["difficulty"] + stable_strength * metadata["difficulty"] * strength * datetime_alpha * 0.5)
+        metadata_patch["difficulty"] = difficulty
+
+    return metadata_patch
+
+
+
 def calculate_stability_curve(retrievability: float) -> float:
     r = retrievability
 
@@ -1129,7 +1427,7 @@ def calculate_memory_datetime_alpha(current_time: datetime) -> float:
     return alpha
 
 
-def parse_retrieved_memory_groups(groups: list[RetrievedMemoryGroup], time_zone: AnyTz) -> str:
+def format_retrieved_memory_groups(groups: list[RetrievedMemoryGroup], time_zone: AnyTz) -> str:
     """将记忆文档列表转换为(AI)可读的字符串"""
     output = []
     # 反过来从分数最低的开始读取
@@ -1139,7 +1437,7 @@ def parse_retrieved_memory_groups(groups: list[RetrievedMemoryGroup], time_zone:
         for memory in group.memories:
             content = memory.doc.page_content
             memory_type = memory.doc.metadata["memory_type"]
-            time_seconds = memory.doc.metadata.get("creation_agent_time_seconds")
+            time_seconds = memory.doc.metadata.get("creation_agent_timeseconds")
             if isinstance(time_seconds, (float, int)):
                 readable_time = format_time(time_seconds, time_zone)
             else:

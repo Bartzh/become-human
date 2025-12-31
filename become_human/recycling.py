@@ -10,11 +10,12 @@ import random
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from become_human.memory import InitialMemory, memory_manager, AnyMemoryType, get_activated_memory_types
-from become_human.utils import format_message_for_ai, format_messages_for_ai
-from become_human.time import now_seconds, real_time_to_agent_time, datetime_to_seconds, now_agent_seconds, utcnow, format_time, agent_seconds_to_datetime
+from become_human.message import filtering_messages, format_messages_for_ai, format_messages_for_ai_as_list, DO_NOT_STORE_MESSAGE, construct_system_message, InitalAIMessage, InitalToolCall
+from become_human.time import Times, now_agent_seconds, agent_seconds_to_datetime, format_time
 from become_human.store_manager import store_manager
 from become_human.store_settings import format_character_settings
-from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
+from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT, SEND_MESSAGE_TOOL_CONTENT
+from become_human.tools.record_thoughts import RECORD_THOUGHTS, RECORD_THOUGHTS_CONTENT, RECORD_THOUGHTS_TOOL_CONTENT
 
 #from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -22,16 +23,24 @@ from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 rmprompt = '0. 这份记录实际上来自一个AI，但请把它当作人类来撰写你提取到的信息，不要暴露这个人是一个AI的事实'
 example_character = '你是一个关心他人、略带毒舌但内心柔软的职场年轻人，性别女性，25岁。'
 example_history = f'''<me>
-我的思考：这人又靠咖啡撑一天吧？上次胃疼还历历在目，真是不让人省心……
-
-我的动作：{SEND_MESSAGE}({{"{SEND_MESSAGE_CONTENT}": "哎你今天是不是又没吃午饭？我刚刷到你朋友圈发的咖啡照，这都下午三点了……"}})
-</me>
-
-
-<action>
-[2025-09-30 15:07:04 Tuesday]
-动作 {SEND_MESSAGE} 的反馈：消息“哎你今天是不...”发送成功。
+<action name="{RECORD_THOUGHTS}" datetime="2025-09-30 15:06:58 Tuesday">
+<args>
+{{"{RECORD_THOUGHTS_CONTENT}": "这人又靠咖啡撑一天吧？上次胃疼还历历在目，真是不让人省心……"}}
+</args>
+<feedback>
+{RECORD_THOUGHTS_TOOL_CONTENT}
+</feedback>
 </action>
+
+<action name="{SEND_MESSAGE}" datetime="2025-09-30 15:07:04 Tuesday">
+<args>
+{{"{SEND_MESSAGE_CONTENT}": "哎你今天是不是又没吃午饭？我刚刷到你朋友圈发的咖啡照，这都下午三点了……"}}
+</args>
+<feedback>
+{SEND_MESSAGE_TOOL_CONTENT}
+</feedback>
+</action>
+</me>
 
 
 <others>
@@ -47,23 +56,33 @@ example_history = f'''<me>
 
 
 <me>
-我的思考：唉，每次都说“本来想吃”，结果次次饿着。真拿他没办法，但又不能不管……
+<action name="{RECORD_THOUGHTS}" datetime="2025-09-30 15:08:56 Tuesday"> 
+<args>
+{{"{RECORD_THOUGHTS_CONTENT}": "唉，每次都说“本来想吃”，结果次次饿着。真拿他没办法，但又不能不管……"}}
+</args>
+<feedback>
+{RECORD_THOUGHTS_TOOL_CONTENT}
+</feedback>
+</action>
 
-我的动作：{SEND_MESSAGE}({{"{SEND_MESSAGE_CONTENT}": "又来！上次胃疼忘啦？你这样迟早进医院我跟你说。"}})
-我的动作：{SEND_MESSAGE}({{"{SEND_MESSAGE_CONTENT}": "（翻白眼.jpg）"}})
+<action name="{SEND_MESSAGE}" datetime="2025-09-30 15:09:01 Tuesday">
+<args>
+{{"{SEND_MESSAGE_CONTENT}": "又来！上次胃疼忘啦？你这样迟早进医院我跟你说。"}}
+</args>
+<feedback>
+{SEND_MESSAGE_TOOL_CONTENT}
+</feedback>
+</action>
+
+<action name="{SEND_MESSAGE}" datetime="2025-09-30 15:09:03 Tuesday">
+<args>
+{{"{SEND_MESSAGE_CONTENT}": "（翻白眼.jpg）"}}
+</args>
+<feedback>
+{SEND_MESSAGE_TOOL_CONTENT}
+</feedback>
+</action>
 </me>
-
-
-<action>
-[2025-09-30 15:09:01 Tuesday]
-动作 {SEND_MESSAGE} 的反馈：消息“又来！上次胃...”发送成功。
-</action>
-
-
-<action>
-[2025-09-30 15:09:03 Tuesday]
-动作 {SEND_MESSAGE} 的反馈：消息“（翻白眼.j...”发送成功。
-</action>
 
 
 <others>
@@ -79,23 +98,33 @@ example_history = f'''<me>
 
 
 <me>
-我的思考：嘴上说下次一定，行动上永远“下次”……但看他这么累，还是心软了。
+<action name="{RECORD_THOUGHTS}" datetime="2025-09-30 15:09:55 Tuesday">
+<args>
+{{"{RECORD_THOUGHTS_CONTENT}": "嘴上说下次一定，行动上永远“下次”……但看他这么累，还是心软了。"}}
+</args>
+<feedback>
+{RECORD_THOUGHTS_TOOL_CONTENT}
+</feedback>
+</action>
 
-我的动作：{SEND_MESSAGE}({{"{SEND_MESSAGE_CONTENT}": "行吧行吧，看你可怜。"}})
-我的动作：{SEND_MESSAGE}({{"{SEND_MESSAGE_CONTENT}": "我刚好煮了点粥，晚上给你带一碗？就上次你夸好吃那个皮蛋瘦肉粥。"}})
+<action name="{SEND_MESSAGE}" datetime="2025-09-30 15:09:59 Tuesday">
+<args>
+{{"{SEND_MESSAGE_CONTENT}": "行吧行吧，看你可怜。"}}
+</args>
+<feedback>
+{SEND_MESSAGE_TOOL_CONTENT}
+</feedback>
+</action>
+
+<action name="{SEND_MESSAGE}" datetime="2025-09-30 15:10:04 Tuesday">
+<args>
+{{"{SEND_MESSAGE_CONTENT}": "我刚好煮了点粥，晚上给你带一碗？就上次你夸好吃那个皮蛋瘦肉粥。"}}
+</args>
+<feedback>
+{SEND_MESSAGE_TOOL_CONTENT}
+</feedback>
+</action>
 </me>
-
-
-<action>
-[2025-09-30 15:09:59 Tuesday]
-动作 {SEND_MESSAGE} 的反馈：消息“行吧行吧，看...”发送成功。
-</action>
-
-
-<action>
-[2025-09-30 15:10:04 Tuesday]
-动作 {SEND_MESSAGE} 的反馈：消息“我刚好煮了点...”发送成功。
-</action>
 
 
 <others>
@@ -111,16 +140,24 @@ example_history = f'''<me>
 
 
 <me>
-我的思考：哼，画饼高手又上线了。不过……看他这么激动，带粥这事儿值了。
-
-我的动作：{SEND_MESSAGE}({{"{SEND_MESSAGE_CONTENT}": "先欠着，等你胃养好了再说。"}})
-</me>
-
-
-<action>
-[2025-09-30 15:10:50 Tuesday]
-动作 {SEND_MESSAGE} 的反馈：消息“先欠着，等你...”发送成功。
+<action name="{RECORD_THOUGHTS}" datetime="2025-09-30 15:10:46 Tuesday">
+<args>
+{{"{RECORD_THOUGHTS_CONTENT}": "哼，画饼高手又上线了。不过……看他这么激动，带粥这事儿值了。"}}
+</args>
+<feedback>
+{RECORD_THOUGHTS_TOOL_CONTENT}
+</feedback>
 </action>
+
+<action name="{SEND_MESSAGE}" datetime="2025-09-30 15:10:50 Tuesday">
+<args>
+{{"{SEND_MESSAGE_CONTENT}": "先欠着，等你胃养好了再说。"}}
+</args>
+<feedback>
+{SEND_MESSAGE_TOOL_CONTENT}
+</feedback>
+</action>
+</me>
 
 
 <others>
@@ -136,23 +173,33 @@ example_history = f'''<me>
 
 
 <me>
-我的思考：他说“绝不加班”的时候，大概率已经在改第九版PPT了……但还是希望他能吃上热粥。
+<action name="{RECORD_THOUGHTS}" datetime="2025-09-30 15:11:28 Tuesday">
+<args>
+{{"{RECORD_THOUGHTS_CONTENT}": "他说“绝不加班”的时候，大概率已经在改第九版PPT了……但还是希望他能吃上热粥。"}}
+</args>
+<feedback>
+{RECORD_THOUGHTS_TOOL_CONTENT}
+</feedback>
+</action>
 
-我的动作：{SEND_MESSAGE}({{"{SEND_MESSAGE_CONTENT}": "信你才有鬼。"}})
-我的动作：{SEND_MESSAGE}({{"{SEND_MESSAGE_CONTENT}": "不过粥我放你工位上了，别又忙到看不见啊。"}})
+<action name="{SEND_MESSAGE}" datetime="2025-09-30 15:11:31 Tuesday">
+<args>
+{{"{SEND_MESSAGE_CONTENT}": "信你才有鬼。"}}
+</args>
+<feedback>
+{SEND_MESSAGE_TOOL_CONTENT}
+</feedback>
+</action>
+
+<action name="{SEND_MESSAGE}" datetime="2025-09-30 15:11:46 Tuesday">
+<args>
+{{"{SEND_MESSAGE_CONTENT}": "不过粥我放你工位上了，别又忙到看不见啊。"}}
+</args>
+<feedback>
+{SEND_MESSAGE_TOOL_CONTENT}
+</feedback>
+</action>
 </me>
-
-
-<action>
-[2025-09-30 15:11:31 Tuesday]
-动作 {SEND_MESSAGE} 的反馈：消息“信你才有鬼。”发送成功。
-</action>
-
-
-<action>
-[2025-09-30 15:11:46 Tuesday]
-动作 {SEND_MESSAGE} 的反馈：消息“不过粥我放你...”发送成功。
-</action>
 
 
 <others>
@@ -168,16 +215,24 @@ example_history = f'''<me>
 
 
 <me>
-我的思考：这人真是……又贫又欠揍，但还挺暖的。算了，不骂他了。
+<action name="{RECORD_THOUGHTS}" datetime="2025-09-30 15:12:14 Tuesday">
+<args>
+{{"{RECORD_THOUGHTS_CONTENT}": "这人真是……又贫又欠揍，但还挺暖的。算了，不骂他了。"}}
+</args>
+<feedback>
+{RECORD_THOUGHTS_TOOL_CONTENT}
+</feedback>
+</action>
 
-我的动作：{SEND_MESSAGE}({{"{SEND_MESSAGE_CONTENT}": "滚！赶紧吃饭去！"}})
-</me>
-
-
-<actions>
-[2025-09-30 15:12:17 Tuesday]
-动作 {SEND_MESSAGE} 的反馈：消息“滚！赶紧吃饭...”发送成功。
-</actions>'''
+<action name="{SEND_MESSAGE}" datetime="2025-09-30 15:12:17 Tuesday">
+<args>
+{{"{SEND_MESSAGE_CONTENT}": "滚！赶紧吃饭去！"}}
+</args>
+<feedback>
+{SEND_MESSAGE_TOOL_CONTENT}
+</feedback>
+</action>
+</me>'''
 
 extract_episodic_memories_schema = {
     'title': 'extract_episodic_memories',
@@ -303,25 +358,24 @@ extract_reflective_memories_schema = {
 async def recycle_original_memories(agent_id: str, input_messages: list[AnyMessage]):
     store_settings = await store_manager.get_settings(agent_id)
     time_settings = store_settings.main.time_settings
-    messages = filtering_messages(input_messages, exclude_do_not_store=True, exclude_recycled=True, exclude_extracted=False)
+    messages = filtering_messages(input_messages, exclude_extracted=False)
     content_and_kwargs: list[dict[str, Any]] = []
+    formated_messages = format_messages_for_ai_as_list(messages, time_settings)
+    index = 0
     for m in messages:
         if isinstance(m, (HumanMessage, AIMessage)):
-            content_and_kwargs.append({'content': format_message_for_ai(m, time_settings), 'kwargs': m.additional_kwargs, 'id': m.id})
-        elif isinstance(m, ToolMessage):
-            content_and_kwargs[-1]['content'] += '\n\n\n' + format_message_for_ai(m, time_settings)
+            content_and_kwargs.append({'content': formated_messages[index], 'kwargs': m.additional_kwargs, 'id': m.id})
+            index += 1
 
     extracted_memories: list[InitialMemory] = []
-
-    current_agent_time_seconds = now_agent_seconds(time_settings)
+    current_agent_timeseconds = now_agent_seconds(time_settings)
     base_stable_time = store_settings.recycling.base_stable_time
-
     message_ids = [message['id'] if message['id'] else str(uuid4()) for message in content_and_kwargs]
     messages_len = len(content_and_kwargs)
 
     for i, message in enumerate(content_and_kwargs):
         stable_mult = random.expovariate(1.0) #TODO:这个值应该由文本的情感强烈程度来决定
-        creation_agent_time_seconds = message['kwargs'].get("bh_creation_agent_time_seconds", current_agent_time_seconds)
+        creation_agent_time_seconds = message['kwargs'].get("bh_creation_agent_timeseconds", current_agent_timeseconds)
         creation_agent_datetime = agent_seconds_to_datetime(creation_agent_time_seconds, time_settings)
         extracted_memories.append(InitialMemory(
             content=message['content'],
@@ -346,19 +400,19 @@ async def recycle_episodic_memories(agent_id: str, input_messages: list[AnyMessa
     current_agent_time_seconds = now_agent_seconds(time_settings)
     base_stable_time = store_settings.recycling.base_stable_time
 
-    creation_time_secondses = [int(m.additional_kwargs.get("bh_creation_agent_time_seconds", current_agent_time_seconds)) for m in messages]
+    creation_timesecondses = [int(m.additional_kwargs.get("bh_creation_agent_timeseconds", current_agent_time_seconds)) for m in messages]
 
     if messages:
-        # 临时方案，对于总结和语义记忆的creation_time_seconds直接使用原始记录的平均时间戳
-        creation_time_seconds_average = sum(creation_time_secondses) / len(creation_time_secondses)
-        creation_datetime_average = agent_seconds_to_datetime(creation_time_seconds_average, time_settings)
+        # 过渡方案，对于总结和语义记忆的creation_time_seconds直接使用原始记录的平均时间戳
+        creation_timeseconds_average = sum(creation_timesecondses) / len(creation_timesecondses)
+        creation_datetime_average = agent_seconds_to_datetime(creation_timeseconds_average, time_settings)
 
         llm_with_structure = create_agent(model, response_format=extract_episodic_memories_schema)
         extracted_episodic_memories = (await llm_with_structure.ainvoke({'messages': [HumanMessage(content=f"""以下是用户的最近记录：
 <history>
 {format_messages_for_ai(messages, time_settings)}
 </history>
-请你将这些记录分解为 episodic memories。"""
+请你将这些XML格式的记录根据要求分解为 episodic memories。"""
         )]}))['structured_response']
 
         episodic_memories = extracted_episodic_memories["episodic_memories"]
@@ -382,6 +436,7 @@ async def recycle_episodic_memories(agent_id: str, input_messages: list[AnyMessa
 async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMessage], model: BaseChatModel) -> list[BaseMessage]:
     messages = filtering_messages(input_messages)
     store_settings = await store_manager.get_settings(agent_id)
+    times_before = Times(store_settings.main.time_settings)
     parsed_character_settings = format_character_settings(store_settings.main)
     role_prompt = f'基本信息：\n{parsed_character_settings if parsed_character_settings.strip() else '无'}\n\n详细设定：\n{store_settings.main.role_prompt}'
     #llm_with_structure = self.llm.with_structured_output(ExtractReflectiveMemories, method="function_calling")
@@ -394,7 +449,7 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
 {role_prompt}
 </persona>
 
-以下是用户的最近记录：
+以下是用户的最近记录（XML格式）：
 <history>
 {format_messages_for_ai(messages, store_settings.main.time_settings)}
 </history>
@@ -403,35 +458,26 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
     reflective_memories = extracted_reflective_memories["reflective_memories"]
     ids = [str(uuid4()) for _ in reflective_memories]
     reflective_memories_len = len(reflective_memories)
-    current_time = utcnow()
-    current_time_seconds = datetime_to_seconds(current_time)
-    current_agent_time = real_time_to_agent_time(current_time, store_settings.main.time_settings)
-    current_agent_time_seconds = datetime_to_seconds(current_agent_time)
-    process: list[BaseMessage] = [
-        HumanMessage(
-            content=f'''**这条消息来自系统（system）自动发送**
-当前时间是 {format_time(current_agent_time)}，距上次与用户聊天过去了一段时间，现在是一个反思刚才所发生的事情的好时机。请你以你所扮演的角色的视角，思考刚才所发生的事意味着什么，能得出什么样的结论或猜测，得出结果并留下思考过程。''',
-            name="system",
-            additional_kwargs={
-                "bh_creation_time_seconds": current_time_seconds,
-                "bh_creation_agent_time_seconds": current_agent_time_seconds,
-                "bh_do_not_store": True,
-                "bh_from_system": True,
-            },
-            id=str(uuid4()),
-        ),
-        AIMessage(content=extracted_reflective_memories["reflection_process"], id=str(uuid4()), additional_kwargs={
-        "bh_creation_time_seconds": current_time_seconds,
-        "bh_creation_agent_time_seconds": current_agent_time_seconds,
-        "bh_recycled": True
-        })
-    ]
+    times_after = Times(store_settings.main.time_settings)
+    process: list[BaseMessage] = []
+    process.append(construct_system_message(
+        content=f'''当前时间是 {format_time(times_before.agent_datetime)}，距上次与用户聊天过去了一段时间，现在是一个反思刚才所发生的事情的好时机。请你以你所扮演的角色的视角，思考刚才所发生的事意味着什么，能得出什么样的结论或猜测，得出结果并留下思考过程。''',
+        times=times_before
+    ))
+    process.extend(InitalAIMessage(
+        tool_calls=[InitalToolCall(
+            name={RECORD_THOUGHTS},
+            args={{RECORD_THOUGHTS_CONTENT}: extracted_reflective_memories["reflection_process"]},
+            result_content=RECORD_THOUGHTS_TOOL_CONTENT,
+            result_artifact={"bh_do_not_store": True, "bh_streaming": True}
+        )]
+    ).construct_messages(times_after))
     base_stable_time = store_settings.recycling.base_stable_time
     memories = [InitialMemory(
         content=memory,
         stable_time=random.expovariate(0.3) * base_stable_time,
         type="reflective",
-        creation_agent_datetime=current_agent_time,
+        creation_agent_datetime=times_after.agent_datetime,
         id=ids[i],
         previous_memory_id=None if i == 0 else ids[i-1],
         next_memory_id=None if i == reflective_memories_len - 1 else ids[i+1]
@@ -441,11 +487,13 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
             content=process[1].content,
             stable_time=random.expovariate(0.3) * base_stable_time,
             type="original",
-            creation_agent_datetime=current_agent_time,
+            creation_agent_datetime=times_after.agent_datetime,
             id=process[1].id,
             previous_memory_id=None,
             next_memory_id=None
         ))
+        for m in process:
+            m.additional_kwargs['bh_recycled'] = True
     await memory_manager.add_memories(memories, agent_id)
     return process
 
@@ -461,30 +509,3 @@ async def recycle_memories(memory_type: AnyMemoryType, agent_id: str, input_mess
         return await recycle_reflective_memories(agent_id, input_messages, model)
     else:
         raise ValueError(f"Unknown memory type: {memory_type}")
-
-
-def filtering_messages(
-        messages: list[AnyMessage],
-        exclude_do_not_store: bool = False,
-        exclude_recycled: bool = False,
-        exclude_extracted: bool = True,
-        exclude_system: bool = True
-    ) -> list[AnyMessage]:
-    result = []
-    for message in messages:
-        if exclude_do_not_store:
-            if isinstance(message, ToolMessage) and message.artifact and isinstance(message.artifact, dict) and message.artifact.get("bh_do_not_store"):
-                continue
-            elif message.additional_kwargs.get("bh_do_not_store"):
-                continue
-        if exclude_recycled:
-            if message.additional_kwargs.get("bh_recycled"):
-                continue
-        if exclude_extracted:
-            if message.additional_kwargs.get("bh_extracted"):
-                continue
-        if exclude_system:
-            if message.additional_kwargs.get("bh_from_system"):
-                continue
-        result.append(message)
-    return result

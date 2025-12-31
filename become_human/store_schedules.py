@@ -11,9 +11,17 @@ from become_human.time import seconds_to_datetime, datetime_to_seconds
 
 
 class Schedule(BaseModel):
-    """如只设置interval，表示将按指定时间间隔运行。间隔时间总是在最后被加上
+    """定时计划
 
-    如设置了time_of_day，则也至少需要设置every_day、weekdays或monthdays其中一项。"""
+    如interval和scheduled系列参数都不设置，表示这是一次性计划，将在next_run_timeseconds时运行一次后被删除
+
+    next_run_timeseconds的默认值是0.0，如果不修改将在下次tick时直接被触发一次（没有设置timeout的话）
+
+    如只设置interval，表示将按指定时间间隔运行。间隔时间总是在scheduled之后被加上
+
+    如需设置scheduled系列参数，需至少设置time_of_day，和every_day、weekdays或monthdays其中一项
+
+    可以不设置every_month和months，表示只在当月运行"""
     interval: Optional[Union[float, tuple[float, float]]] = Field(default=None, description="间隔时间，固定时间或random.uniform(最小，最大)，单位为秒。在scheduled之后计算")
     scheduled_time_of_day: Optional[float] = Field(default=None, ge=0.0, le=86400.0, description="指定一天中的时间，单位为秒")
     scheduled_every_day: bool = Field(default=False, description="是否每天运行")
@@ -24,13 +32,12 @@ class Schedule(BaseModel):
     timeout_seconds: float = Field(default=0.0, description="超时时间，指如果当前时间超过指定时间太久则算作超时。单位为秒，0则为无限制")
     max_loop_times: int = Field(default=0, ge=0, description="循环次数，0表示无限循环")
     agent_time_based: bool = Field(default=False, description="是否基于agent时间计算")
-
-    next_run_timeseconds: float = Field(default=0.0, description="经过计算得出的下次执行时间的timeseconds")
+    next_run_timeseconds: float = Field(default=0.0, description="下次执行时间的timeseconds")
     loop_times: int = Field(default=0, description="已运行次数，只有当存在max_loop_times时才会计算")
 
     def tick(self, current_datetime: datetime) -> tuple[Optional[Self], bool]:
         """
-        计算Schedule是否应更新？是否应运行？是否应删除？
+        计算Schedule是否应更新？是否应运行？
 
         Args:
             current_datetime: 当前时间
@@ -38,11 +45,9 @@ class Schedule(BaseModel):
         Returns:
             输出一个tuple，按顺序包含以下内容：
 
-            schedule: 若Schedule需更新，则返回一个新的Schedule示例。否则返回None
+            schedule: 若Schedule需更新，则返回一个新的Schedule示例。否则返回None，表示应移除
 
             should_execute: 是否应执行相应任务
-
-            should_delete: 是否应删除Schedule。如因超出最大循环次数，或是设置存在错误
         """
 
         # 检查是否已超过最大循环次数
@@ -63,6 +68,10 @@ class Schedule(BaseModel):
             not_timeout = False
         else:
             not_timeout = True
+
+        # 如果没有计划和间隔，则等于一次性计划
+        if self.scheduled_time_of_day is None and self.interval is None:
+            return None, not_timeout
 
         # 初始化下次运行时间为当前时间
         next_run = current_datetime
@@ -150,6 +159,9 @@ class Schedule(BaseModel):
 class MemoryUpdateSchedule(Schedule):
     stable_time_range: list[dict[str, float]] = Field(description="指定稳定时间范围，单位为秒")
 
+class SelfCallSchedule(Schedule):
+    note: str = Field(default='', description="备注")
+
 class AgentSchedules(StoreModel):
     _namespace = ("schedules",)
     memory_update_schedules: list[MemoryUpdateSchedule] = StoreField(default_factory=lambda: [
@@ -159,3 +171,6 @@ class AgentSchedules(StoreModel):
         MemoryUpdateSchedule(interval=500.0, stable_time_range=[{'$gte': 864000.0}, {'$lt': 8640000.0}]),
         MemoryUpdateSchedule(interval=3600.0, stable_time_range=[{'$gte': 8640000.0}])
     ])
+    #passive_self_call_schedules: list[SelfCallSchedule] = StoreField(default_factory=list)
+    #active_self_call_schedules: list[SelfCallSchedule] = StoreField(default_factory=list)
+    #wakeup_self_call_schedules: list[SelfCallSchedule] = StoreField(default_factory=list)

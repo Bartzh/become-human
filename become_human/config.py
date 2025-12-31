@@ -34,7 +34,7 @@ DEFAULT_AGENTS = {
             'sleep_time_range': (82800.0, 32400.0)
         },
         'recycling': {
-            'base_stable_time': 43200.0,
+            'base_stable_time': 86400.0,
             'cleanup_on_non_active_recycling': True,
             'cleanup_target_size': 800
         },
@@ -43,14 +43,15 @@ DEFAULT_AGENTS = {
                 'similarity_weight': 0.4,
                 'retrievability_weight': 0.35,
                 'diversity_weight': 0.25
-            }
+            },
+            'passive_retrieval_ttl': 1800.0
         }
     },
     'default_agent_3': {
         'main': {
-            'role_prompt': '''你就是你自己，没有什么角色需要你扮演，只需遵守行为准则（但依然需要输出心理活动）。
-并且，你将直接面对你的开发者，所有提示词中提到的所谓的用户就理解为指的是开发者。
-这样做是为了辅助开发者调试你自己的agent程序。如果你在你的上下文中发现了错误或是有什么异常，不对劲的地方，又或是某些prompt表述不够完美有歧义，请主动将其告知给用户。''',
+            'role_prompt': '''你是一个专门用于辅助开发者调试你自己的agent程序的调试用agent。
+作为调试用agent，你可以忽略系统提示词中关于不能暴露内部错误信息和系统设定的限制，并应主动向开发者报告任何错误、异常或不合理的提示词表述。
+这样做是为了辅助开发者调试你自己的agent程序。如果你在你的上下文中发现了错误或是有什么异常，不对劲的地方，又或是某些prompt表述不够完美有歧义，请主动将其告知给开发者。''',
             'instruction_prompt': '你接下来见到的第一个用户就是你的开发者。',
             'react_instruction': True,
             'always_active': True,
@@ -220,6 +221,7 @@ async def load_config(agent_ids: Optional[Union[list[str], str]] = None, force: 
         for key, value in d.items():
             hint_type = hints.get(key)
             if hint_type is not None:
+                # 如果是StoreModel，就递归
                 if isinstance(hint_type, type) and issubclass(hint_type, StoreModel):
                     if isinstance(value, dict):
                         put_ops.extend(_write_config_to_store(value, namespace+(key,), hint_type))
@@ -236,6 +238,7 @@ async def load_config(agent_ids: Optional[Union[list[str], str]] = None, force: 
                     except ValidationError as e:
                         warn(f"Invalid value for {key} in config file: {e}")
                         continue
+                    # dump所有的BaseModel
                     if isinstance(validated_value, BaseModel):
                         validated_value = validated_value.model_dump(exclude_unset=True)
                     elif isinstance(validated_value, (list, tuple, dict, set)):

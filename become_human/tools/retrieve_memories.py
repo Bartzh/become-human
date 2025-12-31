@@ -6,8 +6,11 @@ from langchain_core.runnables import RunnableConfig
 from langchain.messages import HumanMessage, ToolMessage, AIMessage
 
 from become_human.store_manager import store_manager
-from become_human.memory import get_activated_memory_types, memory_manager, parse_retrieved_memory_groups
-from become_human.types_main import get_retrieved_memory_ids, MainState, MainContext
+from become_human.memory import get_activated_memory_types, memory_manager, format_retrieved_memory_groups
+from become_human.message import get_all_retrieved_memory_ids
+from become_human.types_main import MainState, MainContext
+
+RETRIEVE_MEMORIES = 'retrieve_memories'
 
 backup_schema = {
     '$defs': {
@@ -187,7 +190,7 @@ rm_schema = {
     },
     "required": ["search_string"]
 }
-@tool(response_format="content_and_artifact", args_schema=rm_schema)
+@tool(RETRIEVE_MEMORIES, response_format="content_and_artifact", args_schema=rm_schema)
 async def retrieve_memories(
     runtime: ToolRuntime[MainContext, MainState],
     search_string: str,
@@ -218,7 +221,7 @@ async def retrieve_memories(
     for m in reversed(messages):
         if isinstance(m, HumanMessage):
             break
-        elif isinstance(m, ToolMessage) and m.name == "retrieve_memories":
+        elif isinstance(m, ToolMessage) and m.name == RETRIEVE_MEMORIES:
             invoke_count += 1
     strength = 1 + min(invoke_count * 0.5, 1) # 目前主动检索的强度固定初始为1
     store_settings = await store_manager.get_settings(agent_id)
@@ -226,7 +229,7 @@ async def retrieve_memories(
 
     # 剔除已检索过的记忆
     message_ids = [m.id for m in messages if m.id]
-    retrieved_memory_ids = get_retrieved_memory_ids(messages)
+    retrieved_memory_ids = get_all_retrieved_memory_ids(messages)
     exclude_memory_ids = list(set(message_ids + retrieved_memory_ids))
 
     # 重复检索逻辑，若重复检索则不剔除检索过的那些记忆
@@ -237,7 +240,7 @@ async def retrieve_memories(
             continue
         for tool_call in m.tool_calls:
             if (
-                tool_call.name == "retrieve_memories" and
+                tool_call.name == RETRIEVE_MEMORIES and
                 tool_call.args.get("search_string") == search_string and
                 tool_call.args.get("memory_type") == memory_type and
                 tool_call.id
@@ -266,6 +269,6 @@ async def retrieve_memories(
         creation_time_range_end=end_time,
         exclude_memory_ids=exclude_memory_ids
     )
-    content = repeat_content + parse_retrieved_memory_groups(groups, store_settings.main.time_settings)
+    content = repeat_content + format_retrieved_memory_groups(groups, store_settings.main.time_settings)
     artifact = {"bh_do_not_store": True, "bh_retrieved_memory_ids": [group.source_memory.doc.id for group in groups]}
     return content, artifact

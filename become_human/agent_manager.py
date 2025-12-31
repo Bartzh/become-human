@@ -15,12 +15,13 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from langchain_dev_utils.chat_models import load_chat_model
 
-from become_human.graph_main import MainGraph, send_message_tool_content, MainContext
+from become_human.graph_main import MainGraph, SEND_MESSAGE_TOOL_CONTENT, MainContext
 from become_human.recycling import recycle_memories
 from become_human.memory import get_activated_memory_types, memory_manager
 from become_human.config import load_config, get_agent_configs
-from become_human.utils import is_valid_json, format_messages_for_ai, extract_text_parts
-from become_human.time import datetime_to_seconds, real_time_to_agent_time, now_seconds, format_time, utcnow, agent_seconds_to_datetime, format_seconds, Times, real_seconds_to_agent_seconds, parse_timedelta
+from become_human.utils import is_valid_json
+from become_human.time import now_seconds, format_time, agent_seconds_to_datetime, format_seconds, Times, real_seconds_to_agent_seconds, parse_timedelta
+from become_human.message import format_messages_for_ai, extract_text_parts, construct_system_message
 from become_human.store import store_setup, store_stop_listener, store_adelete_namespace
 from become_human.store_manager import store_manager
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
@@ -33,10 +34,14 @@ class AgentManager:
 
     event_queue: asyncio.Queue
 
-    activated_agent_ids: dict[str, dict[str, Any]]
+    activated_agent_id_datas: dict[str, dict[str, Any]]
     heartbeat_interval: float
     heartbeat_is_running: bool
     heartbeat_task: Optional[asyncio.Task]
+
+    # 两者目前来说是一样的
+    on_heartbeat_finished: asyncio.Event
+    on_trigger_agents_finished: asyncio.Event
 
     chat_model: BaseChatModel
     structured_model: BaseChatModel
@@ -79,9 +84,14 @@ class AgentManager:
         self.event_queue = asyncio.Queue()
 
         self.heartbeat_interval = heartbeat_interval
-        self.activated_agent_ids = {}
+        self.activated_agent_id_datas = {}
         self.heartbeat_is_running = False
         self.heartbeat_task = None
+
+        self.on_heartbeat_finished = asyncio.Event()
+        self.on_heartbeat_finished.set()
+        self.on_trigger_agents_finished = asyncio.Event()
+        self.on_trigger_agents_finished.set()
 
         self._agent_user_input_buffers = {}
         self._agent_gathereds = {}
@@ -91,7 +101,7 @@ class AgentManager:
         await store_setup()
         await load_config()
 
-        def create_model(model_name: str, enable_thinking: Optional[bool] = None):
+        def create_model(model_name: str, enable_thinking: bool = False):
             splited_model_name = model_name.split(':', 1)
             if len(splited_model_name) != 2:
                 raise ValueError(f"Invalid model name: {model_name}")
@@ -99,51 +109,51 @@ class AgentManager:
                 provider = splited_model_name[0]
                 model = splited_model_name[1]
             kwargs = {}
-            if model == 'deepseek-v3.2':
+            if (
+                'deepseek-v3.2' in model or
+                'glm' in model
+            ):
                 kwargs['reasoning_keep_policy'] = 'current'
+            elif 'mimo-v2-flash' in model:
+                kwargs['reasoning_keep_policy'] = 'all'
             if provider == 'dashscope':
                 if model.startswith(('qwen-', 'qwen3-')):
                     return ChatQwen(
-                        model=model_name,
-                        enable_thinking=enable_thinking,
+                        model=model,
+                        enable_thinking=enable_thinking
                     )
                 elif model.startswith(('qwq-', 'qvq-')):
                     return ChatQwQ(
-                        model=model_name,
+                        model=model
                     )
                 else:
                     if enable_thinking:
                         kwargs['extra_body'] = {"enable_thinking": True}
                     return load_chat_model(
-                        model=model,
-                        model_provider='openai',
+                        model=model_name,
                         **kwargs,
                     )
-            if model.startswith('deepseek-v3.') and enable_thinking:
-                kwargs['extra_body'] = {"thinking": {"type": "enabled"}}
+            if provider == 'openrouter':
+                kwargs['extra_body'] = {'reasoning': {'enabled': enable_thinking}}
             else:
-                return load_chat_model(
-                    model=model_name,
-                    **kwargs
-                    #extra_body={"enable_thinking": enable_thinking} if enable_thinking is not None else None,
-                )
+                kwargs['extra_body'] = {"thinking": {"type": "enabled" if enable_thinking else "disabled"}}
+            return load_chat_model(
+                model=model_name,
+                **kwargs
+            )
 
         chat_enable_thinking = os.getenv("CHAT_MODEL_ENABLE_THINKING", '').lower()
         if chat_enable_thinking == "true":
             chat_enable_thinking = True
-        elif chat_enable_thinking == "false":
-            chat_enable_thinking = False
         else:
-            chat_enable_thinking = None
+            chat_enable_thinking = False
         self.chat_model = create_model(os.getenv("CHAT_MODEL_NAME", ""), chat_enable_thinking)
 
         structured_enable_thinking = os.getenv("STRUCTURED_MODEL_ENABLE_THINKING", '').lower()
         if structured_enable_thinking == "true":
             structured_enable_thinking = True
-        elif structured_enable_thinking == "false":
-            structured_enable_thinking = False
         else:
-            structured_enable_thinking = None
+            structured_enable_thinking = False
         self.structured_model = create_model(os.getenv("STRUCTURED_MODEL_NAME", ""), structured_enable_thinking)
 
         self.main_graph = await MainGraph.create(self.chat_model, llm_for_structured_output=self.structured_model)
@@ -161,72 +171,100 @@ class AgentManager:
             return
         self.heartbeat_is_running = True
         while self.heartbeat_is_running:
+            self.on_heartbeat_finished.clear()
             await self.trigger_agents()
+            self.on_heartbeat_finished.set()
             await asyncio.sleep(self.heartbeat_interval)
         print("Heartbeat task stopped.")
 
 
     async def trigger_agents(self):
-        tasks = [self.trigger_agent(agent_id) for agent_id, value in self.activated_agent_ids.items() if value.get("initialized")]
-        await asyncio.gather(*tasks)
+        """trigger所有agent，如果上一次trigger_agents正在运行则跳过"""
+        if self.on_trigger_agents_finished.is_set():
+            self.on_trigger_agents_finished.clear()
+            tasks = [self.trigger_agent(agent_id) for agent_id in self.activated_agent_id_datas.keys()]
+            await asyncio.gather(*tasks)
+            self.on_trigger_agents_finished.set()
 
     async def trigger_agent(self, agent_id: str):
+        """trigger单一agent，如果上一次trigger_agent正在运行则跳过"""
+        if agent_id not in self.activated_agent_id_datas:
+            warn(f"Agent {agent_id} 没有在activated_agent_ids中找到，说明存在非法的trigger_agent调用，请检查代码。")
+            return
+        if not self.activated_agent_id_datas[agent_id]['on_trigger_finished'].is_set():
+            return
+        self.activated_agent_id_datas[agent_id]['on_trigger_finished'].clear()
+
         config = {"configurable": {"thread_id": agent_id}}
         agent_store = await store_manager.get_agent(agent_id)
         agent_settings = agent_store.settings
         agent_states = agent_store.states
 
         # 获取时间
-        current_datetime = utcnow()
-        current_time_seconds = datetime_to_seconds(current_datetime)
-        current_agent_datetime = real_time_to_agent_time(current_datetime, agent_settings.main.time_settings)
-        current_agent_time_seconds = datetime_to_seconds(current_agent_datetime)
+        current_times = Times(agent_settings.main.time_settings)
 
         # 如果是首次运行，则添加或发送引导消息
         if agent_states.is_first_time:
             agent_states.is_first_time = False
-            instruction_message = HumanMessage(
-                content=f'''**这条消息来自系统（system）自动发送**
-当前时间是：{format_time(current_agent_datetime)}。
+            if self.main_graph.is_agent_running(agent_id):
+                warn(f"Agent {agent_id} 已被调用，将跳过引导消息。")
+            else:
+                instruction_message = construct_system_message(
+                    f'''当前时间是：{format_time(current_times.agent_datetime)}。
 这是你被初始化以来的第一条消息。如果你看到这条消息，说明在此消息之前你还没有收到过任何来自用户的消息。
 这意味着你的“记忆”暂时是空白的，如果检索记忆时提示“没有找到任何匹配的记忆。”或检索不到什么有用的信息，这是正常的。
 接下来是你与用户的初次见面，请根据你所扮演的角色以及以下的提示考虑应做出什么反应：\n''' + agent_settings.main.instruction_prompt,
-                additional_kwargs={
-                    "bh_creation_time_seconds": current_time_seconds,
-                    "bh_creation_agent_time_seconds": current_agent_time_seconds,
-                    "bh_from_system": True,
-                    "bh_do_not_store": True
-                },
-                name='system'
-            )
-            if agent_settings.main.react_instruction:
-                await self.call_agent(instruction_message.text, agent_id, call_type='system')
-            else:
-                await self.main_graph.update_messages(agent_id, [instruction_message])
+                    current_times
+                )
+                if agent_settings.main.react_instruction:
+                    await self.call_agent(instruction_message.text, agent_id, call_type='system')
+                else:
+                    instruction_messages = [instruction_message]
+                    if agent_settings.main.initial_ai_messages:
+                        instruction_messages.extend(
+                            random.choice(agent_settings.main.initial_ai_messages)
+                            .construct_messages(current_times)
+                        )
+                    await self.main_graph.update_messages(agent_id, instruction_messages)
 
         # 更新记忆
         await self.process_timers(agent_id)
 
         # 处理每天的任务
-        last_update_agent_datetime = agent_seconds_to_datetime(agent_states.last_update_agent_time_seconds, agent_settings.main.time_settings)
-        if (current_agent_datetime.day != last_update_agent_datetime.day or
-            current_agent_datetime.month != last_update_agent_datetime.month or
-            current_agent_datetime.year != last_update_agent_datetime.year):
+        last_update_agent_datetime = agent_seconds_to_datetime(agent_states.last_update_agent_timeseconds, agent_settings.main.time_settings)
+        if (current_times.agent_datetime.day != last_update_agent_datetime.day or
+            current_times.agent_datetime.month != last_update_agent_datetime.month or
+            current_times.agent_datetime.year != last_update_agent_datetime.year):
 
             # 处理年龄（我觉得年龄应该靠自己想，而非程序计算）
             if agent_settings.main.character_settings.birthday is not None:
-                age = relativedelta(current_agent_datetime.date(), agent_settings.main.character_settings.birthday).years
+                age = relativedelta(current_times.agent_datetime.date(), agent_settings.main.character_settings.birthday).years
                 if age != agent_settings.main.character_settings.age:
                     agent_settings.main.character_settings.age = age
 
         # 更新最后更新时间
-        agent_states.last_update_real_time_seconds = current_time_seconds
-        agent_states.last_update_agent_time_seconds = current_agent_time_seconds
+        agent_states.last_update_real_timeseconds = current_times.real_timeseconds
+        agent_states.last_update_agent_timeseconds = current_times.agent_timeseconds
 
-        # 如果agent的main_graph正在运行，取消以下任务
-        main_graph_state = await self.main_graph.graph.aget_state(config)
-        if main_graph_state.next:
+        # 如果agent已有调用，取消以下任务
+        if self.main_graph.is_agent_running(agent_id):
             return
+
+        # 自动清理被动检索
+        passive_retrieval_ttl = agent_settings.retrieval.passive_retrieval_ttl
+        if passive_retrieval_ttl > 0.0:
+            passive_retrieval_messages_to_remove = await self.main_graph.get_messages(agent_id)
+            passive_retrieval_messages_to_remove = [
+                RemoveMessage(id=m.id) for m in passive_retrieval_messages_to_remove
+                if (
+                    m.additional_kwargs.get('bh_message_type', '') == 'passive_retrieval' and
+                    3600.0 >= abs(current_times.agent_timeseconds - m.additional_kwargs.get('bh_creation_agent_timeseconds', 0.0))
+                )
+            ]
+            if passive_retrieval_messages_to_remove:
+                await self.main_graph.update_messages(agent_id, passive_retrieval_messages_to_remove)
+
+        main_graph_state = await self.main_graph.graph.aget_state(config)
 
         # 处理自我调用
         self_call_time_secondses = main_graph_state.values.get("self_call_time_secondses", [])
@@ -235,25 +273,25 @@ class AgentManager:
         can_call = False
         if active_self_call_time_secondses_and_notes:
             for seconds, note in active_self_call_time_secondses_and_notes:
-                if current_agent_time_seconds >= seconds:
+                if current_times.agent_timeseconds >= seconds:
                     can_call = True
                     self_call_type = 'active'
                     break
         if self_call_time_secondses and not can_call:
             for seconds in self_call_time_secondses:
-                if current_agent_time_seconds >= seconds:
+                if current_times.agent_timeseconds >= seconds:
                     can_call = True
                     self_call_type = 'passive'
                     break
         if wakeup_call_time_seconds and not can_call:
-            if current_agent_time_seconds >= wakeup_call_time_seconds:
+            if current_times.agent_timeseconds >= wakeup_call_time_seconds:
                 can_call = True
                 self_call_type = 'passive'
         if can_call:
             await self.call_agent('', agent_id, call_type='self', self_call_type=self_call_type)
 
-        # 自动回收闲置上下文
-        elif main_graph_state.values.get("active_time_seconds") and current_agent_time_seconds > main_graph_state.values.get("active_time_seconds"):# 已超出活跃时间
+        # 如果没有自我调用，开始尝试自动回收闲置上下文，先判断是否已超出活跃时间
+        elif main_graph_state.values.get("active_time_seconds") and current_times.agent_timeseconds > main_graph_state.values.get("active_time_seconds"):
             messages = await self.main_graph.get_messages(agent_id)
             # 最后一条消息如果为HumanMessage说明agent还没有响应
             if not isinstance(messages[-1], HumanMessage):
@@ -261,9 +299,7 @@ class AgentManager:
                 # 再次判断是否有来自用户的新消息
                 if [m for m in not_extracted_messages if isinstance(m, HumanMessage) and not m.additional_kwargs.get("bh_from_system") and not m.additional_kwargs.get("bh_do_not_store")]:
 
-                    # 清理掉passive_retrieval消息，可以考虑加个开关
-                    passive_retrieve_messages = [m for m in messages if m.additional_kwargs.get("bh_message_type", '') == "passive_retrieval"]
-                    remove_messages = [RemoveMessage(id=m.id) for m in passive_retrieve_messages]
+                    remove_messages = []
 
                     # recycling
                     memory_types = get_activated_memory_types()
@@ -279,11 +315,9 @@ class AgentManager:
                         #await main_graph.update_messages(agent_id, [RemoveMessage(id=m.id) for m in messages])
                         max_tokens = agent_settings.recycling.cleanup_target_size
                         if max_tokens > 0:
-                            # 因为已经决定清理passive_retrieval消息了，所以这里直接以清理之后的messages计算
-                            not_passive_retrieve_messages = [m for m in messages if m.additional_kwargs.get("bh_message_type", '') != "passive_retrieval"]
-                            if count_tokens_approximately(not_passive_retrieve_messages) > max_tokens:
+                            if count_tokens_approximately(messages) > max_tokens:
                                 new_messages: list[BaseMessage] = trim_messages(
-                                    messages=not_passive_retrieve_messages,
+                                    messages=messages,
                                     max_tokens=max_tokens,
                                     token_counter=count_tokens_approximately,
                                     strategy='last',
@@ -294,8 +328,8 @@ class AgentManager:
                                 if not new_messages:
                                     warn("Trim messages failed on cleanup.")
                                     new_messages = []
-                                excess_count = len(not_passive_retrieve_messages) - len(new_messages)
-                                old_messages = not_passive_retrieve_messages[:excess_count]
+                                excess_count = len(messages) - len(new_messages)
+                                old_messages = messages[:excess_count]
                                 remove_messages.extend([RemoveMessage(id=message.id) for message in old_messages])
                                 #update_messages = new_messages
                         # max_tokens <= 0 则全部删除
@@ -313,42 +347,38 @@ class AgentManager:
 
         # 闲置过久（两个星期）则关闭agent
         elif (
-            agent_id in self.activated_agent_ids and
-            current_time_seconds > (self.activated_agent_ids.get(agent_id, {}).get("created_at", 0) + 1209600)
+            agent_id in self.activated_agent_id_datas and
+            current_times.real_timeseconds > (self.activated_agent_id_datas.get(agent_id, {}).get("created_at", 0) + 1209600)
         ):
-            self.close_agent(agent_id)
+            await self.close_agent(agent_id)
+
+        self.activated_agent_id_datas[agent_id]["on_trigger_finished"].set()
 
 
     async def init_agent(self, agent_id: str):
-        self.activated_agent_ids[agent_id] = {"initialized": False, "created_at": now_seconds()}
+        """初始化agent，若agent处于triggering则等待"""
+        if agent_id in self.activated_agent_id_datas:
+            await self.activated_agent_id_datas[agent_id]["on_trigger_finished"].wait()
+        self.activated_agent_id_datas[agent_id] = {
+            "created_at": now_seconds(),
+            "on_trigger_finished": asyncio.Event()
+        }
+        self.activated_agent_id_datas[agent_id]["on_trigger_finished"].set()
         await store_manager.init_agent(agent_id)
         await self.trigger_agent(agent_id)
-        if agent_id in self.activated_agent_ids:
-            self.activated_agent_ids[agent_id]["initialized"] = True
 
-    def close_agent(self, agent_id: str):
-        """手动关闭agent"""
-        if self.activated_agent_ids.get(agent_id):
-            del self.activated_agent_ids[agent_id]
+    async def close_agent(self, agent_id: str):
+        """手动关闭agent，若agent处于triggering则等待"""
+        if self.activated_agent_id_datas.get(agent_id):
+            await self.activated_agent_id_datas[agent_id]['on_trigger_finished'].wait()
+            del self.activated_agent_id_datas[agent_id]
         store_manager.close_agent(agent_id)
 
     async def close_manager(self):
         print("wait for the last heartbeat to stop")
         self.heartbeat_is_running = False
         if self.heartbeat_task is not None:
-            try:
-                await self.heartbeat_task
-            except asyncio.CancelledError:
-                pass
-            self.heartbeat_task = None
-
-        await self.main_graph.conn.close()
-        await store_stop_listener()
-        print("Graphs closed")
-
-    async def close_manager_force(self):
-        self.heartbeat_is_running = False
-        if self.heartbeat_task is not None:
+            await self.on_heartbeat_finished.wait()
             self.heartbeat_task.cancel()
             try:
                 await self.heartbeat_task
@@ -375,7 +405,12 @@ class AgentManager:
             if is_admin:
                 await self.command_processing(agent_id, extracted_message[0])
             else:
-                await self.event_queue.put({"agent_id": agent_id, "name": "log", "args": {"content": "无权限执行此命令"}, "id": "command-" + str(uuid4())})
+                await self.event_queue.put({
+                    "agent_id": agent_id,
+                    "name": "log",
+                    "args": {"content": "无权限执行此命令"},
+                    "id": "command-" + str(uuid4())
+                })
         else:
             await self.call_agent(
                 user_input=user_input,
@@ -406,7 +441,7 @@ class AgentManager:
             # 如果是自我调用同时已有运行，则不重复运行。主动自我调用则不处理
             return
 
-        # 生成运行id并加入运行id字典
+        # 生成运行id并加入main_graph的运行id字典
         agent_run_id = str(uuid4())
         self.main_graph.agent_run_ids[agent_id] = agent_run_id
 
@@ -434,6 +469,7 @@ class AgentManager:
         config = {"configurable": {"thread_id": agent_id}}
         main_graph_state = await self.main_graph.graph.aget_state(config)
         if main_graph_state.next:
+            # next[0]也意味着不支持多节点并行
             current_node = main_graph_state.next[0]
             while (
                 current_node == "tools" or
@@ -461,7 +497,7 @@ class AgentManager:
         store_settings = await store_manager.get_settings(agent_id)
         time_settings = store_settings.main.time_settings
         current_times = Times(time_settings)
-        parsed_agent_time = format_time(current_times.agent_time)
+        parsed_agent_time = format_time(current_times.agent_datetime)
 
         # 如果是用户调用
         if call_type == 'human':
@@ -488,8 +524,8 @@ class AgentManager:
                 content=input_content,
                 name=user_name,
                 additional_kwargs={
-                    "bh_creation_time_seconds": current_times.real_time_seconds,
-                    "bh_creation_agent_time_seconds": current_times.agent_time_seconds
+                    "bh_creation_real_timeseconds": current_times.real_timeseconds,
+                    "bh_creation_agent_timeseconds": current_times.agent_timeseconds
                 }
             )}
         elif call_type == 'self':
@@ -498,15 +534,9 @@ class AgentManager:
             graph_input = {}
         elif call_type == 'system':
             context.call_type = 'system'
-            graph_input = {"input_messages": HumanMessage(
+            graph_input = {"input_messages": construct_system_message(
                 content=user_input,
-                additional_kwargs={
-                    "bh_creation_time_seconds": current_times.real_time_seconds,
-                    "bh_creation_agent_time_seconds": current_times.agent_time_seconds,
-                    "bh_from_system": True,
-                    "bh_do_not_store": True
-                },
-                name='system'
+                times=current_times
             )}
         else:
             del self.main_graph.agent_run_ids[agent_id]
@@ -568,14 +598,14 @@ class AgentManager:
                     # 但langchain在合并chunk中的additional_kwargs时不支持float，且对int和str都是加算
                     # 考虑不要依赖在这里添加时间
                     if (
-                        (last_real_seconds := chunk.additional_kwargs.get("bh_creation_time_seconds")) and
-                        (last_agent_seconds := chunk.additional_kwargs.get("bh_creation_agent_time_seconds"))
+                        (last_real_timeseconds := chunk.additional_kwargs.get("bh_creation_real_timeseconds")) and
+                        (last_agent_timeseconds := chunk.additional_kwargs.get("bh_creation_agent_timeseconds"))
                     ):
-                        chunk.additional_kwargs['bh_creation_time_seconds'] += int(now_times.real_time_seconds - last_real_seconds)
-                        chunk.additional_kwargs['bh_creation_agent_time_seconds'] += int(now_times.agent_time_seconds - last_agent_seconds)
+                        chunk.additional_kwargs['bh_creation_real_timeseconds'] += int(now_times.real_timeseconds - last_real_timeseconds)
+                        chunk.additional_kwargs['bh_creation_agent_timeseconds'] += int(now_times.agent_timeseconds - last_agent_timeseconds)
                     else:
-                        chunk.additional_kwargs['bh_creation_time_seconds'] = int(now_times.real_time_seconds)
-                        chunk.additional_kwargs['bh_creation_agent_time_seconds'] = int(now_times.agent_time_seconds)
+                        chunk.additional_kwargs['bh_creation_real_timeseconds'] = int(now_times.real_timeseconds)
+                        chunk.additional_kwargs['bh_creation_agent_timeseconds'] = int(now_times.agent_timeseconds)
 
                     if first:
                         first = False
@@ -626,12 +656,12 @@ class AgentManager:
                                         if tool_calls[tool_index].get('id'):
                                             now_times = Times(time_settings)
                                             streaming_tool_messages.append(ToolMessage(
-                                                content=send_message_tool_content(new_message),
+                                                content=SEND_MESSAGE_TOOL_CONTENT,
                                                 name=SEND_MESSAGE,
                                                 tool_call_id=tool_calls[tool_index]['id'],
                                                 additional_kwargs={
-                                                    "bh_creation_time_seconds": now_times.real_time_seconds,
-                                                    "bh_creation_agent_time_seconds": now_times.agent_time_seconds
+                                                    "bh_creation_real_timeseconds": now_times.real_timeseconds,
+                                                    "bh_creation_agent_timeseconds": now_times.agent_timeseconds
                                                 }
                                             ))
                                             self._agent_streaming_tool_messages[agent_id] = streaming_tool_messages
@@ -656,8 +686,8 @@ class AgentManager:
                                             name=tool_calls[tool_index]['name'],
                                             tool_call_id=tool_calls[tool_index]['id'],
                                             additional_kwargs={
-                                                "bh_creation_time_seconds": now_times.real_time_seconds,
-                                                "bh_creation_agent_time_seconds": now_times.agent_time_seconds
+                                                "bh_creation_real_timeseconds": now_times.real_timeseconds,
+                                                "bh_creation_agent_timeseconds": now_times.agent_timeseconds
                                             }
                                         ))
                                         self._agent_streaming_tool_messages[agent_id] = streaming_tool_messages
@@ -834,13 +864,12 @@ config: 仅重置配置
                         await store_manager.init_agent(agent_id)
                         message = "已重置该agent配置。"
                     elif reset_type == 'all':
-                        main_state = await self.main_graph.graph.aget_state(config)
-                        if not main_state.next:
-                            self.close_agent(agent_id)
+                        if not self.main_graph.is_agent_running(agent_id):
+                            await self.close_agent(agent_id)
                             await self.main_graph.graph.checkpointer.adelete_thread(agent_id)
                             memory_manager.delete_collection(agent_id, "original")
-                            memory_manager.delete_collection(agent_id, "summary")
-                            memory_manager.delete_collection(agent_id, "semantic")
+                            memory_manager.delete_collection(agent_id, "episodic")
+                            memory_manager.delete_collection(agent_id, "reflective")
                             await store_adelete_namespace(('agents', agent_id))
                             await load_config(agent_id)
                             await self.init_agent(agent_id)

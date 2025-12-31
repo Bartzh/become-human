@@ -1,9 +1,10 @@
-from become_human.time import AgentTimeSettings, seconds_to_datetime
-from become_human.store import StoreField, StoreModel
-
 from pydantic import BaseModel, Field
 from typing import Literal, Any, Optional, Union, Type
 from datetime import datetime, date
+
+from become_human.time import AgentTimeSettings, seconds_to_datetime
+from become_human.store import StoreField, StoreModel
+from become_human.message import InitalAIMessage
 
 
 # 新想法，通过结构化然后让AI生成所有没有指定的细节
@@ -19,7 +20,8 @@ class MainSettings(StoreModel):
     _readable_name = "主要设置"
     role_prompt: str = StoreField(default="你是一个对陌生人也抱有基本尊重的普通人。你与他人是通过一个无聊天记录（阅后即焚）的即时通讯软件远程交流的。", readable_name="角色提示词")
     instruction_prompt: str = StoreField(default="打个招呼吧。", readable_name="引导提示词", description="作为agent的第一条用户消息出现，对agent进行引导。")
-    react_instruction: bool = StoreField(default=False, readable_name="反应引导", description="是否以instruction_prompt调用agent。")
+    initial_ai_messages: list[InitalAIMessage] = StoreField(default_factory=list, readable_name="初始AI消息（列表）", description="初始AI消息，作为instruction_prompt的回复，不是必须的。会在列表中随机选择一条")
+    react_instruction: bool = StoreField(default=False, readable_name="反应引导", description="是否以instruction_prompt调用agent，这会覆盖initial_ai_messages。")
     role_description: str = StoreField(default="应该是一个有用的助手吧。", readable_name="展示用角色描述", description="直接向用户显示的一段文本，描述这个角色")
     active_time_range: tuple[float, float] = StoreField(default=(1800.0, 7200.0), readable_name='活跃时长随机范围', description="活跃时间随机范围（最小值和最大值），在这之后进入休眠状态")
     always_active: bool = StoreField(default=False, readable_name="保持活跃", description="是否一直处于活跃状态，也即不存在agent因不活跃而不回复消息的情况。若是，则active_time_range将仅用作回收消息等功能，且self_call依然有效，只有wakeup_call会失效")
@@ -44,9 +46,9 @@ class RecyclingSettings(StoreModel):
     cleanup_target_size: int = StoreField(default=2000, readable_name='非活跃清理目标大小', description="非活跃清理后目标大小，单位为Tokens")
 
 class MemoryRetrievalConfig(BaseModel):
-    k: int = Field(default=18, ge=0, description="检索返回的记忆数量")
-    fetch_k: int = Field(default=100, ge=0, description="从多少个结果中筛选出最终的结果")
-    stable_k: int = Field(default=9, ge=0, description="最终显示几个完整的记忆，剩下的记忆会被简略化")
+    k: int = Field(default=16, ge=0, description="检索返回的记忆数量")
+    fetch_k: int = Field(default=250, ge=0, description="从多少个结果中筛选出最终的结果")
+    stable_k: int = Field(default=10, ge=0, description="最终显示几个完整的记忆，剩下的记忆会被简略化")
     depth: int = Field(default=2, ge=0, description="检索的记忆深度，会在0之间随机取值，指被检索记忆的相邻n个记忆也会被召回")
     original_ratio: float = Field(default=2.0, description="检索结果中原始记忆出现的初始比例", ge=0.0)
     episodic_ratio: float = Field(default=4.0, description="检索结果中情景记忆出现的初始比例", ge=0.0)
@@ -62,8 +64,8 @@ class RetrievalSettings(StoreModel):
     _readable_name = "检索设置"
     active_retrieval_config: MemoryRetrievalConfig = StoreField(default_factory=MemoryRetrievalConfig, readable_name="主动检索配置")
     passive_retrieval_config: MemoryRetrievalConfig = StoreField(default_factory=lambda: MemoryRetrievalConfig(
-        k=10,
-        fetch_k=100,
+        k=8,
+        fetch_k=150,
         stable_k=5,
         depth=1,
         original_ratio=2.5,
@@ -74,6 +76,7 @@ class RetrievalSettings(StoreModel):
         diversity_weight=0.2,
         strength=0.4
     ), readable_name="被动检索配置")
+    passive_retrieval_ttl: float = StoreField(default=3600.0, readable_name='被动检索存活时长', description="被动检索消息的存活时长，单位为秒，到点后会被自动清理，设为0.0则不清理")
 
 class AgentSettings(StoreModel):
     _namespace = ('settings',)
@@ -104,8 +107,9 @@ def format_character_settings(settings: MainSettings, indent: int = 4, prefix: s
         return character_settings
     person = settings.character_settings
     character_settings = _format_character_setting(Person, person.model_dump())
-    if settings.sleep_time_range:
-        character_settings["睡眠时间段"] = f"{seconds_to_datetime(settings.sleep_time_range[0]).time()} ~ {seconds_to_datetime(settings.sleep_time_range[1]).time()}"
+    # always_active的话就当它不会睡觉了
+    if settings.sleep_time_range and not settings.always_active:
+        character_settings["睡觉时间段"] = f"{seconds_to_datetime(settings.sleep_time_range[0]).time()} ~ {seconds_to_datetime(settings.sleep_time_range[1]).time()}"
     def _dict_to_readable_string(d: dict, plus: int = 4, prefix: str = '- ', indent=0):
         result = ""
         for key, value in d.items():

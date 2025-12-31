@@ -382,41 +382,41 @@ class TestTimesClass:
         real_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         times = Times(setting=self.settings, time=real_time, is_agent_time=False)
         
-        assert times.real_time == real_time
+        assert times.real_datetime == real_time
         assert times.time_settings == self.settings
-        assert times.agent_time.tzinfo is not None
+        assert times.agent_datetime.tzinfo is not None
     
     def test_times_init_real_time_seconds(self):
         """测试使用真实时间秒数初始化"""
         current_seconds = now_seconds()
         times = Times(setting=self.settings, time=current_seconds, is_agent_time=False)
         
-        assert times.real_time_seconds == current_seconds
-        assert isinstance(times.real_time, datetime)
+        assert times.real_timeseconds == current_seconds
+        assert isinstance(times.real_datetime, datetime)
     
     def test_times_init_default_time(self):
         """测试使用默认时间初始化"""
         times = Times(setting=self.settings)
         
-        assert isinstance(times.real_time, datetime)
-        assert isinstance(times.real_time_seconds, float)
+        assert isinstance(times.real_datetime, datetime)
+        assert isinstance(times.real_timeseconds, float)
     
     def test_times_init_agent_time(self):
         """测试使用agent时间初始化"""
         agent_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         times = Times(setting=self.settings, time=agent_time, is_agent_time=True)
         
-        assert times.agent_time == agent_time
+        assert times.agent_datetime == agent_time
         assert times.time_settings == self.settings
-        assert isinstance(times.real_time, datetime)
+        assert isinstance(times.real_datetime, datetime)
     
     def test_times_init_agent_time_seconds(self):
         """测试使用agent时间秒数初始化"""
         current_seconds = now_seconds()
         times = Times(setting=self.settings, time=current_seconds, is_agent_time=True)
         
-        assert times.agent_time_seconds == current_seconds
-        assert isinstance(times.agent_time, datetime)
+        assert times.agent_timeseconds == current_seconds
+        assert isinstance(times.agent_datetime, datetime)
     
     def test_times_init_agent_time_no_setting(self):
         """测试agent时间无设置时的错误"""

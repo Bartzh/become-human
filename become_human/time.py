@@ -223,15 +223,17 @@ def parse_timedelta(time_str: str) -> timedelta:
 
 
 class Times:
-    """旨在需要两个以上的时间种类时方便地完成各类型时间的转换
+    """旨在需要两个以上的时间种类时方便地完成各类型时间的转换，也方便传递
 
     通过提供四种时间之一（或留空取当前时间）快速获取其他三种时间
-    
-    is_agent_time: 指提供的time是否是agent时间，若未提供则不要设置此项"""
-    real_time: datetime
-    real_time_seconds: float
-    agent_time: datetime
-    agent_time_seconds: float
+
+    is_agent_time: 指提供的time是否是agent时间，若未提供则不要设置此项
+
+    若没有提供setting，则不会有agent时间，获取它们会报错"""
+    real_datetime: datetime
+    real_timeseconds: float
+    agent_datetime: datetime
+    agent_timeseconds: float
     time_settings: AgentTimeSettings
 
     def __init__(self, setting: Optional[AgentTimeSettings] = None, time: Optional[Union[datetime, float]] = None, is_agent_time: bool = False):
@@ -242,21 +244,21 @@ class Times:
                 raise ValueError("is_agent_time时必须提供时区信息")
             self.time_settings = setting
             if isinstance(time, (float, int)):
-                self.agent_time_seconds = time
-                self.agent_time = agent_seconds_to_datetime(time, setting)
+                self.agent_timeseconds = time
+                self.agent_datetime = agent_seconds_to_datetime(time, setting)
             else:
-                self.agent_time = time
-                self.agent_time_seconds = datetime_to_seconds(self.agent_time)
-            self.real_time = agent_time_to_real_time(self.agent_time, setting)
-            self.real_time_seconds = datetime_to_seconds(self.real_time)
+                self.agent_datetime = time
+                self.agent_timeseconds = datetime_to_seconds(self.agent_datetime)
+            self.real_datetime = agent_time_to_real_time(self.agent_datetime, setting)
+            self.real_timeseconds = datetime_to_seconds(self.real_datetime)
         else:
             if time is None:
                 time = utcnow()
             elif isinstance(time, (float, int)):
                 time = seconds_to_datetime(time)
-            self.real_time = time
-            self.real_time_seconds = datetime_to_seconds(self.real_time)
+            self.real_datetime = time
+            self.real_timeseconds = datetime_to_seconds(self.real_datetime)
             if setting is not None:
                 self.time_settings = setting
-                self.agent_time = real_time_to_agent_time(self.real_time, setting)
-                self.agent_time_seconds = datetime_to_seconds(self.agent_time)
+                self.agent_datetime = real_time_to_agent_time(self.real_datetime, setting)
+                self.agent_timeseconds = datetime_to_seconds(self.agent_datetime)

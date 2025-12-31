@@ -10,6 +10,7 @@ dashscope_api_key = os.getenv('DASHSCOPE_API_KEY')
 dashscope_api_base = os.getenv('DASHSCOPE_API_BASE')
 dashscope_search_model = os.getenv('DASHSCOPE_SEARCH_MODEL_NAME')
 
+# 这个工具名似乎与openai/anthropic等厂商的内置工具名冲突？如果将此工具设置为tool_choice可能会有影响
 @tool
 async def web_search(query: Annotated[str, '使用自然语言的搜索语句']) -> str:
     """使用网络获取信息。这适用于获取未知的信息，或是为了确认信息真实可靠，尤其适合获取那些具有强时效性的信息。"""
@@ -74,7 +75,7 @@ async def web_search(query: Annotated[str, '使用自然语言的搜索语句'])
         if isinstance(response, dict) and "messages" in response:
             last_message = response["messages"][-1]
             if hasattr(last_message, "content"):
-                return last_message.content
+                return getattr(last_message, "content")
             elif isinstance(last_message, dict) and "content" in last_message:
                 return last_message['content']
 

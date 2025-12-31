@@ -1,12 +1,7 @@
 import json
 from typing import Union, Optional, Any
 from typing_inspect import get_args, get_origin
-import os
 from pydantic import BaseModel
-
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, AnyMessage
-
-from become_human.time import format_time, AnyTz
 
 def is_valid_json(json_string: str) -> bool:
     try:
@@ -14,48 +9,6 @@ def is_valid_json(json_string: str) -> bool:
         return True
     except json.decoder.JSONDecodeError:
         return False
-
-
-def format_human_message_for_ai(message: HumanMessage) -> str:
-    return '<others>\n' + "\n".join(extract_text_parts(message.content)) + '\n</others>'
-
-def format_ai_message_for_ai(message: AIMessage, time_zone: Optional[AnyTz] = None) -> str:
-    message_string = f"<me>\n我的思考: {"\n".join(extract_text_parts(message.content))}\n\n"
-    if message.tool_calls:
-        for tool_call in message.tool_calls:
-            message_string += f"我的动作: {tool_call['name']}({to_json_like_string(tool_call['args'])})\n"
-    else:
-        message_string = f'[{format_time(message.additional_kwargs.get('bh_creation_agent_time_seconds'), time_zone)}]\n' + message_string
-    return message_string.strip() + '\n</me>'
-
-def format_tool_message_for_ai(message: ToolMessage, time_zone: Optional[AnyTz] = None) -> str:
-    return f"<action>\n[{format_time(message.additional_kwargs.get('bh_creation_agent_time_seconds'), time_zone)}]\n动作 {message.name} 的反馈: {"\n".join(extract_text_parts(message.content))}\n</action>"
-
-def format_message_for_ai(message: AnyMessage, time_zone: Optional[AnyTz] = None) -> str:
-    if isinstance(message, HumanMessage):
-        return format_human_message_for_ai(message)
-    elif isinstance(message, AIMessage):
-        return format_ai_message_for_ai(message, time_zone)
-    elif isinstance(message, ToolMessage):
-        return format_tool_message_for_ai(message, time_zone)
-    return "<unsupported_message_type />"
-
-def format_messages_for_ai(messages: list[AnyMessage], time_zone: Optional[AnyTz] = None) -> str:
-    return '\n\n\n'.join([format_message_for_ai(message, time_zone) for message in messages])
-
-
-def extract_text_parts(content: Union[list, str]) -> list[str]:
-    contents = []
-    if isinstance(content, str):
-        contents.append(content)
-    elif isinstance(content, list):
-        for c in content:
-            if isinstance(c, str):
-                contents.append(c)
-            elif isinstance(c, dict):
-                if c.get("type") == "text" and isinstance(c.get("text"), str):
-                    contents.append(c["text"])
-    return contents
 
 
 def is_that_type(type_hint: Any, target_class: type) -> bool:

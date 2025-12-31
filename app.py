@@ -7,7 +7,6 @@ import bcrypt
 import os
 import re
 import json
-from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -22,7 +21,7 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.messages import AnyMessage, ToolMessage, BaseMessage, AIMessage, HumanMessage, RemoveMessage
 
 from become_human.agent_manager import AgentManager
-from become_human.utils import extract_text_parts
+from become_human.message import extract_text_parts
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 
 #from fastapi.middleware.cors import CORSMiddleware
@@ -162,22 +161,15 @@ async def input_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
     user_id = payload['sub']
     agent_id = user_input.get("agent_id")
     await verify_agent_accessible(user_id, agent_id)
-    config = {"configurable": {"thread_id": agent_id}}
 
     is_admin = users_db[user_id].get('is_admin')
 
-    await agent_manager.call_agent_with_command(
+    asyncio.create_task(agent_manager.call_agent_with_command(
         user_input=extracted_message,
         agent_id=agent_id,
         is_admin=is_admin,
         user_name=user_input.get("user_name")
-    )
-
-    main_state = await agent_manager.main_graph.graph.aget_state(config)
-    main_messages = await agent_manager.main_graph.get_messages(agent_id)
-    new_messages = main_state.values["new_messages"]
-    print(new_messages)
-    print(f'{count_tokens_approximately(main_messages)} tokens')
+    ))
 
     return Response()
 
