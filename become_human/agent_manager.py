@@ -247,6 +247,7 @@ class AgentManager:
 
         # 如果agent已有调用，取消以下任务
         if self.main_graph.is_agent_running(agent_id):
+            self.activated_agent_id_datas[agent_id]["on_trigger_finished"].set()
             return
 
         # 自动清理被动检索
