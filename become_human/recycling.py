@@ -374,7 +374,7 @@ async def recycle_original_memories(agent_id: str, input_messages: list[AnyMessa
     messages_len = len(content_and_kwargs)
 
     for i, message in enumerate(content_and_kwargs):
-        stable_mult = random.expovariate(1.0) #TODO:这个值应该由文本的情感强烈程度来决定
+        stable_mult = random.expovariate(0.8) #TODO:这个值应该由文本的情感强烈程度来决定
         creation_agent_time_seconds = message['kwargs'].get("bh_creation_agent_timeseconds", current_agent_timeseconds)
         creation_agent_datetime = agent_seconds_to_datetime(creation_agent_time_seconds, time_settings)
         extracted_memories.append(InitialMemory(
@@ -475,7 +475,7 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
     base_stable_time = store_settings.recycling.base_stable_time
     memories = [InitialMemory(
         content=memory,
-        stable_time=random.expovariate(0.3) * base_stable_time,
+        stable_time=random.expovariate(0.4) * base_stable_time,
         type="reflective",
         creation_agent_datetime=times_after.agent_datetime,
         id=ids[i],
@@ -485,7 +485,7 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
     if 'original' in get_activated_memory_types():
         memories.append(InitialMemory(
             content=process[1].content,
-            stable_time=random.expovariate(0.3) * base_stable_time,
+            stable_time=random.expovariate(0.4) * base_stable_time,
             type="original",
             creation_agent_datetime=times_after.agent_datetime,
             id=process[1].id,
