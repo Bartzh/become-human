@@ -195,165 +195,166 @@ class AgentManager:
             return
         self.activated_agent_id_datas[agent_id]['on_trigger_finished'].clear()
 
-        config = {"configurable": {"thread_id": agent_id}}
-        agent_store = await store_manager.get_agent(agent_id)
-        agent_settings = agent_store.settings
-        agent_states = agent_store.states
+        try:
+            config = {"configurable": {"thread_id": agent_id}}
+            agent_store = await store_manager.get_agent(agent_id)
+            agent_settings = agent_store.settings
+            agent_states = agent_store.states
 
-        # 获取时间
-        current_times = Times(agent_settings.main.time_settings)
+            # 获取时间
+            current_times = Times(agent_settings.main.time_settings)
 
-        # 如果是首次运行，则添加或发送引导消息
-        if agent_states.is_first_time:
-            agent_states.is_first_time = False
-            if self.main_graph.is_agent_running(agent_id):
-                logger.warning(f"Agent {agent_id} 已被调用，将跳过引导消息。")
-            else:
-                instruction_message = construct_system_message(
-                    f'''当前时间是：{format_time(current_times.agent_datetime)}。
+            # 如果是首次运行，则添加或发送引导消息
+            if agent_states.is_first_time:
+                agent_states.is_first_time = False
+                if self.main_graph.is_agent_running(agent_id):
+                    logger.warning(f"Agent {agent_id} 已被调用，将跳过引导消息。")
+                else:
+                    instruction_message = construct_system_message(
+                        f'''当前时间是：{format_time(current_times.agent_datetime)}。
 这是你被初始化以来的第一条消息。如果你看到这条消息，说明在此消息之前你还没有收到过任何来自用户的消息。
 这意味着你的“记忆”暂时是空白的，如果检索记忆时提示“没有找到任何匹配的记忆。”或检索不到什么有用的信息，这是正常的。
 接下来是你与用户的初次见面，请根据你所扮演的角色以及以下的提示考虑应做出什么反应：\n''' + agent_settings.main.instruction_prompt,
-                    current_times
-                )
-                if agent_settings.main.react_instruction:
-                    await self.call_agent(instruction_message.text, agent_id, call_type='system')
-                else:
-                    instruction_messages = [instruction_message]
-                    if agent_settings.main.initial_ai_messages:
-                        instruction_messages.extend(
-                            random.choice(agent_settings.main.initial_ai_messages)
-                            .construct_messages(current_times)
-                        )
-                    await self.main_graph.update_messages(agent_id, instruction_messages)
+                        current_times
+                    )
+                    if agent_settings.main.react_instruction:
+                        await self.call_agent(instruction_message.text, agent_id, call_type='system')
+                    else:
+                        instruction_messages = [instruction_message]
+                        if agent_settings.main.initial_ai_messages:
+                            instruction_messages.extend(
+                                random.choice(agent_settings.main.initial_ai_messages)
+                                .construct_messages(current_times)
+                            )
+                        await self.main_graph.update_messages(agent_id, instruction_messages)
 
-        # 更新记忆
-        await self.process_timers(agent_id)
+            # 更新记忆
+            await self.process_timers(agent_id)
 
-        # 处理每天的任务
-        last_update_agent_datetime = agent_seconds_to_datetime(agent_states.last_update_agent_timeseconds, agent_settings.main.time_settings)
-        if (current_times.agent_datetime.day != last_update_agent_datetime.day or
-            current_times.agent_datetime.month != last_update_agent_datetime.month or
-            current_times.agent_datetime.year != last_update_agent_datetime.year):
+            # 处理每天的任务
+            last_update_agent_datetime = agent_seconds_to_datetime(agent_states.last_update_agent_timeseconds, agent_settings.main.time_settings)
+            if (current_times.agent_datetime.day != last_update_agent_datetime.day or
+                current_times.agent_datetime.month != last_update_agent_datetime.month or
+                current_times.agent_datetime.year != last_update_agent_datetime.year):
 
-            # 处理年龄（我觉得年龄应该靠自己想，而非程序计算）
-            if agent_settings.main.character_settings.birthday is not None:
-                age = relativedelta(current_times.agent_datetime.date(), agent_settings.main.character_settings.birthday).years
-                if age != agent_settings.main.character_settings.age:
-                    agent_settings.main.character_settings.age = age
+                # 处理年龄（我觉得年龄应该靠自己想，而非程序计算）
+                if agent_settings.main.character_settings.birthday is not None:
+                    age = relativedelta(current_times.agent_datetime.date(), agent_settings.main.character_settings.birthday).years
+                    if age != agent_settings.main.character_settings.age:
+                        agent_settings.main.character_settings.age = age
 
-        # 更新最后更新时间
-        agent_states.last_update_real_timeseconds = current_times.real_timeseconds
-        agent_states.last_update_agent_timeseconds = current_times.agent_timeseconds
+            # 更新最后更新时间
+            agent_states.last_update_real_timeseconds = current_times.real_timeseconds
+            agent_states.last_update_agent_timeseconds = current_times.agent_timeseconds
 
-        # 如果agent已有调用，取消以下任务
-        if self.main_graph.is_agent_running(agent_id):
-            self.activated_agent_id_datas[agent_id]["on_trigger_finished"].set()
-            return
+            # 如果agent已有调用，取消以下任务
+            if self.main_graph.is_agent_running(agent_id):
+                return
 
-        # 自动清理被动检索
-        passive_retrieval_ttl = agent_settings.retrieval.passive_retrieval_ttl
-        if passive_retrieval_ttl > 0.0:
-            passive_retrieval_messages_to_remove = await self.main_graph.get_messages(agent_id)
-            passive_retrieval_messages_to_remove = [
-                RemoveMessage(id=m.id) for m in passive_retrieval_messages_to_remove
-                if (
-                    m.additional_kwargs.get('bh_message_type', '') == 'passive_retrieval' and
-                    3600.0 >= abs(current_times.agent_timeseconds - m.additional_kwargs.get('bh_creation_agent_timeseconds', 0.0))
-                )
-            ]
-            if passive_retrieval_messages_to_remove:
-                await self.main_graph.update_messages(agent_id, passive_retrieval_messages_to_remove)
+            # 自动清理被动检索
+            passive_retrieval_ttl = agent_settings.retrieval.passive_retrieval_ttl
+            if passive_retrieval_ttl > 0.0:
+                passive_retrieval_messages_to_remove = await self.main_graph.get_messages(agent_id)
+                passive_retrieval_messages_to_remove = [
+                    RemoveMessage(id=m.id) for m in passive_retrieval_messages_to_remove
+                    if (
+                        m.additional_kwargs.get('bh_message_type', '') == 'passive_retrieval' and
+                        3600.0 >= abs(current_times.agent_timeseconds - m.additional_kwargs.get('bh_creation_agent_timeseconds', 0.0))
+                    )
+                ]
+                if passive_retrieval_messages_to_remove:
+                    await self.main_graph.update_messages(agent_id, passive_retrieval_messages_to_remove)
 
-        main_graph_state = await self.main_graph.graph.aget_state(config)
+            main_graph_state = await self.main_graph.graph.aget_state(config)
 
-        # 处理自我调用
-        self_call_time_secondses = main_graph_state.values.get("self_call_time_secondses", [])
-        wakeup_call_time_seconds = main_graph_state.values.get("wakeup_call_time_seconds")
-        active_self_call_time_secondses_and_notes = main_graph_state.values.get("active_self_call_time_secondses_and_notes", [])
-        can_call = False
-        if active_self_call_time_secondses_and_notes:
-            for seconds, note in active_self_call_time_secondses_and_notes:
-                if current_times.agent_timeseconds >= seconds:
-                    can_call = True
-                    self_call_type = 'active'
-                    break
-        if self_call_time_secondses and not can_call:
-            for seconds in self_call_time_secondses:
-                if current_times.agent_timeseconds >= seconds:
+            # 处理自我调用
+            self_call_time_secondses = main_graph_state.values.get("self_call_time_secondses", [])
+            wakeup_call_time_seconds = main_graph_state.values.get("wakeup_call_time_seconds")
+            active_self_call_time_secondses_and_notes = main_graph_state.values.get("active_self_call_time_secondses_and_notes", [])
+            can_call = False
+            if active_self_call_time_secondses_and_notes:
+                for seconds, note in active_self_call_time_secondses_and_notes:
+                    if current_times.agent_timeseconds >= seconds:
+                        can_call = True
+                        self_call_type = 'active'
+                        break
+            if self_call_time_secondses and not can_call:
+                for seconds in self_call_time_secondses:
+                    if current_times.agent_timeseconds >= seconds:
+                        can_call = True
+                        self_call_type = 'passive'
+                        break
+            if wakeup_call_time_seconds and not can_call:
+                if current_times.agent_timeseconds >= wakeup_call_time_seconds:
                     can_call = True
                     self_call_type = 'passive'
-                    break
-        if wakeup_call_time_seconds and not can_call:
-            if current_times.agent_timeseconds >= wakeup_call_time_seconds:
-                can_call = True
-                self_call_type = 'passive'
-        if can_call:
-            await self.call_agent('', agent_id, call_type='self', self_call_type=self_call_type)
+            if can_call:
+                await self.call_agent('', agent_id, call_type='self', self_call_type=self_call_type)
 
-        # 如果没有自我调用，开始尝试自动回收闲置上下文，先判断是否已超出活跃时间
-        elif main_graph_state.values.get("active_time_seconds") and current_times.agent_timeseconds > main_graph_state.values.get("active_time_seconds"):
-            messages = await self.main_graph.get_messages(agent_id)
-            # 最后一条消息如果为HumanMessage说明agent还没有响应
-            if not isinstance(messages[-1], HumanMessage):
-                not_extracted_messages = [m for m in messages if not m.additional_kwargs.get("bh_extracted")]
-                # 再次判断是否有来自用户的新消息
-                if [m for m in not_extracted_messages if isinstance(m, HumanMessage) and not m.additional_kwargs.get("bh_from_system") and not m.additional_kwargs.get("bh_do_not_store")]:
+            # 如果没有自我调用，开始尝试自动回收闲置上下文，先判断是否已超出活跃时间
+            elif main_graph_state.values.get("active_time_seconds") and current_times.agent_timeseconds > main_graph_state.values.get("active_time_seconds"):
+                messages = await self.main_graph.get_messages(agent_id)
+                # 最后一条消息如果为HumanMessage说明agent还没有响应
+                if not isinstance(messages[-1], HumanMessage):
+                    not_extracted_messages = [m for m in messages if not m.additional_kwargs.get("bh_extracted")]
+                    # 再次判断是否有来自用户的新消息
+                    if [m for m in not_extracted_messages if isinstance(m, HumanMessage) and not m.additional_kwargs.get("bh_from_system") and not m.additional_kwargs.get("bh_do_not_store")]:
 
-                    remove_messages = []
+                        remove_messages = []
 
-                    # recycling
-                    memory_types = get_activated_memory_types()
-                    recycles = {t: recycle_memories(t, agent_id, not_extracted_messages, self.structured_model) for t in memory_types}
-                    recycle_results = {}
-                    if len(recycles) > 0:
-                        graph_results = await asyncio.gather(*recycles.values())
-                        recycle_results = {k: graph_results[i] for i, k in enumerate(recycles.keys())}
+                        # recycling
+                        memory_types = get_activated_memory_types()
+                        recycles = {t: recycle_memories(t, agent_id, not_extracted_messages, self.structured_model) for t in memory_types}
+                        recycle_results = {}
+                        if len(recycles) > 0:
+                            graph_results = await asyncio.gather(*recycles.values())
+                            recycle_results = {k: graph_results[i] for i, k in enumerate(recycles.keys())}
 
-                    # cleanup
-                    is_cleanup = agent_settings.recycling.cleanup_on_non_active_recycling
-                    if is_cleanup:
-                        #await main_graph.update_messages(agent_id, [RemoveMessage(id=m.id) for m in messages])
-                        max_tokens = agent_settings.recycling.cleanup_target_size
-                        if max_tokens > 0:
-                            if count_tokens_approximately(messages) > max_tokens:
-                                new_messages: list[BaseMessage] = trim_messages(
-                                    messages=messages,
-                                    max_tokens=max_tokens,
-                                    token_counter=count_tokens_approximately,
-                                    strategy='last',
-                                    start_on=HumanMessage,
-                                    #allow_partial=True,
-                                    #text_splitter=RecursiveCharacterTextSplitter(chunk_size=max_tokens, chunk_overlap=0)
-                                )
-                                if not new_messages:
-                                    logger.warning("Trim messages failed on cleanup.")
-                                    new_messages = []
-                                excess_count = len(messages) - len(new_messages)
-                                old_messages = messages[:excess_count]
-                                remove_messages.extend([RemoveMessage(id=message.id) for message in old_messages])
-                                #update_messages = new_messages
-                        # max_tokens <= 0 则全部删除
-                        else:
-                            remove_messages = [RemoveMessage(id=REMOVE_ALL_MESSAGES)]
+                        # cleanup
+                        is_cleanup = agent_settings.recycling.cleanup_on_non_active_recycling
+                        if is_cleanup:
+                            #await main_graph.update_messages(agent_id, [RemoveMessage(id=m.id) for m in messages])
+                            max_tokens = agent_settings.recycling.cleanup_target_size
+                            if max_tokens > 0:
+                                if count_tokens_approximately(messages) > max_tokens:
+                                    new_messages: list[BaseMessage] = trim_messages(
+                                        messages=messages,
+                                        max_tokens=max_tokens,
+                                        token_counter=count_tokens_approximately,
+                                        strategy='last',
+                                        start_on=HumanMessage,
+                                        #allow_partial=True,
+                                        #text_splitter=RecursiveCharacterTextSplitter(chunk_size=max_tokens, chunk_overlap=0)
+                                    )
+                                    if not new_messages:
+                                        logger.warning("Trim messages failed on cleanup.")
+                                        new_messages = []
+                                    excess_count = len(messages) - len(new_messages)
+                                    old_messages = messages[:excess_count]
+                                    remove_messages.extend([RemoveMessage(id=message.id) for message in old_messages])
+                                    #update_messages = new_messages
+                            # max_tokens <= 0 则全部删除
+                            else:
+                                remove_messages = [RemoveMessage(id=REMOVE_ALL_MESSAGES)]
 
-                    # 更新与清理
-                    for m in not_extracted_messages:
-                        m.additional_kwargs["bh_extracted"] = True
-                    await self.main_graph.update_messages(agent_id, not_extracted_messages + remove_messages)
+                        # 更新与清理
+                        for m in not_extracted_messages:
+                            m.additional_kwargs["bh_extracted"] = True
+                        await self.main_graph.update_messages(agent_id, not_extracted_messages + remove_messages)
 
-                    # 若有，将reflective的思考过程加入messages
-                    if recycle_results.get('reflective'):
-                        await self.main_graph.update_messages(agent_id, recycle_results.get('reflective', []))
+                        # 若有，将reflective的思考过程加入messages
+                        if recycle_results.get('reflective'):
+                            await self.main_graph.update_messages(agent_id, recycle_results.get('reflective', []))
 
-        # 闲置过久（两个星期）则关闭agent
-        elif (
-            agent_id in self.activated_agent_id_datas and
-            current_times.real_timeseconds > (self.activated_agent_id_datas.get(agent_id, {}).get("created_at", 0) + 1209600)
-        ):
-            await self.close_agent(agent_id)
+            # 闲置过久（两个星期）则关闭agent
+            elif (
+                agent_id in self.activated_agent_id_datas and
+                current_times.real_timeseconds > (self.activated_agent_id_datas.get(agent_id, {}).get("created_at", 0) + 1209600)
+            ):
+                await self.close_agent(agent_id)
 
-        self.activated_agent_id_datas[agent_id]["on_trigger_finished"].set()
+        finally:
+            self.activated_agent_id_datas[agent_id]["on_trigger_finished"].set()
 
 
     async def init_agent(self, agent_id: str):

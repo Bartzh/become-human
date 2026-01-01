@@ -465,8 +465,8 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
     ))
     process.extend(InitalAIMessage(
         tool_calls=[InitalToolCall(
-            name={RECORD_THOUGHTS},
-            args={{RECORD_THOUGHTS_CONTENT}: extracted_reflective_memories["reflection_process"]},
+            name=RECORD_THOUGHTS,
+            args={RECORD_THOUGHTS_CONTENT: extracted_reflective_memories["reflection_process"]},
             result_content=RECORD_THOUGHTS_TOOL_CONTENT,
             result_artifact={"bh_do_not_store": True, "bh_streaming": True}
         )]
