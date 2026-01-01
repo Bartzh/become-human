@@ -24,6 +24,7 @@ deno.exe
 
 config
 data
+logs
 
 app_*.py
 

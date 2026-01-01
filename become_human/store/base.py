@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field, TypeAdapter, PydanticSchemaGenerationErro
 from pydantic_core import ValidationError
 from typing import Literal, Any, Iterable, Optional, Union, Callable, get_type_hints
 import asyncio
-from warnings import warn
+from loguru import logger
 
 STORE_PATH = './data/store.sqlite'
 
@@ -132,7 +132,7 @@ async def store_queue_listener():
         elif item['action'] == 'stop':
             if store_queue.empty():
                 listener_task_is_running = False
-                print('store listener task stopped.')
+                logger.info('store listener task stopped.')
             else:
                 await store_queue.put(item)
 listener_task: Optional[asyncio.Task] = None
@@ -188,7 +188,7 @@ class StoreModel:
                 try:
                     value = adapter.validate_python(item.value.get('value'))
                 except ValidationError as e:
-                    warn(f"Invalid value for {item.key}: {e}, from store.")
+                    logger.warning(f"Invalid value for {item.key}: {e}, from store.")
                     continue
                 cached[item.key] = StoreItem(
                     readable_name=item.value.get('readable_name'),

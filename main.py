@@ -1,7 +1,10 @@
 import os
 import asyncio
+from loguru import logger
 from become_human.agent_manager import AgentManager
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
+
+logger.add("logs/main.log", rotation="1 day", retention="2 week", enqueue=True, level=os.getenv("LOG_LEVEL", "INFO").upper())
 
 agent_id = os.getenv('MAIN_AGENT_ID', "default_agent_1")
 user_name = os.getenv('MAIN_USER_NAME')

@@ -1,10 +1,10 @@
 import os
-from warnings import warn
 from typing import Optional, Literal, Type, Union, get_type_hints, Any
 from pydantic import BaseModel, TypeAdapter
 from pydantic_core import ValidationError
 from tomlkit import load, loads, dump, document, table, comment, nl, TOMLDocument
 from tomlkit.items import Table
+from loguru import logger
 
 from langgraph.store.base import PutOp
 
@@ -57,6 +57,7 @@ DEFAULT_AGENTS = {
             'instruction_prompt': '你接下来见到的第一个用户就是你的开发者。',
             'react_instruction': True,
             'always_active': True,
+            'self_call_time_ranges': []
         }
     }
 }
@@ -228,7 +229,7 @@ async def load_config(agent_ids: Optional[Union[list[str], str]] = None, force: 
                     if isinstance(value, dict):
                         put_ops.extend(_write_config_to_store(value, namespace+(key,), hint_type))
                     else:
-                        warn(f"Invalid value for {key} in config file: expected dict for StoreModel, got {type(value)}")
+                        logger.warning(f"Invalid value for {key} in config file: expected dict for StoreModel, got {type(value)}")
                 else:
                     # 如果值是None，则视为删除数据
                     if value is None:
@@ -238,7 +239,7 @@ async def load_config(agent_ids: Optional[Union[list[str], str]] = None, force: 
                     try:
                         validated_value = adapter.validate_python(value)
                     except ValidationError as e:
-                        warn(f"Invalid value for {key} in config file: {e}")
+                        logger.warning(f"Invalid value for {key} in config file: {e}")
                         continue
                     # dump所有的BaseModel
                     if isinstance(validated_value, BaseModel):

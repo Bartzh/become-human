@@ -1,6 +1,3 @@
-from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import StreamingResponse, Response
-from fastapi.security import OAuth2PasswordBearer
 import jwt
 import asyncio, uvicorn
 import bcrypt
@@ -10,20 +7,28 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from contextlib import asynccontextmanager
-from warnings import warn
+from loguru import logger
+
+from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import StreamingResponse, Response, JSONResponse
+from fastapi.security import OAuth2PasswordBearer
 
 from pathlib import Path
 import aiohttp
 import aiosqlite
 from webpush import WebPush, WebPushSubscription
 
-from langchain_core.messages import AnyMessage, ToolMessage, BaseMessage, AIMessage, HumanMessage, RemoveMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from become_human.agent_manager import AgentManager
 from become_human.message import extract_text_parts
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 
 #from fastapi.middleware.cors import CORSMiddleware
+
+logger.add("logs/app.log", rotation="1 day", retention="2 weeks", enqueue=True, level=os.getenv("LOG_LEVEL", "INFO").upper())
 
 
 @asynccontextmanager
@@ -42,6 +47,38 @@ async def lifespan(app: FastAPI):
     await agent_manager.close_manager()
 
 app = FastAPI(lifespan=lifespan)
+
+
+# 1. 捕获所有未处理的 Exception（500 错误）
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.opt(exception=exc).error("未处理的服务器异常: {}", str(exc))
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal Server Error"}
+    )
+
+# 2. 捕获 HTTPException（如 404, 400 等）
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    # 可选：只记录 5xx，或全部记录
+    if exc.status_code >= 500:
+        logger.error("HTTP 5xx 错误: {} {}", exc.status_code, exc.detail)
+    else:
+        logger.warning("客户端错误: {} {}", exc.status_code, exc.detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail}
+    )
+
+# 3. 捕获请求验证错误（Pydantic）
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.warning("请求参数校验失败: {}", exc.errors())
+    return JSONResponse(
+        status_code=422,
+        content={"detail": jsonable_encoder(exc.errors())}
+    )
 
 
 #app.add_middleware(
@@ -129,7 +166,7 @@ async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
                     if tool_call["args"].get(SEND_MESSAGE_CONTENT):
                         messages.append({"role": "ai", "content": tool_call["args"][SEND_MESSAGE_CONTENT], "id": f'{message.id}.{tool_call["id"]}', "name": None})
                     else:
-                        warn(f'{SEND_MESSAGE}意外的没有参数，也可能是打断导致的概率问题')
+                        logger.warning(f'{SEND_MESSAGE}意外的没有参数，也可能是打断导致的概率问题')
         elif isinstance(message, HumanMessage):
             if isinstance(message.content, str):
                 content = human_message_pattern.sub('', message.text)
@@ -212,13 +249,13 @@ async def sse(token: str = Depends(oauth2_scheme)):
                     yield sse_heartbeat_string
 
         except asyncio.CancelledError:
-            print(f"SSE连接被取消: {connection_id}")
+            logger.info(f"SSE连接被取消: {connection_id}")
             raise
         except Exception as e:
-            print(f"SSE连接异常: {connection_id}, 错误: {str(e)}")
+            logger.error(f"SSE连接异常: {connection_id}, 错误: {str(e)}")
             raise
         finally:
-            print(f"SSE连接已关闭: {connection_id}")
+            logger.info(f"SSE连接已关闭: {connection_id}")
 
     # 添加更多防止缓存的头部
     return StreamingResponse(
@@ -274,7 +311,7 @@ async def login(request: Request):
         raise HTTPException(status_code=400, detail="Password not found")
     hashedpassword: str = r.get("password")
     if not bcrypt.checkpw(pw.encode('utf-8'), hashedpassword.encode('utf-8')):
-        print("Incorrect username or password")
+        logger.info("Incorrect username or password")
         raise HTTPException(status_code=400, detail="Incorrect username or password")
 
     access_token = create_access_token(data={"sub": username}, expires_delta=timedelta(weeks=2))

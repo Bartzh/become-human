@@ -1,4 +1,8 @@
 from typing import Sequence, Dict, Any, Union, Callable, Optional, Literal
+from datetime import datetime, timezone, timedelta
+import random
+import asyncio
+from loguru import logger
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.runtime import Runtime
@@ -19,6 +23,9 @@ from langchain_core.messages.utils import trim_messages, count_tokens_approximat
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+from trustcall import create_extractor
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -37,16 +44,6 @@ from become_human.tools import CORE_TOOLS
 from become_human.tools.send_message import SEND_MESSAGE_TOOL_CONTENT, SEND_MESSAGE, SEND_MESSAGE_CONTENT
 from become_human.tools.record_thoughts import RECORD_THOUGHTS
 from become_human.tools.retrieve_memories import RETRIEVE_MEMORIES
-
-from datetime import datetime, timezone, timedelta
-import random
-import asyncio
-from warnings import warn
-
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
-
-from trustcall import create_extractor
-
 
 
 
@@ -657,7 +654,7 @@ class MainGraph(BaseGraph):
                 #text_splitter=RecursiveCharacterTextSplitter(chunk_size=max_tokens, chunk_overlap=0)
             )
             if not new_messages:
-                warn("Trim messages failed on overflowing.")
+                logger.warning("Trim messages failed on overflowing.")
                 new_messages = []
             excess_count = len(messages) - len(new_messages)
             old_messages = messages[:excess_count]

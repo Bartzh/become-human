@@ -3,7 +3,7 @@ from typing import Union, Optional, Self
 from datetime import datetime, timezone, time, timedelta
 from dateutil.relativedelta import relativedelta
 import random
-from warnings import warn
+from loguru import logger
 from tzlocal import get_localzone
 
 from become_human.store.base import StoreModel, StoreField
@@ -96,7 +96,7 @@ class Schedule(BaseModel):
                         next_run_weekdays = next_run
                         while (next_run_weekdays.weekday() + 1) not in self.scheduled_weekdays:
                             if weekday_distance >= 7:
-                                warn(f"循环超过7次，{self.__repr_name__} 的weekdays参数有误，请检查：{str(self.scheduled_weekdays)}")
+                                logger.warning(f"循环超过7次，{self.__repr_name__} 的weekdays参数有误，请检查：{str(self.scheduled_weekdays)}")
                                 weekday_distance = 999
                                 break
                             next_run_weekdays += timedelta(days=1)
@@ -110,7 +110,7 @@ class Schedule(BaseModel):
                         monthdays = [min(d, last_day) for d in self.scheduled_monthdays]
                         while next_run_monthdays.day not in monthdays:
                             if monthday_distance >= 31:
-                                warn(f"循环超过31次，{self.__repr_name__} 的monthdays参数有误，请检查：{str(self.scheduled_monthdays)}")
+                                logger.warning(f"循环超过31次，{self.__repr_name__} 的monthdays参数有误，请检查：{str(self.scheduled_monthdays)}")
                                 monthday_distance = 999
                                 break
                             next_run_monthdays += timedelta(days=1)

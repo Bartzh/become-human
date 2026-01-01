@@ -2,7 +2,7 @@ from typing import Optional, Union, Any, Literal, Self
 import os
 import asyncio
 from dateutil.relativedelta import relativedelta
-from warnings import warn
+from loguru import logger
 from uuid import uuid4
 import random
 
@@ -74,6 +74,7 @@ class AgentManager:
 
 
     async def init_manager(self, heartbeat_interval: float = 5.0):
+        logger.info("Initializing agent manager...")
 
         req_envs = ["CHAT_MODEL_NAME", "STRUCTURED_MODEL_NAME"]
         for e in req_envs:
@@ -174,7 +175,7 @@ class AgentManager:
             await self.trigger_agents()
             self.on_heartbeat_finished.set()
             await asyncio.sleep(self.heartbeat_interval)
-        print("Heartbeat task stopped.")
+        logger.info("Heartbeat task stopped.")
 
 
     async def trigger_agents(self):
@@ -188,7 +189,7 @@ class AgentManager:
     async def trigger_agent(self, agent_id: str):
         """trigger单一agent，如果上一次trigger_agent正在运行则跳过"""
         if agent_id not in self.activated_agent_id_datas:
-            warn(f"Agent {agent_id} 没有在activated_agent_ids中找到，说明存在非法的trigger_agent调用，请检查代码。")
+            logger.warning(f"Agent {agent_id} 没有在activated_agent_ids中找到，说明存在非法的trigger_agent调用，需检查代码。")
             return
         if not self.activated_agent_id_datas[agent_id]['on_trigger_finished'].is_set():
             return
@@ -206,7 +207,7 @@ class AgentManager:
         if agent_states.is_first_time:
             agent_states.is_first_time = False
             if self.main_graph.is_agent_running(agent_id):
-                warn(f"Agent {agent_id} 已被调用，将跳过引导消息。")
+                logger.warning(f"Agent {agent_id} 已被调用，将跳过引导消息。")
             else:
                 instruction_message = construct_system_message(
                     f'''当前时间是：{format_time(current_times.agent_datetime)}。
@@ -326,7 +327,7 @@ class AgentManager:
                                     #text_splitter=RecursiveCharacterTextSplitter(chunk_size=max_tokens, chunk_overlap=0)
                                 )
                                 if not new_messages:
-                                    warn("Trim messages failed on cleanup.")
+                                    logger.warning("Trim messages failed on cleanup.")
                                     new_messages = []
                                 excess_count = len(messages) - len(new_messages)
                                 old_messages = messages[:excess_count]
@@ -375,7 +376,7 @@ class AgentManager:
         store_manager.close_agent(agent_id)
 
     async def close_manager(self):
-        print("wait for the last heartbeat to stop")
+        logger.info("wait for the last heartbeat to close agent manager")
         self.heartbeat_is_running = False
         if self.heartbeat_task is not None:
             await self.on_heartbeat_finished.wait()
@@ -388,7 +389,7 @@ class AgentManager:
 
         await self.main_graph.conn.close()
         await store_stop_listener()
-        print("Graphs closed")
+        logger.info("agent manager closed")
 
 
     async def call_agent_with_command(
@@ -456,7 +457,7 @@ class AgentManager:
         # 如果有未处理的工具消息，则清理。这是意外情况
         elif self._agent_streaming_tool_messages.get(agent_id):
             del self._agent_streaming_tool_messages[agent_id]
-            warn('agent已结束但有未处理的工具消息，已清理')
+            logger.warning('agent已结束但有未处理的工具消息，已清理')
 
         # 随机时长的等待，模拟人不会一直盯着新消息，也防止短时间的双发
         if call_type == 'human':
@@ -490,7 +491,7 @@ class AgentManager:
         else:
             if self._agent_user_input_buffers.get(agent_id):
                 del self._agent_user_input_buffers[agent_id]
-                warn("在自我或系统调用时意外发现存在残留未处理的用户输入，已删除。")
+                logger.warning("在自我或系统调用时意外发现存在残留未处理的用户输入，已删除。")
 
         # 初始化变量
         context = MainContext(agent_id=agent_id, agent_run_id=agent_run_id)

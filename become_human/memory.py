@@ -6,7 +6,7 @@ from uuid import uuid4
 import numpy as np
 from numpy.typing import NDArray
 import jieba
-from warnings import warn
+from loguru import logger
 import random
 import os
 
@@ -311,7 +311,7 @@ class MemoryManager():
                 new_schedules.append(next_schedule)
         schedules.memory_update_schedules = new_schedules
 
-        #print(f'updated {update_count} memories for agent "{agent_id}".')
+        logger.debug(f'updated {update_count} memories for agent "{agent_id}".')
 
 
     async def update_memories(self, results: GetResult, memory_type: str, agent_id: str) -> None:
@@ -1320,7 +1320,7 @@ def tick_memory(metadata: dict, current_agent_time: Union[float, datetime]) -> d
         current_agent_time_seconds = current_agent_time
 
     if metadata["stable_time"] == 0.0:
-        print('意外的stable_time为0，metadata：' + str(metadata))
+        logger.warning('意外的stable_time为0，metadata：' + str(metadata))
         return {"forgot": True}
 
     x = (current_agent_time_seconds - metadata["last_accessed_agent_timeseconds"]) / metadata["stable_time"]
