@@ -215,10 +215,11 @@ class ChromaResults:
                     v = result[t][0][i]
                 else:
                     v = result[t][i]
+                tn = t[:-1] if t != 'data' else t
                 if t == "embeddings":
-                    datas[t] = np.array(v)
+                    datas[tn] = np.array(v)
                 else:
-                    datas[t] = v
+                    datas[tn] = v
             results.append(ChromaResult(**datas))
         return results
 

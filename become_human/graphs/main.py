@@ -149,9 +149,19 @@ class MainGraph(BaseGraph):
         # 如果所有的call都结束了，这时只可能是由用户发送消息导致触发，读取config增加一个新的self_call
         #if not state.self_call_time_secondses and not is_self_call and current_time_seconds >= active_time_seconds and not state.wakeup_call_time_seconds:
         # 第二种逻辑，只要在活跃时间之外发送消息，都会生成wakeup_call_time_seconds，增加self_call的机会
-        if not is_self_call and current_times.agent_timeseconds >= active_time_seconds and not state.wakeup_call_time_seconds:
-            wakeup_call_time_seconds = await generate_new_wakeup_call_timeseconds(agent_id, current_times.agent_datetime)
-            new_state["wakeup_call_time_seconds"] = wakeup_call_time_seconds
+        if (
+            runtime.context.call_type == 'human' and
+            current_times.agent_timeseconds >= active_time_seconds
+        ):
+            new_wakeup_call_time_seconds = await generate_new_wakeup_call_timeseconds(agent_id, current_times.agent_datetime)
+            if (
+                not state.wakeup_call_time_seconds or
+                state.wakeup_call_time_seconds > new_wakeup_call_time_seconds
+            ):
+                wakeup_call_time_seconds = new_wakeup_call_time_seconds
+                new_state["wakeup_call_time_seconds"] = wakeup_call_time_seconds
+            else:
+                wakeup_call_time_seconds = state.wakeup_call_time_seconds
         else:
             wakeup_call_time_seconds = state.wakeup_call_time_seconds
 
@@ -259,7 +269,7 @@ class MainGraph(BaseGraph):
         # 要么自我调用，要么在活跃状态时被用户调用
         if (
             can_self_call or
-            (not is_self_call and (current_times.agent_timeseconds < active_time_seconds or main_config.always_active)) or
+            (runtime.context.call_type == 'human' and (current_times.agent_timeseconds < active_time_seconds or main_config.always_active)) or
             runtime.context.call_type == 'system'
         ):
             return Command(update=new_state, goto='prepare_to_generate')
@@ -770,7 +780,7 @@ class MainGraph(BaseGraph):
 
     def _pop_messages_to_update(self, agent_id: str, agent_run_id: str, current_messages: Optional[list[AnyMessage]] = None, current_new_messages: list[AnyMessage] = []) -> tuple[list[BaseMessage], list[BaseMessage]]:
         """仅限图节点使用。用于在图运行时获取`agent_messages_to_update`中可能存在的消息
-        
+
         返回一个元组，第一个元素是需要更新至`messages`的消息列表，第二个元素是需要更新至`new_messages`的消息列表
 
         如果未提供`current_messages`和`current_new_messages`参数，则第二个元素返回空列表"""
@@ -842,7 +852,7 @@ async def generate_new_self_call_timesecondses(agent_id: str, current_time: date
     _delta = timedelta(hours=current_time.hour, minutes=current_time.minute, seconds=current_time.second, microseconds=current_time.microsecond)
     current_date = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
     self_call_time_secondses = []
-    # 首先看时间本身有没有在睡眠时间段
+    # 首先看时间本身有没有在睡眠时间段，如果有则先跳过
     if is_sleep_time(_delta.seconds):
         if sleep_time_start > sleep_time_end:
             _delta += timedelta(seconds=sleep_time_end + 86400 - _delta.seconds)
@@ -850,16 +860,19 @@ async def generate_new_self_call_timesecondses(agent_id: str, current_time: date
             _delta += timedelta(seconds=sleep_time_end - _delta.seconds)
 
     for time_range in time_ranges:
-        random_time = random.uniform(time_range[0], time_range[1])
-        new_time = random_time
-        random_timedelta = timedelta(seconds=random_time)
-        new_time += int(random_timedelta.seconds / (86400 - sleep_time_total)) * sleep_time_total
-        new_timedelta = timedelta(seconds=new_time) + _delta
+        random_seconds = random.uniform(time_range[0], time_range[1])
+        random_timedelta = timedelta(seconds=random_seconds)
+
+        # new_seconds是最终要添加的秒数
+        new_seconds = random_seconds
+        new_seconds += int(random_timedelta.seconds / (86400 - sleep_time_total)) * sleep_time_total
+        # new_timedelta只是用来检查是否在睡眠时间段
+        new_timedelta = timedelta(seconds=new_seconds) + _delta
         while is_sleep_time(new_timedelta.seconds):
-            new_time += sleep_time_total
+            new_seconds += sleep_time_total
             new_timedelta += timedelta(seconds=sleep_time_total)
 
-        _delta += timedelta(seconds=new_time)
+        _delta += timedelta(seconds=new_seconds)
         self_call_time_secondses.append(datetime_to_seconds(current_date + _delta))
     return self_call_time_secondses
 
