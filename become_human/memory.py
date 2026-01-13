@@ -1,3 +1,6 @@
+# 部分代码来自 langchain-chroma（MIT许可）
+# https://github.com/langchain-ai/langchain/tree/master/libs/partners/chroma
+
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Any, Iterator, Literal, Self, Union, Optional
@@ -39,7 +42,7 @@ from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_core.documents import Document
 from langchain_dev_utils.embeddings import load_embeddings
 
-from become_human.time import format_time, utcnow, real_time_to_agent_time, now_agent_seconds, datetime_to_seconds, now_agent_time, AnyTz
+from become_human.times import format_time, Times, now_agent_seconds, datetime_to_seconds, now_agent_time, AnyTz, seconds_to_datetime
 from become_human.store.settings import MemoryRetrievalConfig
 from become_human.store.manager import store_manager
 from become_human.utils import parse_env_array
@@ -251,7 +254,7 @@ class InitialMemory(BaseModel):
     """只作为add_memories的参数"""
     content: str = Field(description="The content of the memory")
     type: AnyMemoryType = Field(description="The type of the memory")
-    creation_agent_datetime: datetime = Field(description="The creation agent datetime of the memory")
+    creation_times: Times = Field(description="The creation times of the memory")
     stable_time: float = Field(description="The stable time of the memory", gt=0.0)
     id: str = Field(default_factory=lambda: str(uuid4()), description="The id of the memory")
     previous_memory_id: Optional[str] = Field(default=None, description="The previous memory id")
@@ -279,23 +282,16 @@ class MemoryManager():
 
 
     async def update_schedules(self, agent_id: str):
-        agent_model = await store_manager.get_agent(agent_id)
+        agent_model = await store_manager.get_builtin(agent_id)
 
         update_count = 0
         schedules = agent_model.schedules
 
-        settings = agent_model.settings
         types = get_activated_memory_types()
-        time_settings = settings.main.time_settings
-        current_time = utcnow()
-        current_agent_time = real_time_to_agent_time(current_time, time_settings)
+        times = Times.from_time_settings(agent_model.settings.main.time_settings)
         new_schedules = []
         for schedule in schedules.memory_update_schedules:
-            if schedule.agent_time_based:
-                time = current_agent_time
-            else:
-                time = current_time
-            next_schedule, triggered = schedule.tick(time)
+            next_schedule, triggered = schedule.tick(times)
             if triggered:
                 for t in types:
                     where = validated_where({'$and': [{'stable_time': item} for item in schedule.stable_time_range]})
@@ -317,7 +313,7 @@ class MemoryManager():
 
     async def update_memories(self, results: GetResult, memory_type: str, agent_id: str) -> None:
         time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
-        current_agent_time_seconds = now_agent_seconds(time_settings)
+        current_agent_subjective_timeseconds = now_agent_seconds(time_settings.subjective_time_setting)
         if not results["ids"]:
             return
         ids = results["ids"]
@@ -328,7 +324,7 @@ class MemoryManager():
         ids_new = []
         ids_to_delete = set()
         for i in range(len(ids)):
-            metadata_patch = tick_memory(metadatas[i], current_agent_time_seconds)
+            metadata_patch = tick_memory(metadatas[i], current_agent_subjective_timeseconds)
             if metadata_patch.get("forgot"):
                 ids_to_delete.add(ids[i])
             else:
@@ -341,40 +337,31 @@ class MemoryManager():
 
     async def add_memories(self, memories: list[InitialMemory], agent_id: str) -> None:
         docs: dict[str, list[Document]] = {t: [] for t in MEMORY_TYPES}
-        time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
-        current_agent_time_seconds = now_agent_seconds(time_settings)
+        agent_settings = await store_manager.get_settings(agent_id)
+        time_settings = agent_settings.main.time_settings
+        current_agent_subjective_timeseconds = now_agent_seconds(time_settings.subjective_time_setting)
         for memory in memories:
             # 使用jieba对memory.content进行分词并过滤掉重复词
             words = set(jieba.cut(memory.content))
-            max_words_length = 200
-            difficulty = 1 - min(1.0, (len(words) / max_words_length) ** 3)
-            creation_agent_datetime = memory.creation_agent_datetime
-            datetime_alpha = calculate_memory_datetime_alpha(creation_agent_datetime)
-            stable_time = memory.stable_time * difficulty * datetime_alpha # 稳定性，决定了可检索性的衰减速度
-            creation_agent_timeseconds = datetime_to_seconds(creation_agent_datetime)
-            creation_agent_datetime_isocalendar = creation_agent_datetime.isocalendar()
-            metadata = {
-                "creation_agent_timeseconds": creation_agent_timeseconds,
-                "creation_agent_time_year": creation_agent_datetime.year,
-                "creation_agent_time_month": creation_agent_datetime.month,
-                "creation_agent_time_week": creation_agent_datetime_isocalendar.week,
-                "creation_agent_time_day": creation_agent_datetime.day,
-                "creation_agent_time_hour": creation_agent_datetime.hour,
-                "creation_agent_time_minute": creation_agent_datetime.minute,
-                "creation_agent_time_second": creation_agent_datetime.second,
-                "creation_agent_time_weekday": creation_agent_datetime_isocalendar.weekday,
+            max_words_length = agent_settings.recycling.memory_max_words
+            difficulty = min(0.8, (len(words) / max_words_length) ** 3)
+            creation_times = memory.creation_times
+            memory_of_day = calculate_memory_of_day(creation_times.agent_world_datetime)
+            stable_time = memory.stable_time * (1 - difficulty) * memory_of_day # 稳定性，决定了可检索性的衰减速度
+            metadata = generate_time_metadatas(creation_times, 'creation')
+            metadata.update(generate_time_metadatas(creation_times, 'last_accessed'))
+            metadata.update({
                 "stable_time": stable_time, # 稳定时长，单位为秒
                 "retrievability": 1.0, # 可检索性，决定了检索的概率
                 "difficulty": difficulty, # 难度，决定了稳定性基数增长的多少。可能会出现无法长期保留的记忆，如整本书的内容。
-                "last_accessed_agent_timeseconds": creation_agent_timeseconds,
                 "memory_type": memory.type,
                 "memory_id": memory.id, # 用于在检索时剔除记忆，由于chroma的限制，只能使用元数据来实现
-            }
+            })
             if memory.previous_memory_id:
                 metadata["previous_memory_id"] = memory.previous_memory_id
             if memory.next_memory_id:
                 metadata["next_memory_id"] = memory.next_memory_id
-            r = tick_memory(metadata, current_agent_time_seconds)
+            r = tick_memory(metadata, current_agent_subjective_timeseconds)
             if not r.get("forgot"):
                 metadata["retrievability"] = r["retrievability"]
                 document = Document(
@@ -427,11 +414,11 @@ class MemoryManager():
         if creation_time_range_start:
             if isinstance(creation_time_range_start, datetime):
                 creation_time_range_start = datetime_to_seconds(creation_time_range_start)
-            filters.append({"creation_agent_timeseconds": {"$gte": creation_time_range_start}})
+            filters.append({"creation_agent_world_timeseconds": {"$gte": creation_time_range_start}})
         if creation_time_range_end:
             if isinstance(creation_time_range_end, datetime):
                 creation_time_range_end = datetime_to_seconds(creation_time_range_end)
-            filters.append({"creation_agent_timeseconds": {"$lte": creation_time_range_end}})
+            filters.append({"creation_agent_world_timeseconds": {"$lte": creation_time_range_end}})
 
         if exclude_memory_ids:
             # 使用exclude_memory_ids过滤，一般用于过滤掉与消息id相同的original记忆
@@ -446,7 +433,7 @@ class MemoryManager():
         # 这里是纯时间过滤的检索
         if (creation_time_range_start or creation_time_range_end) and not search_string:
             agent_time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
-            current_agent_time = now_agent_time(agent_time_settings)
+            current_times = Times.from_time_settings(agent_time_settings)
 
             for key, value in inputs:
                 get_results = await self.aget(
@@ -464,7 +451,7 @@ class MemoryManager():
                 for doc in docs:
                     patched_metadata = recall_memory(
                         metadata=doc.metadata,
-                        current_agent_time=current_agent_time,
+                        current_times=current_times,
                         strength=retrieval_config.strength
                     )
                     if patched_metadata.get("forgot"):
@@ -505,7 +492,7 @@ class MemoryManager():
             search_embedding = await self.embeddings.aembed_query(search_string)
 
             agent_time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
-            current_agent_time = now_agent_time(agent_time_settings)
+            current_times = Times.from_time_settings(agent_time_settings)
 
             # 对每个输入类型执行向量搜索
             for key, value in inputs.items():
@@ -543,7 +530,7 @@ class MemoryManager():
                     # 先检查记忆是否已遗忘
                     patched_metadata = recall_memory(
                         metadata=doc.metadata,
-                        current_agent_time=current_agent_time,
+                        current_times=current_times,
                         strength=strength
                     )
                     if patched_metadata.get("forgot"):
@@ -601,7 +588,7 @@ class MemoryManager():
                                     weight = current_docs_and_weights[direction]['weights'].pop()
                                     patched_metadata = recall_memory(
                                         metadata=get_result["metadatas"][0],
-                                        current_agent_time=current_agent_time,
+                                        current_times=current_times,
                                         strength=strength * weight
                                     )
                                     if patched_metadata.get("forgot"):
@@ -1309,55 +1296,57 @@ def query_result_to_docs_and_scores(results: QueryResult) -> list[tuple[Document
 
 
 
-def tick_memory(metadata: dict, current_agent_time: Union[float, datetime]) -> dict:
+def tick_memory(metadata: dict, current_agent_subjective_time: Union[float, datetime, Times]) -> dict:
     """
     更新记忆的可检索性（模拟时间流逝）
     """
     #retrievability = metadata["retrievability"] * math.exp(-delta_t / metadata["stability"])
 
-    if isinstance(current_agent_time, datetime):
-        current_agent_time_seconds = datetime_to_seconds(current_agent_time)
+    if isinstance(current_agent_subjective_time, (float, int)):
+        current_agent_subjective_timeseconds = current_agent_subjective_time
+    elif isinstance(current_agent_subjective_time, datetime):
+        current_agent_subjective_timeseconds = datetime_to_seconds(current_agent_subjective_time)
     else:
-        current_agent_time_seconds = current_agent_time
+        current_agent_subjective_timeseconds = current_agent_subjective_time.agent_subjective_timeseconds
 
     if metadata["stable_time"] == 0.0:
         logger.warning('意外的stable_time为0，metadata：' + str(metadata))
         return {"forgot": True}
 
-    x = (current_agent_time_seconds - metadata["last_accessed_agent_timeseconds"]) / metadata["stable_time"]
+    x = (current_agent_subjective_timeseconds - metadata["last_accessed_agent_subjective_timeseconds"]) / metadata["stable_time"]
     if x >= 1:
         return {"forgot": True}
     retrievability = 1 - x ** 0.4
 
     return {"retrievability": retrievability}
 
-def recall_memory(metadata: dict, current_agent_time: datetime, strength: float = 1.0) -> dict:
+def recall_memory(metadata: dict, current_times: Times, strength: float = 1.0) -> dict:
     """
     调用记忆时重置可检索性并增强稳定性
     """
     # 更新可检索性
-    current_agent_time_seconds = datetime_to_seconds(current_agent_time)
-    updated_metadata = tick_memory(metadata, current_agent_time_seconds)
+    updated_metadata = tick_memory(metadata, current_times)
     if updated_metadata.get("forgot"):
         return {"forgot": True}
 
-    datetime_alpha = calculate_memory_datetime_alpha(current_agent_time)
+    reversed_difficulty = 1 - metadata["difficulty"]
+    memory_of_day = calculate_memory_of_day(current_times.agent_world_datetime)
     stable_strength = calculate_stability_curve(updated_metadata["retrievability"])
     stable_time_diff = metadata["stable_time"] * stable_strength - metadata["stable_time"]
     if stable_time_diff >= 0:
-        stable_time_diff = stable_time_diff * metadata["difficulty"] * strength * datetime_alpha
+        stable_time_diff = stable_time_diff * reversed_difficulty * strength * memory_of_day
     stable_time = metadata["stable_time"] + stable_time_diff
 
-    retrievability = min(1.0, updated_metadata["retrievability"] + strength * datetime_alpha)
+    retrievability = min(1.0, updated_metadata["retrievability"] + strength * memory_of_day)
 
-    metadata_patch = {
-        "last_accessed_agent_timeseconds": current_agent_time_seconds,
+    metadata_patch = generate_time_metadatas(current_times, 'last_accessed')
+    metadata_patch.update({
         "retrievability": retrievability,
         "stable_time": stable_time
-    }
+    })
 
-    if metadata["difficulty"] < 1.0:
-        difficulty = min(1.0, metadata["difficulty"] + stable_strength * metadata["difficulty"] * strength * datetime_alpha * 0.5)
+    if metadata["difficulty"] > 0.0:
+        difficulty = max(0.0, metadata["difficulty"] - stable_strength * reversed_difficulty * strength * memory_of_day * 0.5)
         metadata_patch["difficulty"] = difficulty
 
     return metadata_patch
@@ -1385,7 +1374,7 @@ def calculate_stability_curve(retrievability: float) -> float:
     return y
 
 
-def calculate_memory_datetime_alpha(current_time: datetime) -> float:
+def calculate_memory_of_day(current_time: datetime) -> float:
     """
     根据时间计算记忆力的 alpha 值（0.4 到 1.0）。
 
@@ -1438,7 +1427,7 @@ def format_retrieved_memory_groups(groups: list[RetrievedMemoryGroup], time_zone
         for memory in group.memories:
             content = memory.doc.page_content
             memory_type = memory.doc.metadata["memory_type"]
-            time_seconds = memory.doc.metadata.get("creation_agent_timeseconds")
+            time_seconds = memory.doc.metadata.get("creation_agent_world_timeseconds")
             if isinstance(time_seconds, (float, int)):
                 readable_time = format_time(time_seconds, time_zone)
             else:
@@ -1447,6 +1436,37 @@ def format_retrieved_memory_groups(groups: list[RetrievedMemoryGroup], time_zone
     if not output:
         return "没有找到任何匹配的记忆。"
     return '主动记忆检索结果：\n\n\n' + "\n\n".join(output)
+
+
+def generate_time_metadatas(times: Times, prefix: str) -> dict:
+    def _generate_time_metadatas(timeseconds: float, datetime: datetime, time_type: str) -> dict:
+        datetime_isocalendar = datetime.isocalendar()
+        return {
+            f"{prefix}_{time_type}_timeseconds": timeseconds,
+            f"{prefix}_{time_type}_datetime_iso": datetime.isoformat(),
+            f"{prefix}_{time_type}_datetime_year": datetime.year,
+            f"{prefix}_{time_type}_datetime_month": datetime.month,
+            f"{prefix}_{time_type}_datetime_week": datetime_isocalendar.week,
+            f"{prefix}_{time_type}_datetime_day": datetime.day,
+            f"{prefix}_{time_type}_datetime_hour": datetime.hour,
+            f"{prefix}_{time_type}_datetime_minute": datetime.minute,
+            f"{prefix}_{time_type}_datetime_second": datetime.second,
+            f"{prefix}_{time_type}_datetime_weekday": datetime_isocalendar.weekday,
+        }
+    result = {}
+    for time_type in ['real_world', 'agent_world', 'agent_subjective']:
+        result.update(_generate_time_metadatas(
+            getattr(times, f'{time_type}_timeseconds'),
+            getattr(times, f'{time_type}_datetime'),
+            time_type
+        ))
+    result[f"{prefix}_real_world_time_zone_name"] = times.real_world_time_zone.name
+    if times.real_world_time_zone.offset is not None:
+        result[f"{prefix}_real_world_time_zone_offset"] = times.real_world_time_zone.offset
+    result[f"{prefix}_agent_world_time_zone_name"] = times.agent_time_settings.time_zone.name
+    if times.agent_time_settings.time_zone.offset is not None:
+        result[f"{prefix}_agent_world_time_zone_offset"] = times.agent_time_settings.time_zone.offset
+    return result
 
 
 def create_embedding_model(model_name: str):

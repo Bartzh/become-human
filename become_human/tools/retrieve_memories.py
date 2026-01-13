@@ -1,13 +1,11 @@
-from typing import Annotated, Optional, Any
+from typing import Optional, Any
 from datetime import datetime
-from langchain_core.messages import AnyMessage
 from langchain.tools import tool, ToolRuntime
-from langchain_core.runnables import RunnableConfig
 from langchain.messages import HumanMessage, ToolMessage, AIMessage
 
 from become_human.store.manager import store_manager
 from become_human.memory import get_activated_memory_types, memory_manager, format_retrieved_memory_groups
-from become_human.message import get_all_retrieved_memory_ids
+from become_human.message import get_all_retrieved_memory_ids, BH_MESSAGE_METADATA_KEY, BHMessageMetadataWithTimesNotRequired, BHMessageMetadata
 from become_human.types.main import MainState, MainContext
 
 RETRIEVE_MEMORIES = 'retrieve_memories'
@@ -252,8 +250,9 @@ async def retrieve_memories(
         for m in messages:
             if not isinstance(m, ToolMessage):
                 continue
-            if m.tool_call_id in repeated_tool_call_ids and isinstance(m.artifact, dict):
-                include_memory_ids.extend(m.artifact.get("bh_retrieved_memory_ids", []))
+            if m.tool_call_id in repeated_tool_call_ids:
+                if ids := BHMessageMetadata.parse(m).retrieved_memory_ids:
+                    include_memory_ids.extend(ids)
         include_memory_ids = set(include_memory_ids)
         if include_memory_ids:
             exclude_memory_ids = [id for id in exclude_memory_ids if id not in include_memory_ids]
@@ -269,6 +268,11 @@ async def retrieve_memories(
         creation_time_range_end=end_time,
         exclude_memory_ids=exclude_memory_ids
     )
-    content = repeat_content + format_retrieved_memory_groups(groups, store_settings.main.time_settings)
-    artifact = {"bh_do_not_store": True, "bh_retrieved_memory_ids": [group.source_memory.doc.id for group in groups]}
+    content = repeat_content + format_retrieved_memory_groups(groups, store_settings.main.time_settings.time_zone)
+    artifact = {
+        BH_MESSAGE_METADATA_KEY: BHMessageMetadataWithTimesNotRequired(
+            do_not_store=True,
+            message_type="bh:tool",
+            retrieved_memory_ids=[group.source_memory.doc.id for group in groups]
+        )}
     return content, artifact

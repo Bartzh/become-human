@@ -10,8 +10,18 @@ import random
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from become_human.memory import InitialMemory, memory_manager, AnyMemoryType, get_activated_memory_types
-from become_human.message import filtering_messages, format_messages_for_ai, format_messages_for_ai_as_list, DO_NOT_STORE_MESSAGE, construct_system_message, InitalAIMessage, InitalToolCall
-from become_human.time import Times, now_agent_seconds, agent_seconds_to_datetime, format_time
+from become_human.message import (
+    filtering_messages,
+    format_messages_for_ai_as_list,
+    format_messages_for_ai,
+    construct_system_message,
+    InitalAIMessage, 
+    InitalToolCall,
+    BHMessageMetadata,
+    BHMessageMetadataWithTimesNotRequired,
+    BH_MESSAGE_METADATA_KEY
+)
+from become_human.times import Times, agent_seconds_to_datetime, format_time
 from become_human.store.manager import store_manager
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT, SEND_MESSAGE_TOOL_CONTENT
 from become_human.tools.record_thoughts import RECORD_THOUGHTS, RECORD_THOUGHTS_CONTENT, RECORD_THOUGHTS_TOOL_CONTENT
@@ -356,31 +366,23 @@ extract_reflective_memories_schema = {
 
 async def recycle_original_memories(agent_id: str, input_messages: list[AnyMessage]):
     store_settings = await store_manager.get_settings(agent_id)
-    time_settings = store_settings.main.time_settings
     messages = filtering_messages(input_messages, exclude_extracted=False)
     content_and_kwargs: list[dict[str, Any]] = []
-    formated_messages = format_messages_for_ai_as_list(messages, time_settings)
-    index = 0
-    for m in messages:
-        if isinstance(m, (HumanMessage, AIMessage)):
-            content_and_kwargs.append({'content': formated_messages[index], 'kwargs': m.additional_kwargs, 'id': m.id})
-            index += 1
+    formated_messages = format_messages_for_ai_as_list(messages)
+    content_and_kwargs = [{'content': s, 'kwargs': messages[i].additional_kwargs, 'id': messages[i].id} for s, i in formated_messages]
 
     extracted_memories: list[InitialMemory] = []
-    current_agent_timeseconds = now_agent_seconds(time_settings)
-    base_stable_time = store_settings.recycling.base_stable_time
+    base_stable_time = store_settings.recycling.memory_base_stable_time
     message_ids = [message['id'] if message['id'] else str(uuid4()) for message in content_and_kwargs]
     messages_len = len(content_and_kwargs)
 
     for i, message in enumerate(content_and_kwargs):
         stable_mult = random.expovariate(0.8) #TODO:这个值应该由文本的情感强烈程度来决定
-        creation_agent_time_seconds = message['kwargs'].get("bh_creation_agent_timeseconds", current_agent_timeseconds)
-        creation_agent_datetime = agent_seconds_to_datetime(creation_agent_time_seconds, time_settings)
         extracted_memories.append(InitialMemory(
             content=message['content'],
             stable_time=stable_mult * base_stable_time,
             type="original",
-            creation_agent_datetime=creation_agent_datetime,
+            creation_times=BHMessageMetadata.parse(message['kwargs']).creation_times,
             id=message_ids[i],
             previous_memory_id=None if i == 0 else message_ids[i-1],
             next_memory_id=None if i == messages_len - 1 else message_ids[i+1]
@@ -396,20 +398,16 @@ async def recycle_episodic_memories(agent_id: str, input_messages: list[AnyMessa
 
     store_settings = await store_manager.get_settings(agent_id)
     time_settings = store_settings.main.time_settings
-    current_agent_time_seconds = now_agent_seconds(time_settings)
-    base_stable_time = store_settings.recycling.base_stable_time
-
-    creation_timesecondses = [int(m.additional_kwargs.get("bh_creation_agent_timeseconds", current_agent_time_seconds)) for m in messages]
+    base_stable_time = store_settings.recycling.memory_base_stable_time
 
     if messages:
-        # 过渡方案，对于总结和语义记忆的creation_time_seconds直接使用原始记录的平均时间戳
-        creation_timeseconds_average = sum(creation_timesecondses) / len(creation_timesecondses)
-        creation_datetime_average = agent_seconds_to_datetime(creation_timeseconds_average, time_settings)
+        # 目前就用当前时间了
+        current_times = Times.from_time_settings(time_settings)
 
         llm_with_structure = create_agent(model, response_format=extract_episodic_memories_schema)
         extracted_episodic_memories = (await llm_with_structure.ainvoke({'messages': [HumanMessage(content=f"""以下是用户的最近记录：
 <history>
-{format_messages_for_ai(messages, time_settings)}
+{format_messages_for_ai(messages)}
 </history>
 请你将这些XML格式的记录根据要求分解为 episodic memories。"""
         )]}))['structured_response']
@@ -423,7 +421,7 @@ async def recycle_episodic_memories(agent_id: str, input_messages: list[AnyMessa
                 content=episodic_memory,
                 stable_time=random.expovariate(1.0) * base_stable_time,
                 type="episodic",
-                creation_agent_datetime=creation_datetime_average,
+                creation_times=current_times,
                 id=episodic_memory_ids[i],
                 previous_memory_id=None if i == 0 else episodic_memory_ids[i-1],
                 next_memory_id=None if i == episodic_memories_len - 1 else episodic_memory_ids[i+1]
@@ -435,7 +433,7 @@ async def recycle_episodic_memories(agent_id: str, input_messages: list[AnyMessa
 async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMessage], model: BaseChatModel) -> list[BaseMessage]:
     messages = filtering_messages(input_messages)
     store_settings = await store_manager.get_settings(agent_id)
-    times_before = Times(store_settings.main.time_settings)
+    times_before = Times.from_time_settings(store_settings.main.time_settings)
     parsed_character_settings = store_settings.main.format_character_settings()
     role_prompt = f'基本信息：\n{parsed_character_settings if parsed_character_settings.strip() else '无'}\n\n详细设定：\n{store_settings.main.role_prompt}'
     #llm_with_structure = self.llm.with_structured_output(ExtractReflectiveMemories, method="function_calling")
@@ -450,17 +448,17 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
 
 以下是用户的最近记录（XML格式）：
 <history>
-{format_messages_for_ai(messages, store_settings.main.time_settings)}
+{format_messages_for_ai(messages)}
 </history>
 请你以此角色的视角，思考记录中发生的事意味着什么，能得出什么样的结论或猜测，然后输出要求的 reflection process 和 reflective memories。""")]}))["structured_response"]
     #dumped_reflective_memories = extracted_reflective_memories.model_dump()
     reflective_memories = extracted_reflective_memories["reflective_memories"]
     ids = [str(uuid4()) for _ in reflective_memories]
     reflective_memories_len = len(reflective_memories)
-    times_after = Times(store_settings.main.time_settings)
+    times_after = Times.from_time_settings(store_settings.main.time_settings)
     process: list[BaseMessage] = []
     process.append(construct_system_message(
-        content=f'''当前时间是 {format_time(times_before.agent_datetime)}，距上次与用户聊天过去了一段时间，现在是一个反思刚才所发生的事情的好时机。请你以你所扮演的角色的视角，思考刚才所发生的事意味着什么，能得出什么样的结论或猜测，得出结果并留下思考过程。''',
+        content=f'''当前时间是 {format_time(times_before.agent_world_datetime)}，距上次与用户聊天过去了一段时间，现在是一个反思刚才所发生的事情的好时机。请你以你所扮演的角色的视角，思考刚才所发生的事意味着什么，能得出什么样的结论或猜测，得出结果并留下思考过程。''',
         times=times_before
     ))
     process.extend(InitalAIMessage(
@@ -468,15 +466,19 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
             name=RECORD_THOUGHTS,
             args={RECORD_THOUGHTS_CONTENT: extracted_reflective_memories["reflection_process"]},
             result_content=RECORD_THOUGHTS_TOOL_CONTENT,
-            result_artifact={"bh_do_not_store": True, "bh_streaming": True}
+            result_additional_kwargs={
+                BH_MESSAGE_METADATA_KEY: BHMessageMetadataWithTimesNotRequired(
+                    is_streaming_tool=True
+                ).model_dump()
+            }
         )]
     ).construct_messages(times_after))
-    base_stable_time = store_settings.recycling.base_stable_time
+    base_stable_time = store_settings.recycling.memory_base_stable_time
     memories = [InitialMemory(
         content=memory,
         stable_time=random.expovariate(0.4) * base_stable_time,
         type="reflective",
-        creation_agent_datetime=times_after.agent_datetime,
+        creation_times=times_after,
         id=ids[i],
         previous_memory_id=None if i == 0 else ids[i-1],
         next_memory_id=None if i == reflective_memories_len - 1 else ids[i+1]
@@ -486,13 +488,15 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
             content=process[1].content,
             stable_time=random.expovariate(0.4) * base_stable_time,
             type="original",
-            creation_agent_datetime=times_after.agent_datetime,
+            creation_times=times_after,
             id=process[1].id,
             previous_memory_id=None,
             next_memory_id=None
         ))
         for m in process:
-            m.additional_kwargs['bh_recycled'] = True
+            message_metadata = BHMessageMetadata.parse(m)
+            message_metadata.recycled = True
+            m.additional_kwargs[BH_MESSAGE_METADATA_KEY] = message_metadata.model_dump()
     await memory_manager.add_memories(memories, agent_id)
     return process
 

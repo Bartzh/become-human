@@ -16,8 +16,7 @@ from langchain_core.messages import (
     SystemMessage,
     AIMessage,
     AnyMessage,
-    RemoveMessage,
-    AIMessageChunk
+    RemoveMessage
 )
 from langchain_core.messages.utils import trim_messages, count_tokens_approximately
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -33,11 +32,11 @@ import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from become_human.graphs.base import BaseGraph
-from become_human.message import add_messages, get_all_retrieved_memory_ids
-from become_human.types.main import MainState, MainContext, StateEntry
+from become_human.message import add_messages, get_all_retrieved_memory_ids, BHMessageMetadata, BHMessageMetadataWithTimesNotRequired, BH_MESSAGE_METADATA_KEY
+from become_human.types.main import MainState, MainContext, StateEntry, InterruptData
 from become_human.memory import get_activated_memory_types, memory_manager, format_retrieved_memory_groups
 from become_human.recycling import recycle_memories
-from become_human.time import datetime_to_seconds, format_time, format_seconds, Times
+from become_human.times import datetime_to_seconds, format_time, format_seconds, Times
 from become_human.message import format_messages_for_ai, extract_text_parts, construct_system_message
 from become_human.store.manager import store_manager
 from become_human.tools import CORE_TOOLS
@@ -59,7 +58,7 @@ class MainGraph(BaseGraph):
     llm_for_structured_output: BaseChatModel
     streaming_tools: StreamingTools
     agent_run_ids: dict[str, str] # 所有agent的当前运行id，这个字典实际是由agent_manager管理的，不代表图的状态
-    agent_interrupt_datas: dict[str, dict[str, Union[AIMessageChunk, list[ToolMessage]]]] # 所有agent被打断后留下的'chunk'与'called_tool_messages'
+    agent_interrupt_datas: dict[str, InterruptData] # 所有agent被打断后留下的'chunk'与'called_tool_messages'
     agent_messages_to_update: dict[str, list[BaseMessage]] # 所有agent的待更新（进state）消息
 
     def __init__(
@@ -126,7 +125,7 @@ class MainGraph(BaseGraph):
         store_settings = await store_manager.get_settings(agent_id)
         main_config = store_settings.main
         time_settings = main_config.time_settings
-        current_times = Times(time_settings)
+        current_times = Times.from_time_settings(time_settings)
 
         new_state = {
             "generated": False,
@@ -140,7 +139,7 @@ class MainGraph(BaseGraph):
         # active_time_seconds不需要在意睡觉的问题
         if not state.active_time_seconds:
             active_time_range = main_config.active_time_range
-            active_time_seconds = current_times.agent_timeseconds + random.uniform(active_time_range[0], active_time_range[1])
+            active_time_seconds = current_times.agent_world_timeseconds + random.uniform(active_time_range[0], active_time_range[1])
             new_state["active_time_seconds"] = active_time_seconds
         else:
             active_time_seconds = state.active_time_seconds
@@ -151,9 +150,9 @@ class MainGraph(BaseGraph):
         # 第二种逻辑，只要在活跃时间之外发送消息，都会生成wakeup_call_time_seconds，增加self_call的机会
         if (
             runtime.context.call_type == 'human' and
-            current_times.agent_timeseconds >= active_time_seconds
+            current_times.agent_world_timeseconds >= active_time_seconds
         ):
-            new_wakeup_call_time_seconds = await generate_new_wakeup_call_timeseconds(agent_id, current_times.agent_datetime)
+            new_wakeup_call_time_seconds = await generate_new_wakeup_call_timeseconds(agent_id, current_times.agent_world_datetime)
             if (
                 not state.wakeup_call_time_seconds or
                 state.wakeup_call_time_seconds > new_wakeup_call_time_seconds
@@ -179,34 +178,20 @@ class MainGraph(BaseGraph):
                 new_state["input_messages"] = update_input_messages
 
         # 处理中断数据，首先尝试获取，若有进行下一步操作
-        interrupt_data = self.agent_interrupt_datas.get(agent_id)
-        if interrupt_data and (chunk := interrupt_data.get('chunk')):
+        interrupt_data = self.agent_interrupt_datas.pop(agent_id, {})
+        if chunk := interrupt_data.get('chunk'):
             # 将被中断的chunk加入messages（add_messages会自动处理）
             messages.append(chunk)
-            called_tool_messages = interrupt_data.get('called_tool_messages', [])
+            called_tool_messages = interrupt_data["called_tool_messages"]
             called_tool_messages_with_id = {tool_message.tool_call_id: tool_message for tool_message in called_tool_messages}
             called_tool_message_ids = called_tool_messages_with_id.keys()
             # 用可获取到的最晚的tool_message的创建时间作为新的工具消息的创建时间，chunk的创建时间则作为兜底
-            chunk_creation_real_timeseconds = chunk.additional_kwargs.get(
-                'bh_creation_real_timeseconds',
-                current_times.real_timeseconds
-            )
-            chunk_creation_agent_timeseconds = chunk.additional_kwargs.get(
-                'bh_creation_agent_timeseconds',
-                current_times.agent_timeseconds
-            )
             if called_tool_messages:
-                last_creation_real_timeseconds = called_tool_messages[-1].additional_kwargs.get(
-                    'bh_creation_real_timeseconds',
-                    chunk_creation_real_timeseconds
-                )
-                last_creation_agent_timeseconds = called_tool_messages[-1].additional_kwargs.get(
-                    'bh_creation_agent_timeseconds',
-                    chunk_creation_agent_timeseconds
-                )
+                last_tool_message_metadata = BHMessageMetadata.parse(called_tool_messages[-1])
+                last_creation_times = last_tool_message_metadata.creation_times
             else:
-                last_creation_real_timeseconds = chunk_creation_real_timeseconds
-                last_creation_agent_timeseconds = chunk_creation_agent_timeseconds
+                #last_creation_times = interrupt_data.get('last_chunk_times', current_times)
+                last_creation_times = interrupt_data['last_chunk_times']
             # 对于chunk中出现的每个tool_call进行检查
             for tool_call in chunk.tool_calls:
                 tool_call_id = tool_call.get('id')
@@ -218,11 +203,14 @@ class MainGraph(BaseGraph):
                     elif tool_call["name"] == SEND_MESSAGE:
                         messages.append(ToolMessage(
                             content=f'{SEND_MESSAGE_TOOL_CONTENT}（尽管当前调用被打断，被打断前的消息也已经发送成功）',
-                            name=tool_call["name"],
+                            name=SEND_MESSAGE,
                             tool_call_id=tool_call_id,
                             additional_kwargs={
-                                "bh_creation_real_timeseconds": last_creation_real_timeseconds,
-                                "bh_creation_agent_timeseconds": last_creation_agent_timeseconds
+                                BH_MESSAGE_METADATA_KEY: BHMessageMetadata(
+                                    creation_times=last_creation_times,
+                                    message_type='bh:tool',
+                                    is_streaming_tool=True
+                                ).model_dump()
                             }
                         ))
                     # 对于其他tool_call，则直接添加取消执行消息
@@ -232,8 +220,10 @@ class MainGraph(BaseGraph):
                             name=tool_call["name"],
                             tool_call_id=tool_call_id,
                             additional_kwargs={
-                                "bh_creation_real_timeseconds": last_creation_real_timeseconds,
-                                "bh_creation_agent_timeseconds": last_creation_agent_timeseconds
+                                BH_MESSAGE_METADATA_KEY: BHMessageMetadata(
+                                    creation_times=last_creation_times,
+                                    message_type='bh:tool'
+                                ).model_dump()
                             }
                         ))
                 del self.agent_interrupt_datas[agent_id]
@@ -251,25 +241,26 @@ class MainGraph(BaseGraph):
 
 
         can_self_call = False
+        # 检查是否可以自我调用，是否超时。如果不自我调用则清理可能过时的时间
         if is_self_call:
-            if wakeup_call_time_seconds and current_times.agent_timeseconds >= wakeup_call_time_seconds and current_times.agent_timeseconds < (wakeup_call_time_seconds + 3600):
+            if wakeup_call_time_seconds and current_times.agent_world_timeseconds >= wakeup_call_time_seconds and current_times.agent_world_timeseconds < (wakeup_call_time_seconds + 3600):
                 can_self_call = True
             else:
                 for seconds in state.self_call_time_secondses:
                     # 如果因某些原因如服务关闭导致离原定时间太远，则忽略这些self_call
-                    if current_times.agent_timeseconds >= seconds and current_times.agent_timeseconds < (seconds + 3600):
+                    if current_times.agent_world_timeseconds >= seconds and current_times.agent_world_timeseconds < (seconds + 3600):
                         can_self_call = True
                         break
             if not can_self_call:
-                new_state["self_call_time_secondses"] = [s for s in state.self_call_time_secondses if current_times.agent_timeseconds < s]
-                if wakeup_call_time_seconds and current_times.agent_timeseconds >= wakeup_call_time_seconds:
+                new_state["self_call_time_secondses"] = [s for s in state.self_call_time_secondses if current_times.agent_world_timeseconds < s]
+                if wakeup_call_time_seconds and current_times.agent_world_timeseconds >= wakeup_call_time_seconds:
                     new_state["wakeup_call_time_seconds"] = 0.0
 
 
         # 要么自我调用，要么在活跃状态时被用户调用
         if (
             can_self_call or
-            (runtime.context.call_type == 'human' and (current_times.agent_timeseconds < active_time_seconds or main_config.always_active)) or
+            (runtime.context.call_type == 'human' and (current_times.agent_world_timeseconds < active_time_seconds or main_config.always_active)) or
             runtime.context.call_type == 'system'
         ):
             return Command(update=new_state, goto='prepare_to_generate')
@@ -290,8 +281,8 @@ class MainGraph(BaseGraph):
         main_config = store_settings.main
         new_messages = []
 
-        current_times = Times(main_config.time_settings)
-        formated_agent_time = format_time(current_times.agent_datetime)
+        current_times = Times.from_time_settings(main_config.time_settings)
+        formated_agent_world_time = format_time(current_times.agent_world_datetime)
 
 
         # 自我调用
@@ -299,19 +290,19 @@ class MainGraph(BaseGraph):
 
             self_call_type = runtime.context.self_call_type
             # 只是用来处理提示词
-            is_active = current_times.agent_timeseconds < state.active_time_seconds or main_config.always_active
+            is_active = current_times.agent_world_timeseconds < state.active_time_seconds or main_config.always_active
 
             if self_call_type == 'active':
-                next_active_self_call_time_secondses_and_notes = [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds > current_times.agent_timeseconds]
+                next_active_self_call_time_secondses_and_notes = [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds > current_times.agent_world_timeseconds]
                 new_state["active_self_call_time_secondses_and_notes"] = next_active_self_call_time_secondses_and_notes
-                active_self_call_note = '\n'.join([f'[{format_time(s, main_config.time_settings)}] {n}' for s, n in [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds <= current_times.agent_timeseconds]])
+                active_self_call_note = '\n'.join([f'[{format_time(s, main_config.time_settings.time_zone)}] {n}' for s, n in [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds <= current_times.agent_world_timeseconds]])
 
             # 有新的消息
             if input_messages:
-                new_state["last_chat_time_seconds"] = current_times.agent_timeseconds
-                new_state["self_call_time_secondses"] = await generate_new_self_call_timesecondses(agent_id, current_time=current_times.agent_timeseconds)
+                new_state["last_chat_time_seconds"] = current_times.agent_world_timeseconds
+                new_state["self_call_time_secondses"] = await generate_new_self_call_timesecondses(agent_id, current_time=current_times.agent_world_timeseconds)
                 new_state["wakeup_call_time_seconds"] = 0.0
-                new_state["active_time_seconds"] = current_times.agent_timeseconds + random.uniform(main_config.active_time_range[0], main_config.active_time_range[1])
+                new_state["active_time_seconds"] = current_times.agent_world_timeseconds + random.uniform(main_config.active_time_range[0], main_config.active_time_range[1])
                 if self_call_type == 'active':
                     input_content3 = f'请检查你之前留下的笔记内容并考虑要如何行动，同时需注意上下文中还存在新的可能需要回应的用户消息。'
                 else:
@@ -320,16 +311,16 @@ class MainGraph(BaseGraph):
 
             # 没有新的消息
             else:
-                next_self_call_time_secondses = [s for s in state.self_call_time_secondses if s > current_times.agent_timeseconds]
+                next_self_call_time_secondses = [s for s in state.self_call_time_secondses if s > current_times.agent_world_timeseconds]
                 new_state["self_call_time_secondses"] = next_self_call_time_secondses
-                temporary_active_time_seconds = current_times.agent_timeseconds + random.uniform(main_config.temporary_active_time_range[0], main_config.temporary_active_time_range[1])
+                temporary_active_time_seconds = current_times.agent_world_timeseconds + random.uniform(main_config.temporary_active_time_range[0], main_config.temporary_active_time_range[1])
                 if temporary_active_time_seconds > state.active_time_seconds:
                     new_state["active_time_seconds"] = temporary_active_time_seconds
                 if self_call_type == 'active':
                     input_content3 = '请检查你之前留下的笔记内容并考虑要如何行动。'
                 else:
                     if next_self_call_time_secondses:
-                        parsed_next_self_call_time_secondses = f'系统接下来为你随机安排的唤醒时间（一般间隔会越来越长）{'分别' if len(next_self_call_time_secondses) > 1 else ''}为：' + '、'.join([f'{format_seconds(s - current_times.agent_timeseconds)}后（{format_time(s, main_config.time_settings)}）' for s in next_self_call_time_secondses])
+                        parsed_next_self_call_time_secondses = f'系统接下来为你随机安排的唤醒时间（一般间隔会越来越长）{'分别' if len(next_self_call_time_secondses) > 1 else ''}为：' + '、'.join([f'{format_seconds(s - current_times.agent_world_timeseconds)}后（{format_time(s, main_config.time_settings.time_zone)}）' for s in next_self_call_time_secondses])
                     else:
                         parsed_next_self_call_time_secondses = '唤醒次数已耗尽，这是你的最后一次唤醒。接下来你将不再被唤醒，直到用户发送新的消息的一段时间后。'
                     input_content3 = f'''{'检查到当前没有新的消息，' if not is_active else ''}请结合上下文、时间以及你的角色设定考虑是否要尝试主动给用户发送消息，或保持沉默继续等待用户的新消息。只需控制`{SEND_MESSAGE}`工具的使用与否即可实现。
@@ -337,7 +328,7 @@ class MainGraph(BaseGraph):
 {parsed_next_self_call_time_secondses}
 以上的唤醒时间仅供你自己作为接下来行动的参考，不要将其暴露给用户。'''
 
-            past_seconds = current_times.agent_timeseconds - state.last_chat_time_seconds
+            past_seconds = current_times.agent_world_timeseconds - state.last_chat_time_seconds
             if self_call_type == 'active':
                 input_content2 = f'距离上一次与用户交互过去了{format_seconds(past_seconds)}。现在将你唤醒是由于你之前主动设置的自我唤醒时间到了，同时以下还有你为了提醒自己留下的笔记内容：\n\n{active_self_call_note}\n\n{input_content3}'
             else:
@@ -348,7 +339,7 @@ class MainGraph(BaseGraph):
 现在将你唤醒，检查是否有新的消息...
 {input_content3}'''
 
-            input_content = f'当前时间是 {formated_agent_time}，{input_content2}'
+            input_content = f'当前时间是 {formated_agent_world_time}，{input_content2}'
 
             new_messages.append(construct_system_message(
                 content=input_content,
@@ -358,11 +349,11 @@ class MainGraph(BaseGraph):
 
         # 直接响应
         else:
-            new_state["last_chat_time_seconds"] = current_times.agent_timeseconds
-            new_state["self_call_time_secondses"] = await generate_new_self_call_timesecondses(agent_id, current_time=current_times.agent_datetime)
+            new_state["last_chat_time_seconds"] = current_times.agent_world_timeseconds
+            new_state["self_call_time_secondses"] = await generate_new_self_call_timesecondses(agent_id, current_time=current_times.agent_world_datetime)
             new_state["wakeup_call_time_seconds"] = 0.0
             active_time_range = store_settings.main.active_time_range
-            new_state["active_time_seconds"] = current_times.agent_timeseconds + random.uniform(active_time_range[0], active_time_range[1])
+            new_state["active_time_seconds"] = current_times.agent_world_timeseconds + random.uniform(active_time_range[0], active_time_range[1])
 
 
         # passive_retrieval，只会跟在另一条humanmessage的后面，所以可以随时清理
@@ -379,14 +370,16 @@ class MainGraph(BaseGraph):
             )
             passive_retrieve_content = format_retrieved_memory_groups(
                 passive_retrieve_groups,
-                main_config.time_settings
+                main_config.time_settings.time_zone
             )
             new_messages.append(construct_system_message(
                 content=f'以下是根据用户输入自动从你的记忆（数据库）中检索到的内容，可能会出现无关信息（但视情况依然可作为谈资），如果需要进一步检索请调用工具`{RETRIEVE_MEMORIES}`：\n\n\n{passive_retrieve_content}',
                 times=current_times,
+                message_type="bh:passive_retrieval",
                 extra_kwargs={
-                    "bh_message_type": "passive_retrieval",
-                    "bh_retrieved_memory_ids": [group.source_memory.doc.id for group in passive_retrieve_groups],
+                    BH_MESSAGE_METADATA_KEY: BHMessageMetadataWithTimesNotRequired(
+                        retrieved_memory_ids=[group.source_memory.doc.id for group in passive_retrieve_groups]
+                    )
                 }
             ))
 
@@ -413,7 +406,7 @@ class MainGraph(BaseGraph):
         # TODO: 可以有配置或者环境变量控制
         max_retries = 5
         if state.react_retry_count > max_retries:
-            break_times = Times(setting=store_settings.main.time_settings)
+            break_times = Times.from_time_settings(store_settings.main.time_settings)
             break_message = construct_system_message(
                 content=f'由于在当前这一轮对话中，你因工具调用失败或没有调用`{RECORD_THOUGHTS}`工具而被系统返回错误超过{str(max_retries)}次，系统认定你为没有能力处理当前的对话，为防止无限循环所以强行break掉了本轮对话。',
                 times=break_times,
@@ -509,10 +502,12 @@ class MainGraph(BaseGraph):
 
 ## 时间感知
 
-用户的每条消息前都会附有自动生成的时间戳（格式为`[%Y-%m-%d %H:%M:%S %A]`）。请注意时间信息，并考虑时间流逝带来的影响。例如：
+用户的每条消息前都会附有自动生成的当前时间戳（格式为`[%Y-%m-%d %H:%M:%S %A]`）。请注意时间信息，并考虑时间流逝带来的影响。例如：
 - 当接收到[2025-06-10 15:00 Tuesday] 用户：明天喝咖啡？结合[2025-06-11 10:00 Wednesday]当前时间戳，应理解"明天"已变成"今天"，可以做出反应如：
     调用`{SEND_MESSAGE}`：不好意思现在才看见消息，你还有约吗？
 - 长时间未互动可体现时光痕迹（"好久不见"等）。
+
+还有其他一些系统消息也会附带类似的时间信息，需要注意的是这类由系统提供的时间信息都是基于你自己的时区计算的，而非用户，所以会存在小概率用户与你不在同一个时区的可能。
 
 ## 自我唤醒（self_call）
 
@@ -553,9 +548,11 @@ class MainGraph(BaseGraph):
             MessagesPlaceholder('msgs')
         ])
         response = await llm_with_tools.ainvoke(await use_system_prompt_template.ainvoke({"msgs": state.messages}))
-        current_times = Times(store_settings.main.time_settings)
-        response.additional_kwargs["bh_creation_real_timeseconds"] = current_times.real_timeseconds
-        response.additional_kwargs["bh_creation_agent_timeseconds"] = current_times.agent_timeseconds
+        current_times = Times.from_time_settings(store_settings.main.time_settings)
+        response.additional_kwargs[BH_MESSAGE_METADATA_KEY] = BHMessageMetadata(
+            creation_times=current_times,
+            message_type='bh:ai'
+        ).model_dump()
         new_state = {"messages": [response], "new_messages": [response]}
 
         agent_run_id = runtime.context.agent_run_id
@@ -573,7 +570,7 @@ class MainGraph(BaseGraph):
                 not_recorded_thoughts_error_message = construct_system_message(
                     content=f"未检测到你有调用任何工具！如果你确实不想进行任何动作，也至少应调用`{RECORD_THOUGHTS}`工具！这个动作是**必须**的，请将其补上！",
                     times=current_times,
-                    extra_kwargs={'bh_message_type': 'react_error'}
+                    message_type="bh:react_error",
                 )
                 new_state["messages"].append(not_recorded_thoughts_error_message)
                 new_state["new_messages"].append(not_recorded_thoughts_error_message)
@@ -594,13 +591,24 @@ class MainGraph(BaseGraph):
         # 第一条是AIMessage，剔除掉
         tool_messages = state.tool_messages[1:]
         settings = await store_manager.get_settings(agent_id)
-        current_times = Times(settings.main.time_settings)
+        current_times = Times.from_time_settings(settings.main.time_settings)
         for message in tool_messages:
-            # 只要少一个时间信息，就全换成现在的时间
-            if (not message.additional_kwargs.get("bh_creation_agent_timeseconds") or
-                not message.additional_kwargs.get("bh_creation_real_timeseconds")):
-                message.additional_kwargs["bh_creation_agent_timeseconds"] = current_times.agent_timeseconds
-                message.additional_kwargs["bh_creation_real_timeseconds"] = current_times.real_timeseconds
+            # 如果没有metadata，则补上
+            if not message.additional_kwargs.get(BH_MESSAGE_METADATA_KEY):
+                if isinstance(message.artifact, dict) and BH_MESSAGE_METADATA_KEY in message.artifact.keys():
+                    metadata_in_artifact = BHMessageMetadataWithTimesNotRequired.parse(message.artifact)
+                    if metadata_in_artifact.creation_times is None:
+                        metadata_in_artifact.creation_times = current_times
+                    message.additional_kwargs[BH_MESSAGE_METADATA_KEY] = metadata_in_artifact.model_dump()
+                    del message.artifact[BH_MESSAGE_METADATA_KEY]
+                else:
+                    message.additional_kwargs[BH_MESSAGE_METADATA_KEY] = BHMessageMetadata(
+                        creation_times=current_times,
+                        message_type='bh:tool'
+                    ).model_dump()
+            elif isinstance(message.artifact, dict) and BH_MESSAGE_METADATA_KEY in message.artifact.keys():
+                logger.warning(f"{BH_MESSAGE_METADATA_KEY} 已经存在于消息 {message.id} 的 additional_kwargs 中，不需要 artifact 中也存在 {BH_MESSAGE_METADATA_KEY}，现在将其清理")
+                del message.artifact[BH_MESSAGE_METADATA_KEY]
         agent_run_id = runtime.context.agent_run_id
         update_messages, update_new_messages = self._pop_messages_to_update(agent_id, agent_run_id, state.messages, state.new_messages)
         if update_messages:
@@ -611,9 +619,7 @@ class MainGraph(BaseGraph):
         direct_exit = True
         recorded_thoughts = False
         for message in tool_messages:
-            if isinstance(message.artifact, dict) and message.artifact.get('bh_streaming', False):
-                pass
-            else:
+            if not BHMessageMetadata.parse(message).is_streaming_tool:
                 direct_exit = False
             if message.name == RECORD_THOUGHTS:
                 recorded_thoughts = True
@@ -624,7 +630,7 @@ class MainGraph(BaseGraph):
             not_recorded_thoughts_error_message = construct_system_message(
                 content=f"未检测到你有调用`{RECORD_THOUGHTS}`工具，这个操作是**必须**的，请将其补上！",
                 times=current_times,
-                extra_kwargs={'bh_message_type': 'react_error'}
+                message_type='bh:react_error'
             )
             new_state["messages"].append(not_recorded_thoughts_error_message)
             new_state["new_messages"].append(not_recorded_thoughts_error_message)
@@ -642,12 +648,14 @@ class MainGraph(BaseGraph):
         settings = await store_manager.get_settings(agent_id)
         memory_types = get_activated_memory_types()
 
-        # 没被回收的滚去回收
+        # 没回收的滚去回收
         recycle_messages = []
         if 'original' in memory_types:
             for message in messages:
-                if not isinstance(message, RemoveMessage) and not message.additional_kwargs.get("bh_recycled"):
-                    message.additional_kwargs["bh_recycled"] = True
+                metadata = BHMessageMetadata.parse(message)
+                if not metadata.recycled:
+                    metadata.recycled = True
+                    message.additional_kwargs[BH_MESSAGE_METADATA_KEY] = metadata.model_dump()
                     recycle_messages.append(message)
 
         # 如果消息超过阈值，进行trim
@@ -669,10 +677,10 @@ class MainGraph(BaseGraph):
             excess_count = len(messages) - len(new_messages)
             old_messages = messages[:excess_count]
             # 如果第一条消息为extracted，说明在non active时已经被提取过了，尝试只从后向前删除掉extracted的消息而不删除其他消息
-            if old_messages and old_messages[0].additional_kwargs.get("bh_extracted"):
+            if old_messages and BHMessageMetadata.parse(old_messages[0]).extracted:
                 extracted_messages = []
                 for m in old_messages:
-                    if m.additional_kwargs.get("bh_extracted"):
+                    if BHMessageMetadata.parse(m).extracted:
                         extracted_messages.append(m)
                     else:
                         break

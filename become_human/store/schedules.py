@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Union, Optional, Self
+from typing import Union, Optional, Self, Literal
 from datetime import datetime, timezone, time, timedelta
 from dateutil.relativedelta import relativedelta
 import random
@@ -7,7 +7,7 @@ from loguru import logger
 from tzlocal import get_localzone
 
 from become_human.store.base import StoreModel, StoreField
-from become_human.time import seconds_to_datetime, datetime_to_seconds
+from become_human.times import seconds_to_datetime, datetime_to_seconds, Times
 
 
 class Schedule(BaseModel):
@@ -31,21 +31,21 @@ class Schedule(BaseModel):
     scheduled_months: Optional[list[int]] = Field(default=None, description="指定每年几月运行，1-12分别表示1-12月")
     timeout_seconds: float = Field(default=0.0, description="超时时间，指如果当前时间超过指定时间太久则算作超时。单位为秒，0则为无限制")
     max_loop_times: int = Field(default=0, ge=0, description="循环次数，0表示无限循环")
-    agent_time_based: bool = Field(default=False, description="是否基于agent时间计算")
+    time_reference: Literal['real_world', 'agent_world', 'agent_subjective'] = Field(default='real_world', description="基于何种时间计算")
     next_run_timeseconds: float = Field(default=0.0, description="下次执行时间的timeseconds")
     loop_times: int = Field(default=0, description="已运行次数，只有当存在max_loop_times时才会计算")
 
-    def tick(self, current_datetime: datetime) -> tuple[Optional[Self], bool]:
+    def tick(self, current_time: Union[Times, datetime]) -> tuple[Optional[Self], bool]:
         """
         计算Schedule是否应更新？是否应运行？
 
         Args:
-            current_datetime: 当前时间
+            current_time: 当前时间。如果输入的是Times实例，则会自动使用合适的时间类型计算，否则需调用者自行确认时间类型
 
         Returns:
             输出一个tuple，按顺序包含以下内容：
 
-            schedule: 若Schedule需更新，则返回一个新的Schedule示例。否则返回None，表示应移除
+            schedule: 若Schedule需更新，则返回一个新的Schedule实例。否则返回None，表示应移除
 
             should_execute: 是否应执行相应任务
         """
@@ -53,6 +53,19 @@ class Schedule(BaseModel):
         # 检查是否已超过最大循环次数
         if self.max_loop_times > 0 and self.loop_times >= self.max_loop_times:
             return None, False
+
+        # 如果输入是Times实例，则自动使用合适时间类型计算
+        if isinstance(current_time, Times):
+            if self.time_reference == 'real_world':
+                current_datetime = current_time.real_world_datetime
+            elif self.time_reference == 'agent_world':
+                current_datetime = current_time.agent_world_datetime
+            elif self.time_reference == 'agent_subjective':
+                current_datetime = current_time.agent_subjective_datetime
+            else:
+                raise ValueError(f"Invalid time_reference: {self.time_reference}")
+        else:
+            current_datetime = current_time
 
         # 确保current_time有时区信息
         if current_datetime.tzinfo is None:
@@ -145,7 +158,7 @@ class Schedule(BaseModel):
             raise ValueError(f"{self.__repr_name__} 不能在没有daily的情况下将interval设置为0.0，请检查：{str(self.interval)}")
 
         # 是否达到最大循环次数
-        new_value = {"next_time_seconds": datetime_to_seconds(next_run)}
+        new_value = {"next_run_timeseconds": datetime_to_seconds(next_run)}
         if self.max_loop_times > 0:
             loop_times = self.loop_times + 1
             if loop_times >= self.max_loop_times:
@@ -162,8 +175,9 @@ class MemoryUpdateSchedule(Schedule):
 class SelfCallSchedule(Schedule):
     note: str = Field(default='', description="备注")
 
-class AgentSchedules(StoreModel):
+class BuiltinSchedules(StoreModel):
     _namespace = ("schedules",)
+    _readable_name = "builtin计划任务"
     memory_update_schedules: list[MemoryUpdateSchedule] = StoreField(default_factory=lambda: [
         MemoryUpdateSchedule(interval=5.0, stable_time_range=[{'$gte': 0.0}, {'$lt': 43200.0}]),
         MemoryUpdateSchedule(interval=30.0, stable_time_range=[{'$gte': 43200.0}, {'$lt': 86400.0}]),
@@ -171,6 +185,7 @@ class AgentSchedules(StoreModel):
         MemoryUpdateSchedule(interval=500.0, stable_time_range=[{'$gte': 864000.0}, {'$lt': 8640000.0}]),
         MemoryUpdateSchedule(interval=3600.0, stable_time_range=[{'$gte': 8640000.0}])
     ])
+    #deactivation_schedule: Schedule = StoreField(default_factory=Schedule)
     #passive_self_call_schedules: list[SelfCallSchedule] = StoreField(default_factory=list)
     #active_self_call_schedules: list[SelfCallSchedule] = StoreField(default_factory=list)
     #wakeup_self_call_schedules: list[SelfCallSchedule] = StoreField(default_factory=list)

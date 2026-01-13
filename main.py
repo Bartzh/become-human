@@ -1,10 +1,19 @@
-import os
+import os, sys
 import asyncio
 from loguru import logger
 from become_human.agent_manager import AgentManager
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 
-logger.add("logs/main.log", rotation="1 day", retention="2 week", enqueue=True, level=os.getenv("LOG_LEVEL", "INFO").upper())
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logger.remove()
+logger.add(sys.stdout, level=log_level)
+logger.add(
+    "logs/app.log",
+    rotation="1 day",
+    retention="2 weeks",
+    enqueue=True,
+    level=log_level
+)
 
 agent_id = os.getenv('MAIN_AGENT_ID', "default_agent_1")
 user_name = os.getenv('MAIN_USER_NAME')
@@ -32,7 +41,12 @@ async def main():
                 print("Goodbye!")
                 break
             else:
-                asyncio.create_task(agent_manager.call_agent_with_command(user_input, agent_id, is_admin=True, user_name=user_name))
+                asyncio.create_task(agent_manager.call_agent_for_user_with_command(
+                    agent_id=agent_id,
+                    user_input=user_input,
+                    user_name=user_name,
+                    is_admin=True
+                ))
 
     task.cancel()
     await agent_manager.close_manager()

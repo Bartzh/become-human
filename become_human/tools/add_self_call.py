@@ -3,7 +3,8 @@ from datetime import datetime
 from langchain.tools import tool, ToolRuntime
 from langchain.messages import ToolMessage
 from langgraph.types import Command
-from become_human.time import datetime_to_seconds, Times
+from become_human.times import datetime_to_seconds, Times
+from become_human.message import BH_MESSAGE_METADATA_KEY, BHMessageMetadata
 from become_human.store.manager import store_manager
 from become_human.types.main import MainContext, MainState
 
@@ -30,22 +31,22 @@ async def add_self_call(
     self_call_seconds = datetime_to_seconds(self_call_datetime)
     active_self_call_time_secondses = [s for s, n in active_self_call_time_secondses_and_notes]
     content = "添加自我唤醒计划成功。"
-    artifact = {
-        #"bh_do_not_store": True,
-        "bh_streaming": True
-    }
     new_state = {'active_self_call_time_secondses_and_notes': active_self_call_time_secondses_and_notes + [(self_call_seconds, note)]}
+    time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
+    times = Times.from_time_settings(time_settings)
+    metadata = BHMessageMetadata(
+        creation_times=times,
+        message_type="bh:tool",
+        is_streaming_tool=True
+    )
     if not force_add:
         for s in active_self_call_time_secondses:
             if abs(s - self_call_seconds) < 3600.0:
                 content = '在你指定时间的附近一小时范围内已经存在主动自我唤醒计划，为避免重复此次添加被取消。若确定要添加，请将force_add参数设置为True再次调用此工具。'
-                artifact = {"bh_do_not_store": True}
                 new_state = {}
-    time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
-    times = Times(setting=time_settings)
-    tool_message = ToolMessage(name='add_self_call', content=content, artifact=artifact, tool_call_id=tool_call_id, additional_kwargs={
-        "bh_creation_agent_timeseconds": times.agent_timeseconds,
-        "bh_creation_real_timeseconds": times.real_timeseconds,
+                metadata.is_streaming_tool = None
+    tool_message = ToolMessage(name='add_self_call', content=content, artifact={}, tool_call_id=tool_call_id, additional_kwargs={
+        BH_MESSAGE_METADATA_KEY: metadata
     })
     new_state["tool_messages"] = [tool_message]
     return Command(update=new_state)

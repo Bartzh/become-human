@@ -1,52 +1,54 @@
 from become_human.store.base import StoreModel, store_asearch
-from become_human.store.settings import AgentSettings
-from become_human.store.schedules import AgentSchedules
-from become_human.store.states import AgentStates
+from become_human.store.settings import BuiltinSettings
+from become_human.store.schedules import BuiltinSchedules
+from become_human.store.states import BuiltinStates
 
-class AgentStore(StoreModel):
-    _namespace = ('model',)
-    _readable_name = "agent存储模型"
-    settings: AgentSettings
-    schedules: AgentSchedules
-    states: AgentStates
+class BuiltinStore(StoreModel):
+    _namespace = ('builtin',)
+    _readable_name = "builtin存储模型"
+    settings: BuiltinSettings
+    schedules: BuiltinSchedules
+    states: BuiltinStates
 
 class StoreManager:
-    agents: dict[str, AgentStore]
+    agents: dict[str, dict[type[StoreModel], StoreModel]]
+    models: list[type[StoreModel]]
 
     def __init__(self) -> None:
         self.agents = {}
+        self.models = [BuiltinStore]
 
-    async def init_agent(self, agent_id: str) -> AgentStore:
-        search_items = await store_asearch(('agents', agent_id) + AgentStore._namespace)
-        model = AgentStore(agent_id, search_items)
-        self.agents[agent_id] = model
-        return model
-
-    async def get_agent(self, agent_id: str) -> AgentStore:
-        if agent_id not in self.agents:
-            return await self.init_agent(agent_id)
-        else:
-            return self.agents[agent_id]
-
-    def get_agent_sync(self, agent_id: str) -> AgentStore:
+    async def init_agent(self, agent_id: str) -> None:
         if agent_id not in self.agents.keys():
-            raise ValueError(f"agent {agent_id} 不存在")
-        return self.agents[agent_id]
+            self.agents[agent_id] = {}
+        for model in self.models:
+            search_items = await store_asearch(('agents', agent_id, 'models') + model._namespace)
+            self.agents[agent_id][model] = model(agent_id, search_items)
 
     def close_agent(self, agent_id: str) -> None:
         if agent_id in self.agents.keys():
             del self.agents[agent_id]
 
-    async def get_settings(self, agent_id: str) -> AgentSettings:
-        agent_store = await self.get_agent(agent_id)
-        return agent_store.settings
+    async def get_builtin(self, agent_id: str) -> BuiltinStore:
+        if agent_id not in self.agents.keys():
+            await self.init_agent(agent_id)
+        return self.agents[agent_id][BuiltinStore]
 
-    async def get_schedules(self, agent_id: str) -> AgentSchedules:
-        agent_store = await self.get_agent(agent_id)
-        return agent_store.schedules
+    def get_builtin_sync(self, agent_id: str) -> BuiltinStore:
+        if agent_id not in self.agents.keys():
+            raise ValueError(f"agent {agent_id} 不存在")
+        return self.agents[agent_id][BuiltinStore]
 
-    async def get_states(self, agent_id: str) -> AgentStates:
-        agent_store = await self.get_agent(agent_id)
-        return agent_store.states
+    async def get_settings(self, agent_id: str) -> BuiltinSettings:
+        builtin_store = await self.get_builtin(agent_id)
+        return builtin_store.settings
+
+    async def get_schedules(self, agent_id: str) -> BuiltinSchedules:
+        builtin_store = await self.get_builtin(agent_id)
+        return builtin_store.schedules
+
+    async def get_states(self, agent_id: str) -> BuiltinStates:
+        builtin_store = await self.get_builtin(agent_id)
+        return builtin_store.states
 
 store_manager = StoreManager()

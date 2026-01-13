@@ -10,7 +10,7 @@ from langgraph.store.base import PutOp
 
 from become_human.utils import dump_basemodels, get_readable_type_name
 from become_human.store.base import StoreModel, StoreField, store_alist_namespaces, store_abatch
-from become_human.store.settings import AgentSettings
+from become_human.store.settings import BuiltinSettings
 
 AGENTS_FILE_PATH = "./config/agents.toml"
 AGENT_COMMENTS_FILE_PATH = "./config/agent_comments.toml"
@@ -36,7 +36,8 @@ DEFAULT_AGENTS = {
             'sleep_time_range': (82800.0, 32400.0)
         },
         'recycling': {
-            'base_stable_time': 86400.0,
+            'memory_base_stable_time': 86400.0,
+            'memory_max_words': 150,
             'cleanup_on_non_active_recycling': True,
             'cleanup_target_size': 800
         },
@@ -129,7 +130,7 @@ def _add_field_comments(doc: TOMLDocument, model: Type[Union[StoreModel, BaseMod
                     else:
                         desc += field.description if field.description else ''
                     multi_line_comment(doc, desc)
-                    default = model.get_field_default(field)
+                    default = field.get_default_value()
                     multi_line_comment(doc, f'{key}{" = " + to_toml_like_string(default)}')
     else:
         for field_name, field_info in model.model_fields.items():
@@ -166,7 +167,7 @@ def _add_config_comments(doc: TOMLDocument):
     multi_line_comment(doc, 'init_on_startup = false')
 
     # 添加字段描述
-    doc = _add_field_comments(doc, AgentSettings)
+    doc = _add_field_comments(doc, BuiltinSettings)
 
     #doc.add(nl())
     return doc
@@ -213,7 +214,7 @@ async def load_config(agent_ids: Optional[Union[list[str], str]] = None, force: 
     if not agent_configs:
         return {}
     if not force:
-        has_settings_namespaces = await store_alist_namespaces(prefix=('agents', '*', 'model', 'settings'), max_depth=4)
+        has_settings_namespaces = await store_alist_namespaces(prefix=('agents', '*', 'models', 'builtin', 'settings'), max_depth=5)
         has_settings_agent_ids = [n[1] for n in has_settings_namespaces]
     else:
         has_settings_agent_ids = []
@@ -243,7 +244,7 @@ async def load_config(agent_ids: Optional[Union[list[str], str]] = None, force: 
                         continue
                     # dump所有的BaseModel
                     if isinstance(validated_value, BaseModel):
-                        validated_value = validated_value.model_dump(exclude_unset=True)
+                        validated_value = validated_value.model_dump()
                     elif isinstance(validated_value, (list, tuple, dict, set)):
                         validated_value = dump_basemodels(validated_value)
                     put_ops.append(PutOp(namespace=namespace, key=key, value={'value': validated_value}))
@@ -253,7 +254,7 @@ async def load_config(agent_ids: Optional[Union[list[str], str]] = None, force: 
     for key, value in agent_configs.items():
         if key not in has_settings_agent_ids:
             if isinstance(value, dict):
-                ops.extend(_write_config_to_store(value, ('agents', key, 'model', 'settings'), AgentSettings))
+                ops.extend(_write_config_to_store(value, ('agents', key, 'models', 'builtin', 'settings'), BuiltinSettings))
     if ops:
         await store_abatch(ops)
 

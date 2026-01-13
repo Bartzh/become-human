@@ -35,7 +35,7 @@ def is_that_type(type_hint: Any, target_class: type) -> bool:
         return False
 
 
-def dump_basemodels(items: Union[list, tuple, dict, set]) -> Union[list, tuple, dict, set]:
+def dump_basemodels(items: Union[list, tuple, dict, set], exclude_unset = False) -> Union[list, tuple, dict, set]:
     if isinstance(items, list):
         new_items = []
         old_items = items
@@ -58,7 +58,7 @@ def dump_basemodels(items: Union[list, tuple, dict, set]) -> Union[list, tuple, 
         else:
             item_value = item
         if isinstance(item_value, BaseModel):
-            new_item = item_value.model_dump(exclude_unset=True)
+            new_item = item_value.model_dump(exclude_unset=exclude_unset)
         elif isinstance(item_value, (list, tuple, dict, set)):
             new_item = dump_basemodels(item_value)
         else:

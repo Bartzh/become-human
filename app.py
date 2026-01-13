@@ -1,3 +1,4 @@
+import sys
 import jwt
 import asyncio, uvicorn
 import bcrypt
@@ -23,12 +24,21 @@ from webpush import WebPush, WebPushSubscription
 from langchain_core.messages import AIMessage, HumanMessage
 
 from become_human.agent_manager import AgentManager
-from become_human.message import extract_text_parts
+from become_human.message import extract_text_parts, BHMessageMetadata
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 
 #from fastapi.middleware.cors import CORSMiddleware
 
-logger.add("logs/app.log", rotation="1 day", retention="2 weeks", enqueue=True, level=os.getenv("LOG_LEVEL", "INFO").upper())
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logger.remove()
+logger.add(sys.stdout, level=log_level)
+logger.add(
+    "logs/app.log",
+    rotation="1 day",
+    retention="2 weeks",
+    enqueue=True,
+    level=log_level
+)
 
 
 @asynccontextmanager
@@ -158,7 +168,11 @@ async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
     human_message_pattern = re.compile(r'^\[.*?\]\n.*?: ')
     messages = []
     for message in main_messages:
-        if message.additional_kwargs.get("bh_from_system"):
+        bh_metadata = BHMessageMetadata.parse(message)
+        if (
+            bh_metadata.message_type != 'bh:user' and
+            bh_metadata.message_type != 'bh:ai'
+        ):
             continue
         elif isinstance(message, AIMessage):
             for tool_call in message.tool_calls:
@@ -200,7 +214,7 @@ async def input_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
 
     is_admin = users_db[user_id].get('is_admin')
 
-    asyncio.create_task(agent_manager.call_agent_with_command(
+    asyncio.create_task(agent_manager.call_agent_for_user_with_command(
         user_input=extracted_message,
         agent_id=agent_id,
         is_admin=is_admin,
