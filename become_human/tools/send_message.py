@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from langchain.tools import tool, ToolRuntime, BaseTool
+from langchain.tools import tool, ToolRuntime
 from langgraph.types import Command
 
 from become_human.times import Times

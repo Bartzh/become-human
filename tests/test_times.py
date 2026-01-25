@@ -20,7 +20,7 @@ from become_human.times import (
     real_time_to_agent_time,
     real_seconds_to_agent_seconds,
     agent_seconds_to_datetime, now_agent_time, now_agent_seconds,
-    format_time, format_seconds, parse_timedelta, Times, AnyTz
+    format_time, format_duration, parse_timedelta, Times, AnyTz
 )
 
 
@@ -110,12 +110,13 @@ class TestAgentTimeSettings:
     def test_agent_time_settings_defaults(self):
         """测试默认设置创建"""
         settings = AgentTimeSettings()
+        now_sec = now_seconds()
         assert settings.world_time_setting.agent_time_anchor == 0.0
         assert settings.world_time_setting.real_time_anchor == 0.0
         assert settings.world_time_setting.agent_time_scale == 1.0
-        assert settings.subjective_time_setting.agent_time_anchor == 0.0
-        assert settings.subjective_time_setting.real_time_anchor == 0.0
-        assert settings.subjective_time_setting.agent_time_scale == 1.0
+        assert settings.subjective_duration_setting.agent_time_anchor == 0.0
+        assert abs(settings.subjective_duration_setting.real_time_anchor - now_sec) < 2.0
+        assert settings.subjective_duration_setting.agent_time_scale == 1.0
         assert isinstance(settings.time_zone, SerializableTimeZone)
     
     def test_agent_time_settings_custom_values(self):
@@ -273,21 +274,21 @@ class TestFormattingFunctions:
         (90.0, ["1分", "30秒"]),  # 90秒 = 1分30秒
         (-3600.0, ["负", "1小时"]),  # 负数
     ])
-    def test_format_seconds_parametrized(self, input_value, expected_parts):
-        """测试时间差格式化参数化测试"""
-        result = format_seconds(input_value)
+    def test_format_duration_parametrized(self, input_value, expected_parts):
+        """测试时长格式化参数化测试"""
+        result = format_duration(input_value)
         for part in expected_parts:
             assert part in result
     
-    def test_format_seconds_zero(self):
-        """测试零时间差格式化"""
-        result = format_seconds(0)
+    def test_format_duration_zero(self):
+        """测试零时长格式化"""
+        result = format_duration(0)
         assert result == ""
     
-    def test_format_seconds_complex(self):
-        """测试复杂时间差格式化"""
+    def test_format_duration_complex(self):
+        """测试复杂时长格式化"""
         delta = timedelta(days=2, hours=3, minutes=4, seconds=5)
-        result = format_seconds(delta)
+        result = format_duration(delta)
         # timedelta(days=2) -> datetime(1,1,3) -> 减1 -> datetime(1,1,2) -> 2天
         assert "2天" in result  # 2天保持不变
         assert "3小时" in result
@@ -378,20 +379,6 @@ class TestTimesClass:
         
         assert isinstance(times.real_world_datetime, datetime)
         assert isinstance(times.real_world_timeseconds, float)
-    
-    def test_times_from_now(self):
-        """测试from_now初始化"""
-        local_tz = get_localzone()
-        times = Times.from_now()
-        
-        assert times.real_world_time_zone.tz() == local_tz
-        assert times.real_world_datetime.tzinfo is not None
-        assert isinstance(times.real_world_timeseconds, float)
-        assert times.agent_time_settings.time_zone.tz() == local_tz
-        assert times.agent_world_datetime.tzinfo is not None
-        assert times.agent_world_timeseconds == times.real_world_timeseconds
-        assert times.agent_subjective_datetime.tzinfo is not None
-        assert times.agent_subjective_timeseconds == times.real_world_timeseconds
 
 
 class TestEdgeCasesAndBoundaryConditions:
@@ -477,7 +464,7 @@ class TestTimezoneHandling:
             )
             
             real_dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-            agent_dt = real_time_to_agent_time(real_dt, settings.subjective_time_setting, settings.time_zone)
+            agent_dt = real_time_to_agent_time(real_dt, settings.world_time_setting, settings.time_zone)
             
             assert isinstance(agent_dt, datetime)
             assert agent_dt.tzinfo is not None

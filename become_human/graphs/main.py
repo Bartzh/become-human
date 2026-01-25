@@ -1,5 +1,5 @@
 from typing import Sequence, Dict, Any, Union, Callable, Optional, Literal
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 import random
 import asyncio
 from loguru import logger
@@ -36,9 +36,10 @@ from become_human.message import add_messages, get_all_retrieved_memory_ids, BHM
 from become_human.types.main import MainState, MainContext, StateEntry, InterruptData
 from become_human.memory import get_activated_memory_types, memory_manager, format_retrieved_memory_groups
 from become_human.recycling import recycle_memories
-from become_human.times import datetime_to_seconds, format_time, format_seconds, Times
+from become_human.times import datetime_to_seconds, format_time, format_duration, Times
 from become_human.message import format_messages_for_ai, extract_text_parts, construct_system_message
 from become_human.store.manager import store_manager
+from become_human.tool import AgentTool, AnyTool
 from become_human.tools import CORE_TOOLS
 from become_human.tools.send_message import SEND_MESSAGE_TOOL_CONTENT, SEND_MESSAGE, SEND_MESSAGE_CONTENT
 from become_human.tools.record_thoughts import RECORD_THOUGHTS
@@ -64,7 +65,7 @@ class MainGraph(BaseGraph):
     def __init__(
         self,
         llm: BaseChatModel,
-        tools: Optional[Sequence[Union[Dict[str, Any], type, Callable, BaseTool]]] = None,
+        tools: Optional[Sequence[AnyTool]] = None,
         llm_for_structured_output: Optional[BaseChatModel] = None
     ):
         self.tools = CORE_TOOLS
@@ -85,7 +86,8 @@ class MainGraph(BaseGraph):
         graph_builder.add_node("recycle_messages", self.recycle_messages)
         graph_builder.add_node("prepare_to_recycle", self.prepare_to_recycle)
 
-        tool_node = ToolNode(tools=self.tools, messages_key="tool_messages")
+        all_tools = [t.tool if isinstance(t, type) and issubclass(t, AgentTool) else t for t in self.tools]
+        tool_node = ToolNode(tools=all_tools, messages_key="tool_messages", handle_tool_errors=True)
         graph_builder.add_node("tools", tool_node)
 
         graph_builder.add_node("tool_node_post_process", self.tool_node_post_process)
@@ -320,7 +322,7 @@ class MainGraph(BaseGraph):
                     input_content3 = '请检查你之前留下的笔记内容并考虑要如何行动。'
                 else:
                     if next_self_call_time_secondses:
-                        parsed_next_self_call_time_secondses = f'系统接下来为你随机安排的唤醒时间（一般间隔会越来越长）{'分别' if len(next_self_call_time_secondses) > 1 else ''}为：' + '、'.join([f'{format_seconds(s - current_times.agent_world_timeseconds)}后（{format_time(s, main_config.time_settings.time_zone)}）' for s in next_self_call_time_secondses])
+                        parsed_next_self_call_time_secondses = f'系统接下来为你随机安排的唤醒时间（一般间隔会越来越长）{'分别' if len(next_self_call_time_secondses) > 1 else ''}为：' + '、'.join([f'{format_duration(s - current_times.agent_world_timeseconds)}后（{format_time(s, main_config.time_settings.time_zone)}）' for s in next_self_call_time_secondses])
                     else:
                         parsed_next_self_call_time_secondses = '唤醒次数已耗尽，这是你的最后一次唤醒。接下来你将不再被唤醒，直到用户发送新的消息的一段时间后。'
                     input_content3 = f'''{'检查到当前没有新的消息，' if not is_active else ''}请结合上下文、时间以及你的角色设定考虑是否要尝试主动给用户发送消息，或保持沉默继续等待用户的新消息。只需控制`{SEND_MESSAGE}`工具的使用与否即可实现。
@@ -330,12 +332,12 @@ class MainGraph(BaseGraph):
 
             past_seconds = current_times.agent_world_timeseconds - state.last_chat_time_seconds
             if self_call_type == 'active':
-                input_content2 = f'距离上一次与用户交互过去了{format_seconds(past_seconds)}。现在将你唤醒是由于你之前主动设置的自我唤醒时间到了，同时以下还有你为了提醒自己留下的笔记内容：\n\n{active_self_call_note}\n\n{input_content3}'
+                input_content2 = f'距离上一次与用户交互过去了{format_duration(past_seconds)}。现在将你唤醒是由于你之前主动设置的自我唤醒时间到了，同时以下还有你为了提醒自己留下的笔记内容：\n\n{active_self_call_note}\n\n{input_content3}'
             else:
                 if is_active:
-                    input_content2 = f'距离上一次与用户交互过去了{format_seconds(past_seconds)}。虽然目前还没有收到用户的新消息，但你触发了一次随机的自我唤醒（这是为了给你主动向用户对话的可能）。{input_content3}'
+                    input_content2 = f'距离上一次与用户交互过去了{format_duration(past_seconds)}。虽然目前还没有收到用户的新消息，但你触发了一次随机的自我唤醒（这是为了给你主动向用户对话的可能）。{input_content3}'
                 else:
-                    input_content2 = f'''由于自上次与用户交互以来（{format_seconds(past_seconds)}前），在一定时间内没有用户发送新的消息，你自动进入了休眠状态（在休眠状态下你会以随机的时间间隔检查是否有新的消息并短暂地回到活跃状态，而不是当有新消息时立即响应。这主要是为了模拟在停止聊天的一段时间之后，人们可能不会一直盯着最新消息而是会去做别的事，然后时不时回来检查新消息的情景）。
+                    input_content2 = f'''由于自上次与用户交互以来（{format_duration(past_seconds)}前），在一定时间内没有用户发送新的消息，你自动进入了休眠状态（在休眠状态下你会以随机的时间间隔检查是否有新的消息并短暂地回到活跃状态，而不是当有新消息时立即响应。这主要是为了模拟在停止聊天的一段时间之后，人们可能不会一直盯着最新消息而是会去做别的事，然后时不时回来检查新消息的情景）。
 现在将你唤醒，检查是否有新的消息...
 {input_content3}'''
 
@@ -414,7 +416,8 @@ class MainGraph(BaseGraph):
             break_state = {"messages": [break_message], "new_messages": [break_message]}
             return Command(update=break_state, goto="prepare_to_recycle")
 
-        llm_with_tools = self.llm.bind_tools(self.tools, tool_choice=RECORD_THOUGHTS, parallel_tool_calls=True)
+        tools = [t.get_agent_tool_schema(agent_id) if isinstance(t, type) and issubclass(t, AgentTool) else t for t in self.tools]
+        llm_with_tools = self.llm.bind_tools(tools, tool_choice=RECORD_THOUGHTS, parallel_tool_calls=True)
         unicode_prompt = '- 不要使用 Unicode 编码，所有工具均支持中文及其他语言直接输入，使用 Unicode 编码会导致输出速度下降。'
         thought_prompt = '- 也因此，在`content`也就是正常的输出内容中，你可以自由地进行推理（思维链），制定计划，评估工具调用结果等。又或者如果你有什么想记下来给未来的自己看的，也可以放在这里。但请记住，就如刚才所说，除你自己之外没人看得到这些内容。'
         parsed_character_settings = store_settings.main.format_character_settings()
@@ -513,7 +516,7 @@ class MainGraph(BaseGraph):
 
 作为一个由AI大模型驱动的agent，一般来说只有当用户主动向你发送消息时你才会被唤醒。但在这个角色扮演特化agent程序的设计中，你被赋予了两种自我唤醒的能力，这使得你也能够在一定程度上掌握主动权：
 - 被动自我唤醒：在用户没有发送消息的时候，系统会在随机时间唤醒你，此时你可以依情况尝试主动与用户互动，或者什么都不做。总之被动唤醒是系统自动执行的不需要你太在意。
-- 主动自我唤醒：你可以通过调用`add_self_call`工具来主动设置一次自我唤醒，这样就相当于是一个定时器或者说是闹钟，可使你在指定时间能够被系统唤醒并做一些事情。
+- 主动自我唤醒：你可以通过调用`add_schedule`工具来主动设置一次自我唤醒（定时计划），这样就相当于是一个定时器或者说是闹钟，可使你在指定时间能够被系统唤醒并做一些事情。
 
 # 角色设定
 
@@ -754,12 +757,15 @@ class MainGraph(BaseGraph):
         return {"agent_state": extractor_result["responses"]}
 
 
-    async def update_messages(self, agent_id: str, messages: list[BaseMessage]):
+    async def update_messages(self, agent_id: str, messages: list[BaseMessage]) -> None:
         """外部更新`messages`的唯一方式，避免了在图运行时无法修改messages的问题"""
         if not agent_id or not messages:
             return
         config = {"configurable": {"thread_id": agent_id}}
         state = await self.graph.aget_state(config)
+        while state.next and state.next[0] == 'final':
+            await asyncio.sleep(0.1)
+            state = await self.graph.aget_state(config)
         if state.next:
             if self.agent_messages_to_update.get(agent_id):
                 self.agent_messages_to_update[agent_id].extend(messages)
@@ -773,7 +779,6 @@ class MainGraph(BaseGraph):
                 await self.graph.aupdate_state(config, {"messages": messages, "input_messages": update_input_messages}, 'final')
             else:
                 await self.graph.aupdate_state(config, {"messages": messages}, 'final')
-        return
 
     async def get_messages(self, agent_id: str) -> list[BaseMessage]:
         """外部获取`messages`的唯一方式，返回会包括使用`update_messages`但还没来得及更新的消息"""

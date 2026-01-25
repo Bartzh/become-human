@@ -1,7 +1,6 @@
-from typing import Annotated
+from typing import Annotated, Any
 
 from langchain.tools import tool, ToolRuntime
-from langgraph.types import Command
 
 from become_human.times import Times
 from become_human.message import BH_MESSAGE_METADATA_KEY, BHMessageMetadata
@@ -22,7 +21,7 @@ RECORD_THOUGHTS_TOOL_CONTENT = "已记录心理活动。"
 async def record_thoughts(
     content: Annotated[str, '要记录的心理活动'],
     runtime: ToolRuntime[MainContext, MainState]
-) -> Command:
+) -> tuple[str, dict[str, Any]]:
     content = RECORD_THOUGHTS_TOOL_CONTENT
     agent_id = runtime.context.agent_id
     time_settings = (await store_manager.get_settings(agent_id)).main.time_settings

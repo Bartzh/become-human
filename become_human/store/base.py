@@ -218,10 +218,15 @@ class StoreModel:
     当获取一个没有被设置的值时，如果这个值的默认值是由default_factory提供的（与pydantic的default_factory无关），则会同时存储到store。"""
 
     _agent_id: str
-    _namespace: tuple[str, ...] = ()
+    _namespace: tuple[str, ...]
     _readable_name: Optional[str] = None
     _description: Optional[str] = None
     _cache: dict[str, StoreItem]
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if not hasattr(cls, '_namespace'):
+            raise TypeError(f"子类 {cls.__name__} 必须定义类属性 '_namespace'")
 
     def __init__(self, agent_id: str, search_items: list[SearchItem], namespace: Optional[tuple[str, ...]] = None):
         self._agent_id = agent_id

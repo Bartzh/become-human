@@ -24,7 +24,6 @@ from chromadb.api.types import (
     IDs,
     Embedding,
     PyEmbedding,
-    PyEmbeddings,
     Image,
     URI,
     URIs,
@@ -46,12 +45,13 @@ from become_human.times import format_time, Times, now_agent_seconds, datetime_t
 from become_human.store.settings import MemoryRetrievalConfig
 from become_human.store.manager import store_manager
 from become_human.utils import parse_env_array
+from become_human.scheduler import Schedule
 
 from langchain_core.runnables.config import run_in_executor
 
 
 AnyMemoryType = Literal["original", "episodic", "reflective"]
-MEMORY_TYPES = set(["original", "episodic", "reflective"])
+MEMORY_TYPES = ["original", "episodic", "reflective"]
 
 _cached_memory_types: list[AnyMemoryType] = []
 def get_activated_memory_types() -> list[AnyMemoryType]:
@@ -270,6 +270,48 @@ class RetrievedMemoryGroup(BaseModel):
     memories: list[RetrievedMemory] = Field(description="The memories")
     source_memory: RetrievedMemory = Field(description="组中唯一的源记忆（现改名目标记忆）")
 
+
+def construct_default_memory_update_schedules(agent_id: str) -> list[Schedule]:
+    return [
+        Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=5.0, job=update_memories_job, job_kwargs={
+            'agent_id': agent_id,
+            'stable_time_range': [{'$gte': 0.0}, {'$lt': 43200.0}]
+        }),
+        Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=30.0, job=update_memories_job, job_kwargs={
+            'agent_id': agent_id,
+            'stable_time_range': [{'$gte': 43200.0}, {'$lt': 86400.0}]
+        }),
+        Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=60.0, job=update_memories_job, job_kwargs={
+            'agent_id': agent_id,
+            'stable_time_range': [{'$gte': 86400.0}, {'$lt': 864000.0}]
+        }),
+        Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=500.0, job=update_memories_job, job_kwargs={
+            'agent_id': agent_id,
+            'stable_time_range': [{'$gte': 864000.0}, {'$lt': 8640000.0}]
+        }),
+        Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=3600.0, job=update_memories_job, job_kwargs={
+            'agent_id': agent_id,
+            'stable_time_range': [{'$gte': 8640000.0}]
+        }),
+    ]
+
+async def update_memories_job(agent_id: str, stable_time_range: list[dict[str, float]]) -> None:
+    """更新记忆"""
+    update_count = 0
+    for t in get_activated_memory_types():
+        where = validated_where({'$and': [{'stable_time': item} for item in stable_time_range]})
+        result = await memory_manager.aget(
+            agent_id=agent_id,
+            memory_type=t,
+            where=where,
+            include=['metadatas']
+        )
+        if result['ids']:
+            await memory_manager.update_memories(result, t, agent_id)
+            update_count += len(result['ids'])
+
+    logger.debug(f'updated {update_count} memories for agent "{agent_id}".')
+
 class MemoryManager():
     vector_store_client: ClientAPI
     embeddings: Embeddings
@@ -281,39 +323,9 @@ class MemoryManager():
         self.vector_store_client = PersistentClient(db_path, settings=Settings(anonymized_telemetry=False))
 
 
-    async def update_schedules(self, agent_id: str):
-        agent_model = await store_manager.get_builtin(agent_id)
-
-        update_count = 0
-        schedules = agent_model.schedules
-
-        types = get_activated_memory_types()
-        times = Times.from_time_settings(agent_model.settings.main.time_settings)
-        new_schedules = []
-        for schedule in schedules.memory_update_schedules:
-            next_schedule, triggered = schedule.tick(times)
-            if triggered:
-                for t in types:
-                    where = validated_where({'$and': [{'stable_time': item} for item in schedule.stable_time_range]})
-                    result = await self.aget(
-                        agent_id=agent_id,
-                        memory_type=t,
-                        where=where,
-                        include=['metadatas']
-                    )
-                    if result['ids']:
-                        await self.update_memories(result, t, agent_id)
-                        update_count += len(result['ids'])
-            if next_schedule is not None:
-                new_schedules.append(next_schedule)
-        schedules.memory_update_schedules = new_schedules
-
-        logger.debug(f'updated {update_count} memories for agent "{agent_id}".')
-
-
     async def update_memories(self, results: GetResult, memory_type: str, agent_id: str) -> None:
         time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
-        current_agent_subjective_timeseconds = now_agent_seconds(time_settings.subjective_time_setting)
+        current_agent_subjective_duration = now_agent_seconds(time_settings.subjective_duration_setting)
         if not results["ids"]:
             return
         ids = results["ids"]
@@ -324,7 +336,7 @@ class MemoryManager():
         ids_new = []
         ids_to_delete = set()
         for i in range(len(ids)):
-            metadata_patch = tick_memory(metadatas[i], current_agent_subjective_timeseconds)
+            metadata_patch = tick_memory(metadatas[i], current_agent_subjective_duration)
             if metadata_patch.get("forgot"):
                 ids_to_delete.add(ids[i])
             else:
@@ -339,7 +351,7 @@ class MemoryManager():
         docs: dict[str, list[Document]] = {t: [] for t in MEMORY_TYPES}
         agent_settings = await store_manager.get_settings(agent_id)
         time_settings = agent_settings.main.time_settings
-        current_agent_subjective_timeseconds = now_agent_seconds(time_settings.subjective_time_setting)
+        current_agent_subjective_duration = now_agent_seconds(time_settings.subjective_duration_setting)
         for memory in memories:
             # 使用jieba对memory.content进行分词并过滤掉重复词
             words = set(jieba.cut(memory.content))
@@ -361,7 +373,7 @@ class MemoryManager():
                 metadata["previous_memory_id"] = memory.previous_memory_id
             if memory.next_memory_id:
                 metadata["next_memory_id"] = memory.next_memory_id
-            r = tick_memory(metadata, current_agent_subjective_timeseconds)
+            r = tick_memory(metadata, current_agent_subjective_duration)
             if not r.get("forgot"):
                 metadata["retrievability"] = r["retrievability"]
                 document = Document(
@@ -1296,24 +1308,22 @@ def query_result_to_docs_and_scores(results: QueryResult) -> list[tuple[Document
 
 
 
-def tick_memory(metadata: dict, current_agent_subjective_time: Union[float, datetime, Times]) -> dict:
+def tick_memory(metadata: dict, current_agent_subjective_duration: Union[float, Times]) -> dict:
     """
     更新记忆的可检索性（模拟时间流逝）
     """
     #retrievability = metadata["retrievability"] * math.exp(-delta_t / metadata["stability"])
 
-    if isinstance(current_agent_subjective_time, (float, int)):
-        current_agent_subjective_timeseconds = current_agent_subjective_time
-    elif isinstance(current_agent_subjective_time, datetime):
-        current_agent_subjective_timeseconds = datetime_to_seconds(current_agent_subjective_time)
+    if isinstance(current_agent_subjective_duration, (float, int)):
+        duration = current_agent_subjective_duration
     else:
-        current_agent_subjective_timeseconds = current_agent_subjective_time.agent_subjective_timeseconds
+        duration = current_agent_subjective_duration.agent_subjective_duration
 
     if metadata["stable_time"] == 0.0:
         logger.warning('意外的stable_time为0，metadata：' + str(metadata))
         return {"forgot": True}
 
-    x = (current_agent_subjective_timeseconds - metadata["last_accessed_agent_subjective_timeseconds"]) / metadata["stable_time"]
+    x = (duration - metadata["last_accessed_agent_subjective_duration"]) / metadata["stable_time"]
     if x >= 1:
         return {"forgot": True}
     retrievability = 1 - x ** 0.4
@@ -1427,9 +1437,9 @@ def format_retrieved_memory_groups(groups: list[RetrievedMemoryGroup], time_zone
         for memory in group.memories:
             content = memory.doc.page_content
             memory_type = memory.doc.metadata["memory_type"]
-            time_seconds = memory.doc.metadata.get("creation_agent_world_timeseconds")
-            if isinstance(time_seconds, (float, int)):
-                readable_time = format_time(time_seconds, time_zone)
+            timeseconds = memory.doc.metadata.get("creation_agent_world_timeseconds")
+            if isinstance(timeseconds, (float, int)):
+                readable_time = format_time(timeseconds, time_zone)
             else:
                 readable_time = "未知时间"
             output.append(f"{'<memory_group>\n' if i == 0 else ''}{'<memory>\n「目标记忆」' if memory.is_source_memory else '「相邻记忆」'}score: {round(memory.score, 3)}\ntype: {memory_type}\ncreation_time: {readable_time}\n<content>\n{content}\n</content>\n</memory>{'\n</memory_group>' if i == memories_len - 1 else ''}")
@@ -1454,12 +1464,13 @@ def generate_time_metadatas(times: Times, prefix: str) -> dict:
             f"{prefix}_{time_type}_datetime_weekday": datetime_isocalendar.weekday,
         }
     result = {}
-    for time_type in ['real_world', 'agent_world', 'agent_subjective']:
+    for time_type in ['real_world', 'agent_world']:
         result.update(_generate_time_metadatas(
             getattr(times, f'{time_type}_timeseconds'),
             getattr(times, f'{time_type}_datetime'),
             time_type
         ))
+    result[f"{prefix}_agent_subjective_duration"] = times.agent_subjective_duration
     result[f"{prefix}_real_world_time_zone_name"] = times.real_world_time_zone.name
     if times.real_world_time_zone.offset is not None:
         result[f"{prefix}_real_world_time_zone_offset"] = times.real_world_time_zone.offset

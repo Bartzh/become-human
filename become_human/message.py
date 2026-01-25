@@ -4,7 +4,7 @@
 from secrets import token_hex
 from typing import Any, Optional, Literal, Self, Union, cast
 import uuid
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 from loguru import logger
 from langchain_core.messages import (
     BaseMessage,
@@ -36,6 +36,7 @@ class BHMessageMetadata(BaseModel):
     message_type: Optional[str] = Field(default=None)
 
     do_not_store: Optional[bool] = Field(default=None)
+    do_not_store_tool_message: Optional[str] = Field(default=None)
     is_streaming_tool: Optional[bool] = Field(default=None)
 
     recycled: Optional[bool] = Field(default=None)
@@ -330,8 +331,8 @@ def format_ai_messages_for_ai(messages: list[Union[AIMessage, ToolMessage]]) -> 
             # 让它报错
             feedback_message = tool_messages_with_id[tool_call['id']]
             feedback_message_metadata = BHMessageMetadata.parse(feedback_message)
-            if (feedback_message_metadata.do_not_store):
-                feedback_content = DO_NOT_STORE_MESSAGE
+            if feedback_message_metadata.do_not_store:
+                feedback_content = feedback_message_metadata.do_not_store_tool_message or DO_NOT_STORE_MESSAGE
             else:
                 feedback_content = '\n'.join(extract_text_parts(feedback_message.content))
             message_string += f'''<action name="{tool_call['name']}" datetime="{format_time(feedback_message_metadata.creation_times.agent_world_datetime)}">
@@ -347,8 +348,8 @@ def format_ai_messages_for_ai(messages: list[Union[AIMessage, ToolMessage]]) -> 
 def format_tool_message_for_ai(message: ToolMessage) -> str:
     """最好是用`format_ai_messages_for_ai`函数来合并处理AIMessage和ToolMessage"""
     metadata = BHMessageMetadata.parse(message)
-    if (metadata.do_not_store):
-        feedback_content = DO_NOT_STORE_MESSAGE
+    if metadata.do_not_store:
+        feedback_content = metadata.do_not_store_tool_message or DO_NOT_STORE_MESSAGE
     else:
         feedback_content = '\n'.join(extract_text_parts(message.content))
     return f'''<action name="{message.name}" datetime="{format_time(metadata.creation_times.agent_world_datetime)}>

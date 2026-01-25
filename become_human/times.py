@@ -1,7 +1,7 @@
 """核心思想是用seconds替代timestamp以解决timestamp范围过小的问题，使用seconds可表示1~9999年的所有时间。然后是agent要有自己的时间，以锚点、时间膨胀和时区实现"""
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
-from pydantic import BaseModel, Field, ConfigDict, field_validator, ValidationInfo
+from pydantic import BaseModel, Field, ConfigDict, field_validator, ValidationInfo, ValidationError
 from typing import Any, Optional, Self, Union
 from tzlocal import get_localzone_name, get_localzone
 import re
@@ -57,8 +57,14 @@ class AgentTimeSetting(BaseModel):
 class AgentTimeSettings(BaseModel):
     """agent的时间设置"""
     world_time_setting: AgentTimeSetting = Field(default_factory=AgentTimeSetting, description="agent世界时间设置")
-    subjective_time_setting: AgentTimeSetting = Field(default_factory=AgentTimeSetting, description="agent主观时间设置")
+    subjective_duration_setting: AgentTimeSetting = Field(default_factory=lambda: AgentTimeSetting(real_time_anchor=now_seconds()), description="agent主观时长设置，指agent体感（大脑）觉得自己经历了多久的时间。这个时间不能倒流")
     time_zone: SerializableTimeZone = Field(default_factory=lambda: SerializableTimeZone(name=get_localzone_name()), description="agent时区")
+
+    @field_validator('subjective_duration_setting', mode='after')
+    def validate_subjective_duration_setting(cls, v: AgentTimeSetting) -> AgentTimeSetting:
+        if v.agent_time_scale < 0.0:
+            raise ValidationError("subjective_duration_setting的time_scale必须大于等于0.0，不能倒流！")
+        return v
 
 def real_time_to_agent_time(real_time: Union[datetime, float], setting: AgentTimeSetting, time_zone: Optional[SerializableTimeZone] = None) -> datetime:
     """将真实世界时间datetime转换为agent时间datetime
@@ -95,7 +101,7 @@ def now_agent_seconds(setting: AgentTimeSetting) -> float:
 
 AnyTz = Union[timezone, ZoneInfo, float, int, timedelta, SerializableTimeZone]
 def format_time(time: Optional[Union[datetime, float]], time_zone: Optional[AnyTz] = None) -> str:
-    """datetime格式化函数
+    """时间点格式化函数
 
     若输入是秒数，则可以选择再输入一个时区，这将输出时区转换后的时间。若无则保持UTC时间。"""
     if time is None:
@@ -118,34 +124,48 @@ def format_time(time: Optional[Union[datetime, float]], time_zone: Optional[AnyT
     except (OverflowError, OSError, ValueError):
         return "时间信息损坏"
 
-def format_seconds(seconds: Union[datetime, float, int, timedelta]) -> str:
-    """时间差格式化函数"""
+def format_duration(duration: Union[datetime, float, int, timedelta]) -> str:
+    """时长格式化函数"""
     decrease_one = False
     negative = False
-    if isinstance(seconds, (float, int)):
-        if seconds < 0:
+    if isinstance(duration, (float, int)):
+        if duration < 0:
             negative = True
-            seconds = abs(seconds)
-        delta = timedelta(seconds=seconds)
-        seconds = datetime(1,1,1) + delta
+            duration = abs(duration)
+        delta = timedelta(seconds=duration)
+        duration = datetime(1,1,1) + delta
         decrease_one = True
-    elif isinstance(seconds, timedelta):
-        if seconds.days < 0:
+    elif isinstance(duration, timedelta):
+        if duration.days < 0:
             negative = True
-            seconds = abs(seconds)
-        seconds = datetime(1,1,1) + seconds
+            duration = abs(duration)
+        duration = datetime(1,1,1) + duration
         decrease_one = True
-    year = seconds.year
-    month = seconds.month
-    day = seconds.day
-    hour = seconds.hour
-    minute = seconds.minute
-    second = seconds.second
+    year = duration.year
+    month = duration.month
+    day = duration.day
+    hour = duration.hour
+    minute = duration.minute
+    second = duration.second
     if decrease_one:
         year -= 1
         month -= 1
         day -= 1
-    result = f'{'负' if negative else ''}{f'{year}年' if year > 0 else ''}{f'{month}个月' if month > 0 else ''}{f'{day}天' if day > 0 else ''}{f'{hour}小时' if hour > 0 else ''}{f'{minute}分' if minute > 0 else ''}{f'{second}秒' if second > 0 else ''}'
+    result = ''
+    if negative:
+        result += '负'
+    if year > 0:
+        result += f'{year}年'
+    if month > 0:
+        result += f'{month}个月'
+    if day > 0:
+        result += f'{day}天'
+    if hour > 0:
+        result += f'{hour}小时'
+    if minute > 0:
+        result += f'{minute}分'
+    if second > 0:
+        result += f'{second}秒'
     return result
 
 
@@ -211,8 +231,7 @@ class Times(BaseModel):
     agent_time_settings: AgentTimeSettings
     agent_world_datetime: datetime
     agent_world_timeseconds: float = Field(default=None, validate_default=True)
-    agent_subjective_datetime: datetime
-    agent_subjective_timeseconds: float = Field(default=None, validate_default=True)
+    agent_subjective_duration: float
 
     model_config = ConfigDict(frozen=True)
 
@@ -246,21 +265,6 @@ class Times(BaseModel):
             return datetime_to_seconds(info.data['agent_world_datetime'])
         return value
 
-    @field_validator("agent_subjective_datetime", mode="after")
-    @classmethod
-    def agent_subjective_datetime_validator(cls, value: datetime, info: ValidationInfo) -> datetime:
-        time_settings: AgentTimeSettings = info.data['agent_time_settings']
-        if value.tzinfo is None:
-            return value.replace(tzinfo=time_settings.time_zone.tz())
-        return value.astimezone(time_settings.time_zone.tz())
-
-    @field_validator("agent_subjective_timeseconds", mode="before")
-    @classmethod
-    def agent_subjective_timeseconds_validator(cls, value: Any, info: ValidationInfo) -> float:
-        if value is None:
-            return datetime_to_seconds(info.data['agent_subjective_datetime'])
-        return value
-
     @classmethod
     def from_time_settings(cls, settings: AgentTimeSettings, time: Optional[Union[datetime, float]] = None) -> Self:
         """旨在需要两个以上的时间种类时方便地完成各类型时间的转换
@@ -288,17 +292,12 @@ class Times(BaseModel):
                 offset=real_world_datetime.utcoffset().total_seconds()
             )
         agent_world_datetime = real_time_to_agent_time(real_world_timeseconds, settings.world_time_setting, settings.time_zone)
-        agent_subjective_datetime = real_time_to_agent_time(real_world_timeseconds, settings.subjective_time_setting, settings.time_zone)
+        agent_subjective_duration = real_seconds_to_agent_seconds(real_world_timeseconds, settings.subjective_duration_setting)
         return cls(
             real_world_time_zone=real_world_time_zone,
             real_world_datetime=real_world_datetime,
             real_world_timeseconds=real_world_timeseconds,
             agent_time_settings=settings,
             agent_world_datetime=agent_world_datetime,
-            agent_subjective_datetime=agent_subjective_datetime
+            agent_subjective_duration=agent_subjective_duration
         )
-
-    @classmethod
-    def from_now(cls) -> Self:
-        """无任何参数的构造函数，会自动获取当前时间并使用默认参数构造，均为本地时区"""
-        return cls.from_time_settings(AgentTimeSettings())

@@ -23,7 +23,8 @@ from webpush import WebPush, WebPushSubscription
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from become_human.agent_manager import AgentManager
+from become_human.plugins.agent_schedule import AgentSchedulePlugin
+from become_human.agent_manager import agent_manager
 from become_human.message import extract_text_parts, BHMessageMetadata
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 
@@ -43,10 +44,11 @@ logger.add(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global agent_manager
     # 初始化数据库
     await init_db()
-    agent_manager = await AgentManager.create()
+    await agent_manager.init_manager(plugins=[
+        AgentSchedulePlugin,
+    ])
     event_listener_task = asyncio.create_task(event_listener(agent_manager.event_queue))
     yield
     event_listener_task.cancel()
@@ -180,7 +182,7 @@ async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
                     if tool_call["args"].get(SEND_MESSAGE_CONTENT):
                         messages.append({"role": "ai", "content": tool_call["args"][SEND_MESSAGE_CONTENT], "id": f'{message.id}.{tool_call["id"]}', "name": None})
                     else:
-                        logger.warning(f'{SEND_MESSAGE}意外的没有参数，也可能是打断导致的概率问题')
+                        logger.warning(f'{SEND_MESSAGE}意外的没有参数，可能是打断导致的概率问题，也可能就是单纯的大模型输出错误')
         elif isinstance(message, HumanMessage):
             if isinstance(message.content, str):
                 content = human_message_pattern.sub('', message.text)

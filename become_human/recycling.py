@@ -21,7 +21,7 @@ from become_human.message import (
     BHMessageMetadataWithTimesNotRequired,
     BH_MESSAGE_METADATA_KEY
 )
-from become_human.times import Times, agent_seconds_to_datetime, format_time
+from become_human.times import Times, format_time
 from become_human.store.manager import store_manager
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT, SEND_MESSAGE_TOOL_CONTENT
 from become_human.tools.record_thoughts import RECORD_THOUGHTS, RECORD_THOUGHTS_CONTENT, RECORD_THOUGHTS_TOOL_CONTENT

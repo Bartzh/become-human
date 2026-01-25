@@ -46,7 +46,7 @@ async def add_self_call(
                 new_state = {}
                 metadata.is_streaming_tool = None
     tool_message = ToolMessage(name='add_self_call', content=content, artifact={}, tool_call_id=tool_call_id, additional_kwargs={
-        BH_MESSAGE_METADATA_KEY: metadata
+        BH_MESSAGE_METADATA_KEY: metadata.model_dump()
     })
     new_state["tool_messages"] = [tool_message]
     return Command(update=new_state)

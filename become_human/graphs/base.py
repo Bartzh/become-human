@@ -1,14 +1,16 @@
+from typing import Sequence, Dict, Any, Union, Callable, Optional
 import collections.abc
 from inspect import signature
+
+from aiosqlite import Connection
+from pydantic import BaseModel
+
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph, StateGraph
 from langgraph.channels.binop import _get_overwrite, _strip_extras
 
-from typing import Generic, Sequence, Dict, Any, TypeVar, Union, Callable, Optional
-
-from aiosqlite import Connection
-from pydantic import BaseModel
+from become_human.tool import AnyTool
 
 class BaseGraph:
 
@@ -17,10 +19,10 @@ class BaseGraph:
     conn: Connection
 
     llm: BaseChatModel
-    tools: list[BaseTool]
+    tools: list[AnyTool]
 
     def __init__(self, llm: Optional[BaseChatModel] = None,
-        tools: Optional[Sequence[Union[Dict[str, Any], type, Callable, BaseTool]]] = None
+        tools: Optional[Sequence[AnyTool]] = None
     ):
         if llm is not None:
             self.llm = llm

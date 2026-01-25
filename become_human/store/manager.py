@@ -1,13 +1,11 @@
 from become_human.store.base import StoreModel, store_asearch
 from become_human.store.settings import BuiltinSettings
-from become_human.store.schedules import BuiltinSchedules
 from become_human.store.states import BuiltinStates
 
 class BuiltinStore(StoreModel):
     _namespace = ('builtin',)
     _readable_name = "builtin存储模型"
     settings: BuiltinSettings
-    schedules: BuiltinSchedules
     states: BuiltinStates
 
 class StoreManager:
@@ -42,10 +40,6 @@ class StoreManager:
     async def get_settings(self, agent_id: str) -> BuiltinSettings:
         builtin_store = await self.get_builtin(agent_id)
         return builtin_store.settings
-
-    async def get_schedules(self, agent_id: str) -> BuiltinSchedules:
-        builtin_store = await self.get_builtin(agent_id)
-        return builtin_store.schedules
 
     async def get_states(self, agent_id: str) -> BuiltinStates:
         builtin_store = await self.get_builtin(agent_id)

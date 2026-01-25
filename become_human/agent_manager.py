@@ -5,7 +5,6 @@ from dateutil.relativedelta import relativedelta
 from loguru import logger
 from uuid import uuid4
 import random
-from pydantic import BaseModel
 
 from langchain_qwq import ChatQwen, ChatQwQ
 from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage, BaseMessage, AIMessage, AnyMessage, ToolMessage
@@ -19,14 +18,16 @@ from become_human.types.main import MainContext, InterruptData, MainState
 from become_human.graphs.base import StateMerger
 from become_human.graphs.main import MainGraph, SEND_MESSAGE_TOOL_CONTENT
 from become_human.recycling import recycle_memories
-from become_human.memory import get_activated_memory_types, memory_manager
+from become_human.memory import get_activated_memory_types, memory_manager, construct_default_memory_update_schedules
 from become_human.config import load_config, get_agent_configs
 from become_human.utils import is_valid_json
-from become_human.times import now_seconds, format_time, format_seconds, Times, real_seconds_to_agent_seconds, parse_timedelta
+from become_human.times import now_seconds, format_time, format_duration, Times, real_seconds_to_agent_seconds, parse_timedelta
 from become_human.message import format_messages_for_ai, extract_text_parts, construct_system_message, BH_MESSAGE_METADATA_KEY, BHMessageMetadata
 from become_human.store.base import store_setup, store_stop_listener, store_adelete_namespace
 from become_human.store.manager import store_manager
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
+from become_human.scheduler import tick_schedules, delete_schedules, add_schedules, get_schedules_by_agent_id_and_type, init_schedules_db
+from become_human.plugin import Plugin
 
 
 class AgentManager:
@@ -56,27 +57,13 @@ class AgentManager:
     def __init__(self):
         """
         不要直接实例化此类。
-        请使用 AgentManager.create() 异步创建实例。
+        请导入 agent_manager 实例变量，再调用实例方法 init_manager 完成初始化。
         """
-        pass
-
-    @classmethod
-    async def create(cls, heartbeat_interval: float = 5.0) -> Self:
-        """
-        创建AgentManager实例的唯一入口
-        
-        Args:
-            heartbeat_interval: 心跳间隔时间
-            
-        Returns:
-            AgentManager实例
-        """
-        instance = cls()
-        await instance.init_manager(heartbeat_interval)
-        return instance
+        raise NotImplementedError("""不要直接实例化此类！
+请导入 agent_manager 实例变量，再调用实例方法 init_manager 完成初始化。""")
 
 
-    async def init_manager(self, heartbeat_interval: float = 5.0):
+    async def init_manager(self, plugins: Optional[list[type[Plugin]]] = None, heartbeat_interval: float = 5.0):
         logger.info("Initializing agent manager...")
 
         req_envs = ["CHAT_MODEL_NAME", "STRUCTURED_MODEL_NAME"]
@@ -102,6 +89,11 @@ class AgentManager:
 
         await store_setup()
         await load_config()
+        await init_schedules_db()
+
+        if plugins is None:
+            plugins = []
+        self.plugins = [plugin() for plugin in dict.fromkeys(plugins)]
 
         def create_model(model_name: str, enable_thinking: bool = False):
             splited_model_name = model_name.split(':', 1)
@@ -158,8 +150,14 @@ class AgentManager:
             structured_enable_thinking = False
         self.structured_model = create_model(os.getenv("STRUCTURED_MODEL_NAME", ""), structured_enable_thinking)
 
-        self.main_graph = await MainGraph.create(self.chat_model, llm_for_structured_output=self.structured_model)
+        self.main_graph = await MainGraph.create(
+            llm=self.chat_model,
+            tools=list(dict.fromkeys([tool for plugin in self.plugins for tool in plugin.tools])),
+            llm_for_structured_output=self.structured_model)
         self.main_graph_state_merger = StateMerger(MainState)
+
+        for plugin in self.plugins:
+            await plugin.on_manager_init()
 
         # 启动heartbeat
         for key, value in get_agent_configs().items():
@@ -185,6 +183,8 @@ class AgentManager:
         """trigger所有agent，如果上一次trigger_agents正在运行则跳过"""
         if self.on_trigger_agents_finished.is_set():
             self.on_trigger_agents_finished.clear()
+            await tick_schedules()
+            # 这里暂时看起来有些奇怪，之后会考虑把trigger_agent放到tick_schedules中
             tasks = [self.trigger_agent(agent_id) for agent_id in self.activated_agent_id_datas.keys()]
             await asyncio.gather(*tasks)
             self.on_trigger_agents_finished.set()
@@ -221,7 +221,7 @@ class AgentManager:
                         current_times
                     )
                     if agent_settings.main.react_instruction:
-                        await self.call_agent_for_system(agent_id, instruction_message.text)
+                        await self.call_agent_for_system(agent_id, instruction_message.text, times=current_times)
                     else:
                         instruction_messages = [instruction_message]
                         if agent_settings.main.initial_ai_messages:
@@ -231,8 +231,6 @@ class AgentManager:
                             )
                         await self.main_graph.update_messages(agent_id, instruction_messages)
 
-            # 更新记忆
-            await self.process_timers(agent_id)
 
             # 处理每天的任务
             last_update_agent_world_datetime = agent_states.last_updated_times.agent_world_datetime
@@ -262,7 +260,7 @@ class AgentManager:
                     bh_message_metadata = BHMessageMetadata.parse(m)
                     if (
                         bh_message_metadata.message_type == 'bh:passive_retrieval' and
-                        passive_retrieval_ttl >= abs(current_times.agent_subjective_timeseconds - bh_message_metadata.creation_times.agent_subjective_timeseconds)
+                        passive_retrieval_ttl >= abs(current_times.agent_subjective_duration - bh_message_metadata.creation_times.agent_subjective_duration)
                     ):
                         passive_retrieval_messages_to_remove.append(RemoveMessage(id=m.id))
                 if passive_retrieval_messages_to_remove:
@@ -344,7 +342,7 @@ class AgentManager:
                         for m in not_extracted_messages:
                             bh_metadata = BHMessageMetadata.parse(m)
                             bh_metadata.extracted = True
-                            m.additional_kwargs = bh_metadata.model_dump()
+                            m.additional_kwargs[BH_MESSAGE_METADATA_KEY] = bh_metadata.model_dump()
                         await self.main_graph.update_messages(agent_id, not_extracted_messages + remove_messages)
 
                         # 若有，将reflective的思考过程加入messages
@@ -372,6 +370,13 @@ class AgentManager:
         }
         self.activated_agent_id_datas[agent_id]["on_trigger_finished"].set()
         await store_manager.init_agent(agent_id)
+
+        # 初始化计划
+        memory_updaters = await get_schedules_by_agent_id_and_type(agent_id, 'memory:updater')
+        if len(memory_updaters) != 5:
+            await delete_schedules([s.schedule_id for s in memory_updaters])
+            await add_schedules(construct_default_memory_update_schedules(agent_id))
+
         await self.trigger_agent(agent_id)
 
     async def close_agent(self, agent_id: str):
@@ -392,6 +397,9 @@ class AgentManager:
             except asyncio.CancelledError:
                 pass
             self.heartbeat_task = None
+
+        for plugin in self.plugins:
+            await plugin.on_manager_close()
 
         await self.main_graph.conn.close()
         await store_stop_listener()
@@ -466,91 +474,22 @@ class AgentManager:
 
         await self.call_agent(graph_input, context, random_wait=True)
 
-    async def call_agent_for_system(self, agent_id: str, content: str):
+    async def call_agent_for_system(self, agent_id: str, content: str, times: Optional[Times] = None):
         context = MainContext(agent_id=agent_id, call_type='system')
-        store_settings = await store_manager.get_settings(agent_id)
-        time_settings = store_settings.main.time_settings
-        current_times = Times.from_time_settings(time_settings)
+        if times is None:
+            store_settings = await store_manager.get_settings(agent_id)
+            time_settings = store_settings.main.time_settings
+            times = Times.from_time_settings(time_settings)
 
         graph_input = {"input_messages": construct_system_message(
             content=content,
-            times=current_times
+            times=times
         )}
 
         await self.call_agent(graph_input, context, random_wait=False)
 
     async def call_agent_for_self(self, agent_id: str, self_call_type: Literal['passive', 'active', 'wakeup'] = 'passive'):
         context = MainContext(agent_id=agent_id, call_type='self', self_call_type=self_call_type)
-#         main_config = (await store_manager.get_settings(agent_id)).main
-
-
-#         self_call_type = context.self_call_type
-#         # 只是用来处理提示词
-#         is_active = current_times.agent_world_timeseconds < state.active_time_seconds or main_config.always_active
-
-#         if self_call_type == 'active':
-#             next_active_self_call_time_secondses_and_notes = [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds > current_times.agent_world_timeseconds]
-#             new_state["active_self_call_time_secondses_and_notes"] = next_active_self_call_time_secondses_and_notes
-#             active_self_call_note = '\n'.join([f'[{format_time(s, main_config.time_settings.time_zone)}] {n}' for s, n in [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds <= current_times.agent_world_timeseconds]])
-
-#         # 有新的消息
-#         if input_messages:
-#             new_state["last_chat_time_seconds"] = current_times.agent_world_timeseconds
-#             new_state["self_call_time_secondses"] = await generate_new_self_call_timesecondses(agent_id, current_time=current_times.agent_world_timeseconds)
-#             new_state["wakeup_call_time_seconds"] = 0.0
-#             new_state["active_time_seconds"] = current_times.agent_world_timeseconds + random.uniform(main_config.active_time_range[0], main_config.active_time_range[1])
-#             if self_call_type == 'active':
-#                 input_content3 = f'请检查你之前留下的笔记内容并考虑要如何行动，同时需注意上下文中还存在新的可能需要回应的用户消息。'
-#             else:
-#                 input_content3 = f'''检查到当前有新的消息，请结合上下文、时间以及你的角色设定考虑要如何回复，或在某些特殊情况下保持沉默不理会用户。只需控制`{SEND_MESSAGE}`工具的使用与否即可实现。
-# {'注意，休眠模式只有在用户发送消息后才会被解除或重新计时。由于用户发送了新的消息，这次唤醒会使你重新回到正常的活跃状态。' if not is_active else ''}'''
-
-#         # 没有新的消息
-#         else:
-#             next_self_call_time_secondses = [s for s in state.self_call_time_secondses if s > current_times.agent_world_timeseconds]
-#             new_state["self_call_time_secondses"] = next_self_call_time_secondses
-#             temporary_active_time_seconds = current_times.agent_world_timeseconds + random.uniform(main_config.temporary_active_time_range[0], main_config.temporary_active_time_range[1])
-#             if temporary_active_time_seconds > state.active_time_seconds:
-#                 new_state["active_time_seconds"] = temporary_active_time_seconds
-#             if self_call_type == 'active':
-#                 input_content3 = '请检查你之前留下的笔记内容并考虑要如何行动。'
-#             else:
-#                 if next_self_call_time_secondses:
-#                     parsed_next_self_call_time_secondses = f'系统接下来为你随机安排的唤醒时间（一般间隔会越来越长）{'分别' if len(next_self_call_time_secondses) > 1 else ''}为：' + '、'.join([f'{format_seconds(s - current_times.agent_world_timeseconds)}后（{format_time(s, main_config.time_settings.time_zone)}）' for s in next_self_call_time_secondses])
-#                 else:
-#                     parsed_next_self_call_time_secondses = '唤醒次数已耗尽，这是你的最后一次唤醒。接下来你将不再被唤醒，直到用户发送新的消息的一段时间后。'
-#                 input_content3 = f'''{'检查到当前没有新的消息，' if not is_active else ''}请结合上下文、时间以及你的角色设定考虑是否要尝试主动给用户发送消息，或保持沉默继续等待用户的新消息。只需控制`{SEND_MESSAGE}`工具的使用与否即可实现。
-# {'注意，休眠模式只有在用户发送消息后才会被解除。由于当前没有用户发送新的消息，接下来不论你是否发送消息，你都只会短暂地回到活跃状态，之后继续保持休眠状态等待下一次唤醒（如果在短暂的活跃状态期间依然没有收到新的消息）。' if not is_active else ''}
-# {parsed_next_self_call_time_secondses}
-# 以上的唤醒时间仅供你自己作为接下来行动的参考，不要将其暴露给用户。'''
-
-#         past_seconds = current_times.agent_world_timeseconds - state.last_chat_time_seconds
-#         if self_call_type == 'active':
-#             input_content2 = f'距离上一次与用户交互过去了{format_seconds(past_seconds)}。现在将你唤醒是由于你之前主动设置的自我唤醒时间到了，同时以下还有你为了提醒自己留下的笔记内容：\n\n{active_self_call_note}\n\n{input_content3}'
-#         else:
-#             if is_active:
-#                 input_content2 = f'距离上一次与用户交互过去了{format_seconds(past_seconds)}。虽然目前还没有收到用户的新消息，但你触发了一次随机的自我唤醒（这是为了给你主动向用户对话的可能）。{input_content3}'
-#             else:
-#                 input_content2 = f'''由于自上次与用户交互以来（{format_seconds(past_seconds)}前），在一定时间内没有用户发送新的消息，你自动进入了休眠状态（在休眠状态下你会以随机的时间间隔检查是否有新的消息并短暂地回到活跃状态，而不是当有新消息时立即响应。这主要是为了模拟在停止聊天的一段时间之后，人们可能不会一直盯着最新消息而是会去做别的事，然后时不时回来检查新消息的情景）。
-# 现在将你唤醒，检查是否有新的消息...
-# {input_content3}'''
-
-#         input_content = f'当前时间是 {formated_agent_world_time}，{input_content2}'
-
-#         new_messages.append(construct_system_message(
-#             content=input_content,
-#             times=current_times
-#         ))
-
-
-        # # 直接响应
-        # else:
-        #     new_state["last_chat_time_seconds"] = current_times.agent_world_timeseconds
-        #     new_state["self_call_time_secondses"] = await generate_new_self_call_timesecondses(agent_id, current_time=current_times.agent_world_datetime)
-        #     new_state["wakeup_call_time_seconds"] = 0.0
-        #     active_time_range = store_settings.main.active_time_range
-        #     new_state["active_time_seconds"] = current_times.agent_world_timeseconds + random.uniform(active_time_range[0], active_time_range[1])
-
 
         if self_call_type == 'active':
             await self.call_agent({}, context, random_wait=False, is_self_call=True)
@@ -575,7 +514,7 @@ class AgentManager:
 
         if double_texting_strategy != 'reject':
             # 首先把参数加入buffer
-            call_agent_args = {
+            call_agent_kwargs = {
                 "graph_input": graph_input,
                 "graph_context": graph_context,
                 "double_texting_strategy": double_texting_strategy,
@@ -584,10 +523,10 @@ class AgentManager:
             }
             if agent_id not in self._call_agent_buffers:
                 args_index = 0
-                self._call_agent_buffers[agent_id] = [call_agent_args]
+                self._call_agent_buffers[agent_id] = [call_agent_kwargs]
             else:
                 args_index = len(self._call_agent_buffers[agent_id])
-                self._call_agent_buffers[agent_id].append(call_agent_args)
+                self._call_agent_buffers[agent_id].append(call_agent_kwargs)
 
         # 如果策略不为merge的同时已有运行，则不重复运行。如果agent_run_id相同，则允许运行，这是为enqueue准备的
         if double_texting_strategy != 'merge' and self.main_graph.agent_run_ids.get(agent_id) != agent_run_id:
@@ -789,20 +728,17 @@ class AgentManager:
 
         if self.main_graph.agent_run_ids.get(agent_id) == agent_run_id:
             if self._call_agent_buffers.get(agent_id):
-                args = self._call_agent_buffers[agent_id][0]
-                if args['double_texting_strategy'] == 'enqueue':
+                kwargs = self._call_agent_buffers[agent_id][0]
+                if kwargs['double_texting_strategy'] == 'enqueue':
                     del self._call_agent_buffers[agent_id][0]
-                    self.main_graph.agent_run_ids[agent_id] = args['agent_run_id']
-                    await self.call_agent(**args)
+                    self.main_graph.agent_run_ids[agent_id] = kwargs['agent_run_id']
+                    await self.call_agent(**kwargs)
                 else:
                     logger.warning('当call_agent运行完毕且agent_run_id没有改变时，该agent_id的_call_agent_buffer中不应会出现策略非enqueue（也就是merge，reject不会使用buffer）的调用。也许有极小概率两次调用刚好擦肩而过，总之这里就将其忽略了')
                 return
             else:
                 del self.main_graph.agent_run_ids[agent_id]
         return
-
-    async def process_timers(self, agent_id: str):
-        await memory_manager.update_schedules(agent_id)
 
 
     async def command_processing(self, agent_id: str, user_input: str):
@@ -833,6 +769,8 @@ key: 要获取的状态键名，例如 /get_state active_time_seconds"""
                     requested_key = splited_input[1]
 
                     state = await self.main_graph.graph.aget_state(config)
+                    if requested_key == 'next':
+                        return f"状态[{requested_key}]: {state.next or '未运行'}"
                     return f"状态[{requested_key}]: {state.values.get(requested_key, '未找到该键')}"
 
             elif user_input.startswith("/delete_last_messages ") or user_input == "/delete_last_messages":
@@ -1010,17 +948,36 @@ config: 仅重置配置（settings）
                         elif time_type == 'subjective':
                             new_agent_time_anchor = real_seconds_to_agent_seconds(
                                 current_time_seconds,
-                                time_settings.subjective_time_setting
+                                time_settings.subjective_duration_setting
                             ) + parsed_time_seconds
                             new_time_settings = time_settings.model_copy(deep=True)
-                            new_time_settings.subjective_time_setting.real_time_anchor = current_time_seconds
-                            new_time_settings.subjective_time_setting.agent_time_anchor = new_agent_time_anchor
+                            new_time_settings.subjective_duration_setting.real_time_anchor = current_time_seconds
+                            new_time_settings.subjective_duration_setting.agent_time_anchor = new_agent_time_anchor
                             store_settings.main.time_settings = new_time_settings
                         else:
                             return "无效的时间类型。"
-                        return f"已使agent时间跳过了{format_seconds(parsed_time_seconds)}。"
+                        return f"已使agent时间跳过了{format_duration(parsed_time_seconds)}。"
+
+            elif user_input == '/list_agent_schedules' or user_input.startswith("/list_agent_schedules "):
+                if user_input == '/list_agent_schedules help':
+                    return """使用方法：/list_agent_schedules
+返回：该agent已设置的所有定时计划"""
+                elif user_input == '/list_agent_schedules':
+                    schedules = await get_schedules_by_agent_id_and_type(agent_id, 'agent_schedule:schedule')
+                    time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
+                    if schedules:
+                        return f"该agent已设置且还在生效的定时计划有：\n\n{'\n\n'.join(
+                            [f'''计划标题：{schedule.job_kwargs['title']}
+计划描述：{schedule.job_kwargs['description']}
+{schedule.format_schedule(time_settings.time_zone, prefix='计划', include_id=True, include_type=False)}''' for schedule in schedules]
+                        )}"
+                    else:
+                        return "该agent目前没有设置任何定时计划。"
 
             return '无效命令。'
 
         message = await _command_processing(agent_id, user_input)
         await self.event_queue.put({"agent_id": agent_id, "name": "log", "args": {"content": message}, "id": 'command-' + str(uuid4())})
+
+
+agent_manager = AgentManager.__new__(AgentManager)

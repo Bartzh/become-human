@@ -10,7 +10,7 @@ CORE_TOOLS = [
     record_thoughts,
     send_message,
     retrieve_memories,
-    add_self_call,
+    #add_self_call,
 ]
 if (
     os.getenv('QIANFAN_API_KEY') or

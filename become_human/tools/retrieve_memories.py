@@ -148,7 +148,11 @@ RM_MEMORY_TYPE_SUGGESTIONS = {
 }
 rm_memory_types = get_activated_memory_types()
 rm_schema = {
-    #"title": "RetrieveMemoriesInputs",
+    # langchain在解析schema时会更倾向于使用工具的name而非schema中的title作为工具名
+    # 但对于某些情况，如果只提供schema而不是工具时，意味着此时无法获取工具的name
+    # 在这种情况下，schema顶层的title依然是有意义的
+    # 不过对于其他各个属性的title，langchain都会将其删除，所以没有必要填写（除了当title作为属性名时）
+    "title": RETRIEVE_MEMORIES,
     "description": f'''从你自己的向量数据库中检索信息。
 你的向量数据库有一套自动从过往上下文中分析并存储信息的机制，而这个工具使你可以主动从这个数据库中检索信息。
 对于角色扮演来说，如果你所扮演的是类人（非机器人之类）的角色，可以将数据库理解为大脑，检索理解为回忆，信息理解为记忆。
