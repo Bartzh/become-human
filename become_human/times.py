@@ -1,7 +1,7 @@
 """核心思想是用seconds替代timestamp以解决timestamp范围过小的问题，使用seconds可表示1~9999年的所有时间。然后是agent要有自己的时间，以锚点、时间膨胀和时区实现"""
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
-from pydantic import BaseModel, Field, ConfigDict, field_validator, ValidationInfo, ValidationError
+from pydantic import BaseModel, Field, ConfigDict, field_validator, ValidationInfo
 from typing import Any, Optional, Self, Union
 from tzlocal import get_localzone_name, get_localzone
 import re
@@ -63,7 +63,7 @@ class AgentTimeSettings(BaseModel):
     @field_validator('subjective_duration_setting', mode='after')
     def validate_subjective_duration_setting(cls, v: AgentTimeSetting) -> AgentTimeSetting:
         if v.agent_time_scale < 0.0:
-            raise ValidationError("subjective_duration_setting的time_scale必须大于等于0.0，不能倒流！")
+            raise ValueError("subjective_duration_setting的time_scale必须大于等于0.0，不能倒流！")
         return v
 
 def real_time_to_agent_time(real_time: Union[datetime, float], setting: AgentTimeSetting, time_zone: Optional[SerializableTimeZone] = None) -> datetime:

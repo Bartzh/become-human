@@ -3,7 +3,7 @@ import json
 import inspect
 import importlib
 import aiosqlite
-from pydantic import BaseModel, Field, field_validator, ValidationError, computed_field, ValidationInfo
+from pydantic import BaseModel, Field, field_validator, computed_field, model_validator
 from typing import Any, Union, Optional, Self, Literal, Callable
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
@@ -11,20 +11,34 @@ import random
 from loguru import logger
 from tzlocal import get_localzone
 
-from become_human.times import seconds_to_datetime, datetime_to_seconds, Times, now_seconds, nowtz, SerializableTimeZone, format_time
+from become_human.times import seconds_to_datetime, datetime_to_seconds, Times, nowtz, SerializableTimeZone, format_time
 from become_human.store.manager import store_manager
 
+
+DATABASE_PATH = "./data/schedules.sqlite"
+SCHEDULE_KEYS = ['agent_id','schedule_id', 'schedule_type', 'job_module', 'job_func', 'job_args', 'job_kwargs',
+                'interval_fixed', 'interval_random_min', 'interval_random_max',
+                'scheduled_time_of_day', 'scheduled_every_day', 'scheduled_weekdays',
+                'scheduled_monthdays', 'scheduled_every_month', 'scheduled_months',
+                'timeout_seconds', 'max_triggers', 'time_reference',
+                'time_zone_name', 'time_zone_offset', 'trigger_timeseconds', 'trigger_count', 'repeating']
+AnyScheduleKey = Literal['agent_id','schedule_id', 'schedule_type', 'job_module', 'job_func', 'job_args', 'job_kwargs',
+                'interval_fixed', 'interval_random_min', 'interval_random_max',
+                'scheduled_time_of_day', 'scheduled_every_day', 'scheduled_weekdays',
+                'scheduled_monthdays', 'scheduled_every_month', 'scheduled_months',
+                'timeout_seconds', 'max_triggers', 'time_reference',
+                'time_zone_name', 'time_zone_offset', 'trigger_timeseconds', 'trigger_count', 'repeating']
 
 class Schedule(BaseModel):
     """定时计划
 
-    如interval和scheduled系列参数都不设置，表示这是一次性计划，将在next_trigger_timeseconds时触发一次后被删除
+    如interval和scheduled系列参数都不设置，表示这是一次性计划，将在trigger_timeseconds时触发一次后被删除（又或者max_triggers设置为1也是同样的效果）
 
-    next_trigger_timeseconds的默认值是-1.0，如果不修改将在下次tick时直接被触发一次（没有设置timeout的话）
+    trigger_timeseconds的默认值是-1.0，如果不修改将在下次tick时直接被触发一次（没有设置timeout的话）
 
     如只设置interval，表示将按指定时间间隔触发。间隔时间总是在scheduled之后被加上
 
-    如需设置scheduled系列参数，需至少设置time_of_day参数
+    如需设置scheduled系列参数，需至少设置time_of_day参数以及其他任意一个scheduled系列参数
 
     可以不设置every_month和months，表示只在当月触发"""
     agent_id: str = Field(description="关联的agent_id")
@@ -46,41 +60,68 @@ class Schedule(BaseModel):
     max_triggers: int = Field(default=0, ge=0, description="计划最大触发次数（包括因超时未成功执行job），0表示无限制")
     time_reference: Literal['real_world', 'agent_world', 'agent_subjective'] = Field(default='real_world', description="基于何种时间计算scheduled系列参数。当为agent_subjective时，不能设置任何scheduled系列参数，只能使用interval系列参数来重复触发")
     time_zone: Optional[SerializableTimeZone] = Field(default=None, description="计算scheduled系列参数时使用的时区，若没有则使用tick输入的datetime的时区或是自动获取当前时区")
-    next_trigger_timeseconds: float = Field(default=-1.0, description="下次触发时间的timeseconds。如果设置为负数则跳过这次触发（不消耗trigger次数，不会使一次性计划直接失效）")
+    trigger_timeseconds: float = Field(default=-1.0, description="下次触发时间的timeseconds。如果设置为负数则跳过这次触发（不消耗trigger次数，不会使一次性计划直接失效）")
     trigger_count: int = Field(default=0, description="已触发次数（包括超时时）")
     added: bool = Field(default=False, description="计划是否已被添加")
     deleted: bool = Field(default=False, description="计划是否已被移除。不保证可靠，因为有可能从其他地方被移除")
     repeating: bool = Field(default=False, description="当前是否已处于计划重复阶段，根据下次触发时间是否被计算过来判断。主要用于当agent时间发生变化时（准确来说是倒退时），是否需要根据可能存在的scheduled系列参数重新计算下次触发时间")
 
     @field_validator("job", mode="after")
+    @classmethod
     def job_validator(cls, v: Callable) -> Callable:
         if v.__name__ == "<lambda>":
-            raise ValidationError("Lambda functions are not persistable")
+            raise ValueError("Lambda functions are not persistable")
         if "<locals>" in v.__qualname__:
-            raise ValidationError("Local/nested functions are not persistable")
+            raise ValueError("Local/nested functions are not persistable")
         return v
 
     @field_validator("job_args", mode="after")
+    @classmethod
     def job_args_validator(cls, v: list[Any]) -> list[Any]:
         try:
             json.dumps(v)
         except TypeError:
-            raise ValidationError("Job kwargs cannot be serialized")
+            raise ValueError("Job kwargs cannot be serialized")
         return v
 
     @field_validator("job_kwargs", mode="after")
+    @classmethod
     def job_kwargs_validator(cls, v: dict[str, Any]) -> dict[str, Any]:
         try:
             json.dumps(v)
         except TypeError:
-            raise ValidationError("Job kwargs cannot be serialized")
+            raise ValueError("Job kwargs cannot be serialized")
         return v
 
-    @field_validator("time_reference", mode="after")
-    def time_reference_validator(cls, v: Literal['real_world', 'agent_world', 'agent_subjective'], info: ValidationInfo) -> Literal['real_world', 'agent_world', 'agent_subjective']:
-        if info.data['scheduled_time_of_day'] is not None and v == 'agent_subjective':
-            raise ValidationError("当time_reference为agent_subjective时，不能设置任何scheduled系列参数，因为agent_subjective_duration是时长，而不是具体时间，只能使用interval系列参数来重复触发")
-        return v
+    @model_validator(mode="after")
+    def validate_schedule_parameters(self) -> Self:
+        # if (
+        #     self.interval_fixed or
+        #     (
+        #         self.interval_random_min and
+        #         self.interval_random_max
+        #     )
+        # ):
+        #     has_interval = True
+        # else:
+        #     has_interval = False
+        if (
+            self.scheduled_every_day or
+            self.scheduled_weekdays or
+            self.scheduled_monthdays or
+            self.scheduled_every_month or
+            self.scheduled_months
+        ):
+            if not self.scheduled_time_of_day:
+                raise ValueError("当scheduled_every_day、scheduled_weekdays、scheduled_monthdays、scheduled_every_month、scheduled_months中任意一个参数被指定时，scheduled_time_of_day也必须指定")
+            has_scheduled = True
+        elif self.scheduled_time_of_day:
+            raise ValueError("当scheduled_time_of_day被指定时，至少还需设置其他任何一个scheduled系列参数")
+        else:
+            has_scheduled = False
+        if self.time_reference == 'agent_subjective' and has_scheduled:
+            raise ValueError("当time_reference为agent_subjective时，不能设置任何scheduled系列参数，因为agent_subjective_duration是时长，而不是具体时间，只能使用interval系列参数来重复触发")
+        return self
 
     @computed_field
     @property
@@ -104,7 +145,7 @@ class Schedule(BaseModel):
         Returns:
             输出一个tuple，按顺序包含以下内容：
 
-            should_update: Schedule是否需更新
+            should_update: Schedule是否需更新或删除
 
             schedule: 若Schedule需更新，则返回一个包含新值的dict。否则返回None，表示无更新或应移除
 
@@ -134,25 +175,25 @@ class Schedule(BaseModel):
             current_timeseconds = datetime_to_seconds(current_time)
 
         # 如果当前时间小于下次触发时间，则直接返回
-        if current_timeseconds < self.next_trigger_timeseconds:
+        if current_timeseconds < self.trigger_timeseconds:
             return False, None, False
 
         # 负数表示无需触发，但需要计算下次触发时间，且不增加trigger_count
         is_negative = False
-        if self.next_trigger_timeseconds < 0.0:
+        if self.trigger_timeseconds < 0.0:
             is_negative = True
             not_timeout = False
 
         # 检查是否超时
         elif (
             self.timeout_seconds > 0.0 and
-            current_timeseconds > (self.next_trigger_timeseconds + self.timeout_seconds)
+            current_timeseconds > (self.trigger_timeseconds + self.timeout_seconds)
         ):
             not_timeout = False
         else:
             not_timeout = True
 
-        # 如果没有计划和间隔，则等于一次性计划（除非当next_trigger_timeseconds为负数时）
+        # 如果没有计划和间隔，则等于一次性计划（除非当trigger_timeseconds为负数时）
         if (
             not is_negative and
             self.scheduled_time_of_day is None and
@@ -161,23 +202,19 @@ class Schedule(BaseModel):
             self.deleted = True
             return True, None, not_timeout
 
-        next_trigger = self.calc_next_trigger(current_time)
-        # 返回False则表示schedule之前就已触发完毕
-        if not next_trigger:
-            return False, None, False
+        new_values = self.calc_trigger_timeseconds(current_time)
+        # 返回None则表示schedule之前就已触发完毕。又或是参数设置错误，下次触发时间永远不会变化
+        if new_values is None:
+            return True, None, False
 
         # 是否达到最大循环次数
         self.trigger_count += 1
-        new_value = {
-            "next_trigger_timeseconds": self.next_trigger_timeseconds,
-            "trigger_count": self.trigger_count,
-            "schedule_id": self.schedule_id
-        }
+        new_values["trigger_count"] = self.trigger_count
         if self.max_triggers > 0 and not is_negative and self.trigger_count >= self.max_triggers:
             self.deleted = True
             return True, None, not_timeout
 
-        return True, new_value, not_timeout
+        return True, new_values, not_timeout
 
     async def process(self, current_time: Union[Times, datetime]) -> tuple[bool, Optional[dict[str, Any]], bool]:
         """若想要单独处理schedule，请使用此方法。会在方法内直接完成更新、删除、执行操作。"""
@@ -196,16 +233,27 @@ class Schedule(BaseModel):
             await self.call_job()
         return should_update, new_values, should_execute
 
-    async def add_to_scheduler(self) -> None:
+    async def add_to_db(self) -> None:
         """添加schedule到数据库。"""
         self.added = True
         await add_schedules([self])
 
-    async def update_to_scheduler(self) -> None:
+    async def update_to_db(self, new_values: Optional[dict[str, Any]] = None) -> None:
         """更新schedule到数据库。"""
-        await update_schedules([self.dump_for_db()])
+        if new_values is None:
+            values = self.dump_for_db()
+        else:
+            if new_values.get('schedule_id'):
+                schedule_id = new_values['schedule_id']
+                if schedule_id != self.schedule_id:
+                    raise ValueError(f"new_values 中的 schedule_id {schedule_id} 与实例的 schedule_id {self.schedule_id} 不一致")
+            else:
+                schedule_id = self.schedule_id
+            values = new_values.copy()
+            values['schedule_id'] = schedule_id
+        await update_schedules([values])
 
-    async def delete_from_scheduler(self) -> None:
+    async def delete_from_db(self) -> None:
         """从数据库删除schedule。"""
         self.deleted = True
         await delete_schedules([self.schedule_id])
@@ -265,31 +313,52 @@ class Schedule(BaseModel):
         kwargs['added'] = True
         return cls.model_validate(kwargs)
 
-    def calc_next_trigger(self, current_time: Union[Times, datetime, float]) -> bool:
-        """计算下次触发时间，会同时更新实例属性。返回False则表示schedule之前就已触发完毕，应被删除。"""
+    class SameTimeError(Exception):
+        """当计算下次触发时间时，发现与当前的触发时间相同（没有变化）"""
+        pass
+
+    def calc_trigger_timeseconds(
+        self,
+        current_time: Union[Times, datetime, float]
+    ) -> Optional[dict[str, Any]]:
+        """直接计算下次触发时间，会同时更新实例属性。返回None则表示schedule之前就已触发完毕，应被删除。
+
+        对于current_time的输入类型：
+        - Times适用于所有情况
+        - datetime不适用于agent_subjective，由于其只是duration，与datetime没有关系
+        - float适用于agent_subjective与real_world，对于real_world来说，float会转换为datetime，时区UTC
+
+        ### Raises:
+            Schedule.SameTimeError: 当计算结果与当前触发时间相同（没有变化）时抛出
+        """
         if isinstance(current_time, (float, int)):
-            if self.time_reference != 'agent_subjective':
-                raise ValueError("当输入为float时，只能计算agent_subjective的下次触发时间！")
-            current_timeseconds = current_time
-            next_trigger_timeseconds = current_time
-        else:
-            # 如果输入是Times实例，则自动使用合适时间类型计算
-            if isinstance(current_time, Times):
-                if self.time_reference == 'real_world':
-                    current_datetime = current_time.real_world_datetime
-                elif self.time_reference == 'agent_world':
-                    current_datetime = current_time.agent_world_datetime
-                elif self.time_reference == 'agent_subjective':
-                    next_trigger_timeseconds = current_time.agent_subjective_duration
-                    current_timeseconds = current_time.agent_subjective_duration
-                else:
-                    raise ValueError(f"Invalid time_reference: {self.time_reference}")
+            if self.time_reference == 'real_world':
+                current_datetime = seconds_to_datetime(current_time)
+            elif self.time_reference == 'agent_subjective':
+                next_trigger_timeseconds = current_time
+            elif self.time_reference == 'agent_world':
+                raise ValueError("当输入为float时，不能计算agent_world的下次触发时间！")
             else:
-                if self.time_reference == 'agent_subjective':
-                    raise ValueError("agent_subjective只能用Times或float来计算下次触发时间！当前输入为datetime")
-                current_datetime = current_time
-            if self.time_reference != 'agent_subjective':
-                current_timeseconds = datetime_to_seconds(current_datetime)
+                raise ValueError(f"Invalid time_reference: {self.time_reference}")
+            #current_timeseconds = current_time
+        # 如果输入是Times实例，则自动使用合适时间类型计算
+        elif isinstance(current_time, Times):
+            if self.time_reference == 'real_world':
+                current_datetime = current_time.real_world_datetime
+                #current_timeseconds = current_time.real_world_timeseconds
+            elif self.time_reference == 'agent_world':
+                current_datetime = current_time.agent_world_datetime
+                #current_timeseconds = current_time.agent_world_timeseconds
+            elif self.time_reference == 'agent_subjective':
+                next_trigger_timeseconds = current_time.agent_subjective_duration
+                #current_timeseconds = next_trigger_timeseconds
+            else:
+                raise ValueError(f"Invalid time_reference: {self.time_reference}")
+        else:
+            if self.time_reference == 'agent_subjective':
+                raise ValueError("agent_subjective只能用Times或float来计算下次触发时间！当前输入为datetime")
+            current_datetime = current_time
+            #current_timeseconds = datetime_to_seconds(current_datetime)
 
         if self.time_reference != 'agent_subjective':
 
@@ -365,7 +434,7 @@ class Schedule(BaseModel):
                         # 非every_month且没有设置months意为计划只在当月生效，如果不是同一个月，视为计时器已触发完毕
                         elif next_trigger_datetime.month != current_datetime.month or next_trigger_datetime.year != current_datetime.year:
                             self.deleted = True
-                            return False
+                            return None
 
             next_trigger_timeseconds = datetime_to_seconds(next_trigger_datetime)
 
@@ -379,13 +448,29 @@ class Schedule(BaseModel):
         if interval_seconds:
             next_trigger_timeseconds += interval_seconds
 
-        if abs(next_trigger_timeseconds - current_timeseconds) < 1e-6:
-            logger.warning(f"schedule {self.schedule_id} 似乎没有设置interval或scheduled等参数，计算得出next_trigger与当前时间相同。")
+        # 如果计算得出下次触发时间与当前没有变化，返回一个异常
+        # 一般情况下比如，在tick中，出现这种情况意味着异常，可能是参数设置错误
+        # 而如果调用者主动调用该方法，就是想看看时间有没有需要更新，那么需要try&except SameTimeError
+        if abs(next_trigger_timeseconds - self.trigger_timeseconds) < 1e-6:
+            raise self.SameTimeError(f"schedule {self.schedule_id} 的下次触发时间计算结果意外地与当前的触发时间相同！")
 
-        self.next_trigger_timeseconds = next_trigger_timeseconds
+        new_values = {'schedule_id': self.schedule_id}
+        self.trigger_timeseconds = next_trigger_timeseconds
+        new_values['trigger_timeseconds'] = next_trigger_timeseconds
         if not self.repeating:
             self.repeating = True
-        return True
+            new_values['repeating'] = True
+        return new_values
+
+    # async def calc_trigger_timeseconds_and_update_to_db(self, current_time: Union[Times, datetime, float]) -> bool:
+    #     """直接计算下次触发时间，会同时更新实例属性。返回False表示schedule之前就已触发完毕，已被删除；返回True表示schedule已完成更新。"""
+    #     new_values = self.calc_trigger_timeseconds(current_time)
+    #     if new_values is None:
+    #         await self.delete_from_db()
+    #         return False
+    #     else:
+    #         await self.update_to_db(new_values)
+    #         return True
 
     def format_schedule(
         self,
@@ -394,7 +479,7 @@ class Schedule(BaseModel):
         include_id: bool = True,
         include_type: bool = True
     ) -> str:
-        next_trigger_datetime = seconds_to_datetime(self.next_trigger_timeseconds)
+        next_trigger_datetime = seconds_to_datetime(self.trigger_timeseconds)
         if self.time_zone is not None:
             next_trigger_datetime = next_trigger_datetime.astimezone(self.time_zone.tz())
         elif fallback_time_zone is not None:
@@ -448,14 +533,12 @@ class Schedule(BaseModel):
 {prefix}最大触发次数：{self.max_triggers if self.max_triggers > 0 else '无限次'}
 {prefix}已触发次数：{self.trigger_count}'''
 
+    class Condition(BaseModel):
+        """用于get_schedules的查询条件"""
+        key: AnyScheduleKey
+        op: Literal['=', '!=', '<', '<=', '>', '>='] = Field(default='=')
+        value: Any
 
-DATABASE_PATH = "./data/schedules.sqlite"
-SCHEDULE_KEYS = ['agent_id','schedule_id', 'schedule_type', 'job_module', 'job_func', 'job_args', 'job_kwargs',
-                'interval_fixed', 'interval_random_min', 'interval_random_max',
-                'scheduled_time_of_day', 'scheduled_every_day', 'scheduled_weekdays',
-                'scheduled_monthdays', 'scheduled_every_month', 'scheduled_months',
-                'timeout_seconds', 'max_triggers', 'time_reference',
-                'time_zone_name', 'time_zone_offset', 'next_trigger_timeseconds', 'trigger_count', 'repeating']
 
 async def init_schedules_db():
     """初始化数据库和表"""
@@ -483,91 +566,64 @@ async def init_schedules_db():
                 time_reference TEXT NOT NULL DEFAULT 'real_world' CHECK(time_reference IN ('real_world', 'agent_world', 'agent_subjective')),
                 time_zone_name TEXT NOT NULL DEFAULT '',
                 time_zone_offset REAL,
-                next_trigger_timeseconds REAL NOT NULL DEFAULT -1.0,
+                trigger_timeseconds REAL NOT NULL DEFAULT -1.0,
                 trigger_count INTEGER NOT NULL DEFAULT 0,
                 repeating BOOLEAN NOT NULL DEFAULT 0
             )
         """)
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_next_trigger_timeseconds ON schedules (next_trigger_timeseconds) WHERE time_reference = 'real_world'")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_trigger_timeseconds ON schedules (trigger_timeseconds) WHERE time_reference = 'real_world'")
         #await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_id ON schedules (agent_id)")
         #await db.execute("CREATE INDEX IF NOT EXISTS idx_schedule_type ON schedules (schedule_type)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_and_type ON schedules (agent_id, schedule_type)")
         await db.commit()
 
-async def get_all_schedules() -> list[Schedule]:
-    """从数据库获取agent的计划"""
+async def get_schedules(
+    where: Optional[list[Schedule.Condition]] = None,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+    order_by: Optional[AnyScheduleKey] = None,
+    order: Literal['ASC', 'DESC'] = 'ASC'
+) -> list[Schedule]:
+    """灵活查询schedule
+
+    Args:
+        where: 过滤条件
+        limit: 限制返回数量
+        offset: 跳过数量
+        order_by: 排序字段
+        order: 排序方向
+    """
+    conds = []
+    params = []
+
+    if where:
+        for cond in where:
+            conds.append(f"{cond.key} {cond.op} ?")
+            params.append(cond.value)
+
+    if conds:
+        where_clause = f" WHERE {" AND ".join(conds)}"
+    else:
+        where_clause = ""
+
+    limit_clause = f" LIMIT {limit}" if limit is not None else ""
+    offset_clause = f" OFFSET {offset}" if offset is not None else ""
+
+    if order_by:
+        if order_by not in SCHEDULE_KEYS:
+            raise ValueError(f"order_by 指定的字段 {order_by} 不存在")
+        if order.upper() not in ['ASC', 'DESC']:
+            raise ValueError(f"order 指定的方向 {order} 不存在")
+        order_by = f' ORDER BY {order_by} {order.upper()}'
+    else:
+        order_by = ''
+
+    sql = f"SELECT {', '.join(SCHEDULE_KEYS)} FROM schedules{where_clause}{order_by}{limit_clause}{offset_clause}"
+
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute(
-            f"SELECT {', '.join(SCHEDULE_KEYS)} FROM schedules"
-        ) as cursor:
+        async with db.execute(sql, params) as cursor:
             rows = await cursor.fetchall()
             return [Schedule.from_row(row) for row in rows]
-
-async def get_schedules_by_type(schedule_type: str) -> list[Schedule]:
-    """从数据库获取指定类型的计划"""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute(
-            f"SELECT {', '.join(SCHEDULE_KEYS)} FROM schedules WHERE schedule_type = ?",
-            (schedule_type,)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [Schedule.from_row(row) for row in rows]
-
-async def get_schedules_by_agent_id(agent_id: str) -> list[Schedule]:
-    """从数据库获取指定agent的计划"""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute(
-            f"SELECT {', '.join(SCHEDULE_KEYS)} FROM schedules WHERE agent_id = ?",
-            (agent_id,)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [Schedule.from_row(row) for row in rows]
-
-async def get_schedules_by_agent_id_and_type(agent_id: str, schedule_type: str) -> list[Schedule]:
-    """从数据库获取指定agent和类型的计划"""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute(
-            f"SELECT {', '.join(SCHEDULE_KEYS)} FROM schedules WHERE agent_id = ? AND schedule_type = ?",
-            (agent_id, schedule_type)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [Schedule.from_row(row) for row in rows]
-
-async def get_schedule_by_id(schedule_id: str) -> Schedule:
-    """从数据库获取指定ID的计划"""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute(
-            f"SELECT {', '.join(SCHEDULE_KEYS)} FROM schedules WHERE schedule_id = ?",
-            (schedule_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            if row is None:
-                raise ValueError(f"ID 为 {schedule_id} 的计划不存在")
-            return Schedule.from_row(row)
-
-async def get_real_world_schedules(real_world_timeseconds: Optional[Union[float, datetime]] = None) -> list[Schedule]:
-    """从数据库获取agent的real_world计划，会使用索引过滤无需触发的计划"""
-    if real_world_timeseconds is None:
-        real_world_timeseconds = now_seconds()
-    elif isinstance(real_world_timeseconds, datetime):
-        real_world_timeseconds = datetime_to_seconds(real_world_timeseconds)
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute(
-            f"SELECT {', '.join(SCHEDULE_KEYS)} FROM schedules WHERE time_reference = 'real_world' AND next_trigger_timeseconds <= ?",
-            (real_world_timeseconds,)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [Schedule.from_row(row) for row in rows]
-
-async def get_agent_schedules() -> list[Schedule]:
-    """从数据库获取agent的计划"""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute(
-            f"SELECT {', '.join(SCHEDULE_KEYS)} FROM schedules WHERE time_reference != 'real_world'"
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [Schedule.from_row(row) for row in rows]
-
 
 async def add_schedules(schedules: list[Schedule]) -> None:
     if not schedules:
@@ -583,34 +639,48 @@ async def add_schedules(schedules: list[Schedule]) -> None:
                     f"INSERT INTO schedules ({', '.join(keys)}) VALUES ({', '.join(['?'] * len(keys))})",
                     [v for v in dumped.values()]
                 )
+                schedule.added = True
             except aiosqlite.IntegrityError as e:
                 logger.error(f'schedule添加失败，大概率是id重复，将跳过这个schedule: {e}')
         await db.commit()
 
-async def update_schedules(schedules: list[dict[str, Any]]) -> None:
+async def update_schedules(schedules: list[Union[Schedule, dict[str, Any]]]) -> None:
     if not schedules:
         return
     async with aiosqlite.connect(DATABASE_PATH) as db:
         for schedule in schedules:
-            schedule_id = schedule.pop('schedule_id')
+            if isinstance(schedule, Schedule):
+                dumped_schedule = schedule.dump_for_db()
+            else:
+                dumped_schedule = schedule.copy()
+            schedule_id = dumped_schedule.pop('schedule_id')
             cursor = await db.execute(
-                f"UPDATE schedules SET {', '.join([f'{k} = ?' for k in schedule.keys()])} WHERE schedule_id = ?",
-                [v for v in schedule.values()] + [schedule_id]
+                f"UPDATE schedules SET {', '.join([f'{k} = ?' for k in dumped_schedule.keys()])} WHERE schedule_id = ?",
+                [v for v in dumped_schedule.values()] + [schedule_id]
             )
             if cursor.rowcount == 0:
                 logger.error(f"schedule更新失败，可能是由于找不到id为{schedule_id}的schedule")
         await db.commit()
 
-async def delete_schedules(schedule_ids: list[str]) -> None:
-    if not schedule_ids:
+async def delete_schedules(schedules: list[Union[Schedule, str]]) -> None:
+    if not schedules:
         return
+    schedules_len = len(schedules)
+    schedule_ids = set()
+    for schedule in schedules:
+        if isinstance(schedule, Schedule):
+            schedule_ids.add(schedule.schedule_id)
+            if not schedule.deleted:
+                schedule.deleted = True
+        else:
+            schedule_ids.add(schedule)
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute(
             f"DELETE FROM schedules WHERE schedule_id IN ({', '.join(['?'] * len(schedule_ids))})",
             schedule_ids
         )
-        if cursor.rowcount != len(schedule_ids):
-            logger.warning(f"有{schedule_ids-cursor.rowcount}个schedule删除失败，可能是由于找不到指定id的schedule（已经被删除了）")
+        if cursor.rowcount != schedules_len:
+            logger.warning(f"有{schedules_len-cursor.rowcount}个schedule删除失败，可能是由于找不到指定id的schedule（已经被删除了）")
         await db.commit()
 
 
@@ -649,11 +719,16 @@ async def tick_schedules(real_world_datetime: Optional[Union[datetime, float]] =
             if should_execute:
                 schedules_to_execute.append(schedule)
 
-        real_world_schedules = await get_real_world_schedules(current_datetime)
+        real_world_schedules = await get_schedules(where=[
+            Schedule.Condition(key='time_reference', value='real_world'),
+            Schedule.Condition(key='trigger_timeseconds', op='<=', value=datetime_to_seconds(current_datetime)),
+        ])
         for schedule in real_world_schedules:
             tick_schedule(schedule, current_datetime)
 
-        agent_schedules = await get_agent_schedules()
+        agent_schedules = await get_schedules(where=[
+            Schedule.Condition(key='time_reference', op='!=', value='real_world'),
+        ])
         for schedule in agent_schedules:
             if schedule.agent_id not in current_times_caches:
                 time_settings = (await store_manager.get_settings(schedule.agent_id)).main.time_settings
@@ -667,7 +742,7 @@ async def tick_schedules(real_world_datetime: Optional[Union[datetime, float]] =
         await delete_schedules(schedule_ids_to_delete)
         await update_schedules(schedules_to_update)
 
-        schedules_to_execute.sort(key=lambda x: x.next_trigger_timeseconds)
+        schedules_to_execute.sort(key=lambda x: x.trigger_timeseconds)
         for schedule in schedules_to_execute:
             await schedule.call_job()
             logger.debug(f"schedule {schedule.schedule_id} 执行完成")

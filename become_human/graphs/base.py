@@ -1,4 +1,4 @@
-from typing import Sequence, Dict, Any, Union, Callable, Optional
+from typing import Any, Union, Callable, Optional
 import collections.abc
 from inspect import signature
 
@@ -10,7 +10,7 @@ from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph, StateGraph
 from langgraph.channels.binop import _get_overwrite, _strip_extras
 
-from become_human.tool import AnyTool
+from become_human.tool import AgentTool
 
 class BaseGraph:
 
@@ -19,17 +19,17 @@ class BaseGraph:
     conn: Connection
 
     llm: BaseChatModel
-    tools: list[AnyTool]
+    tools: list[AgentTool]
 
     def __init__(self, llm: Optional[BaseChatModel] = None,
-        tools: Optional[Sequence[AnyTool]] = None
+        tools: Optional[list[Union[Callable, BaseTool, AgentTool]]] = None
     ):
         if llm is not None:
             self.llm = llm
         if not hasattr(self, 'tools'):
             self.tools = []
-        if tools is not None:
-            self.tools.extend(tools)
+        if tools:
+            self.tools.extend([tool if isinstance(tool, AgentTool) else AgentTool(tool) for tool in tools])
 
 # 基本是对langgraph.graph.channels.binop的改造简化版本
 MISSING = object()

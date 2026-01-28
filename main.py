@@ -2,7 +2,7 @@ import os, sys
 import asyncio
 from loguru import logger
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
-from become_human.plugins.agent_schedule import AgentSchedulePlugin
+from become_human.plugins.agent_reminder import AgentReminderPlugin
 from become_human.agent_manager import agent_manager
 
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -32,7 +32,7 @@ def _print(item: dict):
 
 async def main():
     await agent_manager.init_manager(plugins=[
-        AgentSchedulePlugin,
+        AgentReminderPlugin,
     ], heartbeat_interval=10)
     await agent_manager.init_agent(agent_id)
     task = asyncio.create_task(event_listener(agent_manager.event_queue))

@@ -1,5 +1,6 @@
 import os
 #from langchain_sandbox import PyodideSandboxTool
+from become_human.tool import AgentTool
 from become_human.tools.record_thoughts import record_thoughts
 from become_human.tools.send_message import send_message
 from become_human.tools.retrieve_memories import retrieve_memories
@@ -28,3 +29,4 @@ if (
 # 注意：
 # - 沙盒没有连接网络。
 # - 沙盒是无状态的，变量不会被继承到下一次调用。'''))
+CORE_TOOLS = [AgentTool(tool) for tool in CORE_TOOLS]

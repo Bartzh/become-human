@@ -39,7 +39,7 @@ from become_human.recycling import recycle_memories
 from become_human.times import datetime_to_seconds, format_time, format_duration, Times
 from become_human.message import format_messages_for_ai, extract_text_parts, construct_system_message
 from become_human.store.manager import store_manager
-from become_human.tool import AgentTool, AnyTool
+from become_human.tool import AgentTool
 from become_human.tools import CORE_TOOLS
 from become_human.tools.send_message import SEND_MESSAGE_TOOL_CONTENT, SEND_MESSAGE, SEND_MESSAGE_CONTENT
 from become_human.tools.record_thoughts import RECORD_THOUGHTS
@@ -65,7 +65,7 @@ class MainGraph(BaseGraph):
     def __init__(
         self,
         llm: BaseChatModel,
-        tools: Optional[Sequence[AnyTool]] = None,
+        tools: Optional[list[Union[Callable, BaseTool, AgentTool]]] = None,
         llm_for_structured_output: Optional[BaseChatModel] = None
     ):
         self.tools = CORE_TOOLS
@@ -86,8 +86,7 @@ class MainGraph(BaseGraph):
         graph_builder.add_node("recycle_messages", self.recycle_messages)
         graph_builder.add_node("prepare_to_recycle", self.prepare_to_recycle)
 
-        all_tools = [t.tool if isinstance(t, type) and issubclass(t, AgentTool) else t for t in self.tools]
-        tool_node = ToolNode(tools=all_tools, messages_key="tool_messages", handle_tool_errors=True)
+        tool_node = ToolNode(tools=[t.tool for t in self.tools], messages_key="tool_messages", handle_tool_errors=True)
         graph_builder.add_node("tools", tool_node)
 
         graph_builder.add_node("tool_node_post_process", self.tool_node_post_process)
@@ -103,7 +102,7 @@ class MainGraph(BaseGraph):
     async def create(
         cls,
         llm: BaseChatModel,
-        tools: Optional[Sequence[Union[Dict[str, Any], type, Callable, BaseTool]]] = None,
+        tools: Optional[list[Union[Callable, BaseTool, AgentTool]]] = None,
         llm_for_structured_output: Optional[BaseChatModel] = None
     ):
         instance = cls(llm, tools, llm_for_structured_output)
@@ -416,8 +415,8 @@ class MainGraph(BaseGraph):
             break_state = {"messages": [break_message], "new_messages": [break_message]}
             return Command(update=break_state, goto="prepare_to_recycle")
 
-        tools = [t.get_agent_tool_schema(agent_id) if isinstance(t, type) and issubclass(t, AgentTool) else t for t in self.tools]
-        llm_with_tools = self.llm.bind_tools(tools, tool_choice=RECORD_THOUGHTS, parallel_tool_calls=True)
+        tool_schemas = [t.get_agent_tool_schema(agent_id) for t in self.tools]
+        llm_with_tools = self.llm.bind_tools(tool_schemas, tool_choice=RECORD_THOUGHTS, parallel_tool_calls=True)
         unicode_prompt = '- 不要使用 Unicode 编码，所有工具均支持中文及其他语言直接输入，使用 Unicode 编码会导致输出速度下降。'
         thought_prompt = '- 也因此，在`content`也就是正常的输出内容中，你可以自由地进行推理（思维链），制定计划，评估工具调用结果等。又或者如果你有什么想记下来给未来的自己看的，也可以放在这里。但请记住，就如刚才所说，除你自己之外没人看得到这些内容。'
         parsed_character_settings = store_settings.main.format_character_settings()

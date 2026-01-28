@@ -1,11 +1,11 @@
 from typing import Any, Annotated, Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from langchain.tools import ToolRuntime, tool
 
-from become_human.times import AgentTimeSettings, Times, format_time, format_duration, datetime_to_seconds, seconds_to_datetime, SerializableTimeZone
+from become_human.times import Times, format_time, format_duration, datetime_to_seconds
 from become_human.message import BHMessageMetadata, BH_MESSAGE_METADATA_KEY
-from become_human.scheduler import Schedule, get_schedules_by_agent_id_and_type, get_schedule_by_id
+from become_human.scheduler import Schedule, get_schedules
 from become_human.store.manager import store_manager
 from become_human.tool import AgentTool
 from become_human.types.main import MainContext
@@ -14,25 +14,25 @@ from become_human.agent_manager import agent_manager
 
 async def agent_schedule_job(schedule: Schedule, agent_id: str, title: str, description: str) -> None:
     """
-    定时计划任务。
+    agent提醒事项任务。
 
     :param agent_id: 智能体的唯一标识符。
-    :param title: 计划的标题，用于标识计划。
-    :param description: 计划的详细描述，说明计划的具体内容。
+    :param title: 提醒事项的标题，用于标识提醒事项。
+    :param description: 提醒事项的详细说明，描述提醒事项的具体内容。
     """
     time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
     current_times = Times.from_time_settings(time_settings)
 
-    time_diff = current_times.agent_world_timeseconds - schedule.next_trigger_timeseconds
+    time_diff = current_times.agent_world_timeseconds - schedule.trigger_timeseconds
 
     await agent_manager.call_agent_for_system(
         agent_id=agent_id,
-        content=f'''当前时间是{format_time(current_times.agent_world_datetime)}。现在将你唤醒是由于你之前主动设置的定时计划到时间了{f'（但由于系统原因，有一些超出原定时间，具体为{format_duration(time_diff)}）' if time_diff > 300 else ''}，以下是你为此定时计划留下的描述，请根据此计划描述考虑现在应如何行动：
-{title}\n{description}''',
+        content=f'''当前时间是{format_time(current_times.agent_world_datetime)}。现在将你唤醒是由于你之前主动设置的一个提醒事项到时间了{f'（但由于系统原因，有一些超出原定时间，具体为{format_duration(time_diff)}）' if time_diff > 300 else ''}，以下是提醒事项的相关信息，包括你为此提醒事项留下的详细说明，请根据此说明考虑现在应如何行动：
+提醒事项标题：{title}\n提醒事项说明：{description}\n{schedule.format_schedule(prefix='提醒事项', include_id=True, include_type=False)}''',
         times=current_times
     )
 
-add_schedule_schema = {
+add_reminder_schema = {
     "$defs": {
         "weekday": {
             "description": "星期几，1-7分别表示周一到周日",
@@ -55,24 +55,24 @@ add_schedule_schema = {
     },
     "properties": {
         "title": {
-            "description": "计划标题，用于在查询时快速识别此计划。",
+            "description": "提醒事项标题，主要用于在查询时（通过`list_reminders`）快速识别与理解此提醒事项。",
             "type": "string"
         },
         "description": {
-            "description": "计划描述，用于在执行时详细说明此计划，提醒自己要做些什么。",
+            "description": "提醒事项说明，这是一段将在提醒事项触发时为自己提供的详细说明。这段说明不会出现在`list_reminders`的结果中。",
             "type": "string"
         },
         "max_triggers": {
-            "description": "计划最大触发次数，若为0则无限触发，1表示仅触发一次。",
+            "description": "提醒事项最大触发次数，若为0则无限触发，1表示仅触发一次。",
             "type": "integer",
         },
         "start_time": {
-            "description": "计划开始时间，格式为YYYY-MM-DD HH:MM:SS。",
+            "description": "提醒事项开始时间，格式为YYYY-MM-DD HH:MM:SS。",
             "type": "string",
             "default": ""
         },
         "time_of_day": {
-            "description": "若要设置可重复定时计划，指定应在一天中的哪个时间点触发计划。",
+            "description": "若要设置可重复提醒事项，指定应在一天中的哪个时间点触发提醒事项。",
             "anyOf": [
                 {
                     "type": "object",
@@ -110,7 +110,7 @@ add_schedule_schema = {
             "default": False
         },
         "weekdays": {
-            "description": "指定星期几触发，1-7分别表示周一到周日。可与monthdays同时设置（不会在同一天触发两次）。",
+            "description": "指定每周哪几天触发，1-7分别表示周一到周日。可与monthdays同时设置（不会在同一天触发两次）。",
             "items": {
                 "$ref": "#/$defs/weekday"
             },
@@ -119,7 +119,7 @@ add_schedule_schema = {
             "default": []
         },
         "monthdays": {
-            "description": "指定每月几号触发，1-31分别表示1号到31号。可与weekdays同时设置（不会在同一天触发两次）。若设置的日期超过当月总天数，会自动调整为当月最后一天（以应对不同月份的天数差异）。",
+            "description": "指定每月哪几号触发，1-31分别表示1号到31号。可与weekdays同时设置（不会在同一天触发两次）。若设置的日期超过当月总天数，会自动调整为当月最后一天（以应对不同月份的天数差异）。",
             "items": {
                 "$ref": "#/$defs/monthday"
             },
@@ -128,12 +128,12 @@ add_schedule_schema = {
             "default": []
         },
         "every_month": {
-            "description": "是否每月触发。若every_month与months都没有设置，则计划只在当月生效，过了当月就会被删除。",
+            "description": "是否每月触发。若every_month与months都没有设置，则提醒事项只在当月生效，过了当月就会被删除。",
             "type": "boolean",
             "default": False
         },
         "months": {
-            "description": "指定每年几月触发，1-12分别表示1月到12月。",
+            "description": "指定每年哪几月触发，1-12分别表示1月到12月。",
             "items": {
                 "$ref": "#/$defs/month"
             },
@@ -144,11 +144,11 @@ add_schedule_schema = {
     },
     "type": "object",
     "required": ["title", "description", "max_triggers"],
-    "title": "add_schedule"
+    "title": "add_reminder"
 }
 
-@tool(args_schema=add_schedule_schema, response_format="content_and_artifact")
-async def add_schedule(
+@tool(args_schema=add_reminder_schema, response_format="content_and_artifact")
+async def add_reminder(
     runtime: ToolRuntime[MainContext],
     title: str,
     description: str,
@@ -161,22 +161,33 @@ async def add_schedule(
     every_month: bool = False,
     months: set[int] = set(),
 ) -> tuple[str, dict[str, Any]]:
-    """为自己添加一个一次性或可重复执行的定时计划，系统将在指定时间唤醒你自己。
+    """为自己创建一个一次性或可重复触发的提醒事项，系统将在指定时间唤醒你自己。
 
 详细说明：
-- 一次性定时计划
-    - 如果只指定了start_time而没有除了title、description和max_triggers之外的其他任何参数，则视为一次性定时计划，只会在start_time指定的时间触发一次。此时max_triggers的值必须为1。
-    - 又或者，不论其他参数如何，只要max_triggers为1，那么就等于一次性定时计划。
-- 可重复定时计划
-    - 重复指的是根据一些规则重复计算下次执行时间，所以这至少需要指定time_of_day参数，才可能进行重复计算。
-    - 在可重复定时计划的情况下，如果start_time为空，则会立刻根据当前时间计算下一次触发时间。无需担心这会立刻重新唤醒你，也不会消耗触发次数。
-    - 而如果指定了start_time，计划会先等到start_time触发一次，然后再根据其他参数计算下一次触发时间。"""
-    if not start_time and not time_of_day:
-        raise ValueError("必须至少提供start_time或time_of_day其中之一！")
+- 一次性提醒事项
+    - 如果只指定了start_time而没有除了title、description和max_triggers之外的其他任何参数，则视为一次性提醒事项，只会在start_time指定的时间触发一次。此时max_triggers的值必须为1。
+    - 又或者，不论其他参数如何，只要max_triggers为1，那么就等于一次性提醒事项。
+- 可重复提醒事项
+    - 重复指的是根据一些规则重复计算下次触发时间，所以这至少需要指定time_of_day以及其他任何一个关于天或月份的参数，才可能进行重复计算。
+    - 在可重复提醒事项的情况下，如果start_time为空，则会立刻根据当前时间计算下一次触发时间。无需担心这会立刻重新唤醒你，也不会消耗触发次数。
+    - 而如果指定了start_time，提醒事项会先等到start_time触发一次，然后再根据其他参数计算下一次触发时间。"""
+    if (
+        every_day or
+        weekdays or
+        monthdays or
+        every_month or
+        months
+    ):
+        if not time_of_day:
+            raise ValueError("不完整的可重复提醒事项参数：当every_day、weekdays、monthdays、every_month、months中任意一个参数被指定时，time_of_day也必须指定")
+    elif time_of_day:
+        raise ValueError("不完整的可重复提醒事项参数：当time_of_day被指定时，至少还需设置其他任何一个关于天或月份的参数")
+    elif not start_time:
+        raise ValueError("没有提供任何时间相关参数，无法创建提醒事项！")
     # max_triggers本身不是必须的，但为了让AI更清楚自己在做什么，要求其必须正确输出。
     # max_triggers没有默认值也是因为AI可能漏掉这个参数（它会以为自己写了，但实际上没有）。
-    if max_triggers != 1 and not time_of_day:
-        raise ValueError("只指定了start_time而没有指定time_of_day则视为一次性定时计划，此时max_triggers参数必须为1！")
+    elif max_triggers != 1:
+        raise ValueError("只指定了start_time则视为一次性提醒事项，此时max_triggers参数必须为1！")
     agent_id = runtime.context.agent_id
     time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
     if start_time:
@@ -192,7 +203,7 @@ async def add_schedule(
         time_of_day_seconds = time_of_day['hour'] * 3600 + time_of_day['minute'] * 60 + time_of_day['second']
     else:
         time_of_day_seconds = None
-    content = f"添加 {title} 定时计划成功。"
+    content = f"添加“{title}”提醒事项成功。"
     schedule = Schedule(
         agent_id=agent_id,
         job=agent_schedule_job,
@@ -201,7 +212,7 @@ async def add_schedule(
             'title': title,
             'description': description,
         },
-        schedule_type='agent_schedule:schedule',
+        schedule_type='agent_reminder:reminder',
         scheduled_time_of_day=time_of_day_seconds,
         scheduled_every_day=every_day,
         scheduled_weekdays=weekdays,
@@ -209,17 +220,15 @@ async def add_schedule(
         scheduled_every_month=every_month,
         scheduled_months=months,
         time_reference='agent_world',
-        #time_zone_name=time_settings.time_zone.name,
-        #time_zone_offset=time_settings.time_zone.offset,
         max_triggers=max_triggers,
-        next_trigger_timeseconds=next_run_timeseconds,
+        trigger_timeseconds=next_run_timeseconds,
     )
     times = Times.from_time_settings(time_settings)
     if next_run_timeseconds < 0.0:
-        calc_result = schedule.calc_next_trigger(times)
-        if not calc_result:
-            raise ValueError("非every_month且没有设置months意为计划只在当月生效，而计算得出该计划的下次运行时间并非当月，计划无效！")
-    await schedule.add_to_scheduler()
+        calc_result = schedule.calc_trigger_timeseconds(times)
+        if calc_result is None:
+            raise ValueError("非every_month且没有设置months意为提醒事项只在当月生效，而计算得出该提醒事项的下次触发时间却并非当月，此提醒事项无效！")
+    await schedule.add_to_db()
     artifact = {
         BH_MESSAGE_METADATA_KEY: BHMessageMetadata(
             creation_times=times,
@@ -229,17 +238,19 @@ async def add_schedule(
     return content, artifact
 
 @tool(response_format="content_and_artifact")
-async def list_schedules(
+async def list_reminders(
     runtime: ToolRuntime[MainContext],
 ) -> tuple[str, dict[str, Any]]:
-    """列出所有已设置的定时计划。"""
+    """列出所有已设置的提醒事项。"""
     agent_id = runtime.context.agent_id
-    schedules = await get_schedules_by_agent_id_and_type(agent_id=agent_id, schedule_type='agent_schedule:schedule')
+    schedules = await get_schedules([
+        Schedule.Condition(key='agent_id', value=agent_id),
+        Schedule.Condition(key='schedule_type', value='agent_reminder:reminder')
+    ])
     time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
-    content = f"以下是你已设置且还在生效的定时计划：\n\n{'\n\n'.join(
-        [f'''计划标题：{schedule.job_kwargs['title']}
-计划描述：{schedule.job_kwargs['description']}
-{schedule.format_schedule(time_settings.time_zone, prefix='计划', include_id=True, include_type=False)}''' for schedule in schedules]
+    content = f"以下是所有你已设置且还在生效的提醒事项：\n\n{'\n\n'.join(
+        [f'''提醒事项标题：{schedule.job_kwargs['title']}
+{schedule.format_schedule(time_settings.time_zone, prefix='提醒事项', include_id=True, include_type=False)}''' for schedule in schedules]
     )}"
     times = Times.from_time_settings(time_settings)
     artifact = {
@@ -252,20 +263,30 @@ async def list_schedules(
     return content, artifact
 
 @tool(response_format="content_and_artifact")
-async def delete_schedule(
+async def delete_reminder(
     runtime: ToolRuntime[MainContext],
-    schedule_id: Annotated[str, "要删除的计划的ID"],
+    reminder_id: Annotated[str, "要删除的提醒事项的ID"],
 ) -> tuple[str, dict[str, Any]]:
-    """删除一个已设置的定时计划。"""
+    """删除一个已设置的提醒事项。"""
     agent_id = runtime.context.agent_id
     try:
-        schedule = await get_schedule_by_id(schedule_id)
+        schedule = await get_schedules([
+            Schedule.Condition(
+                key='schedule_id',
+                value=reminder_id
+            ),
+            Schedule.Condition(
+                key='schedule_type',
+                value='agent_reminder:reminder'
+            )
+        ])
+        schedule = schedule[0]
     except ValueError:
-        raise ValueError(f"不存在 ID 为 {schedule_id} 的计划！")
+        raise ValueError(f"不存在 ID 为 {reminder_id} 的提醒事项！")
     if schedule.agent_id != agent_id:
-        raise ValueError("该计划不是由你设置的，不能删除！")
-    await schedule.delete_from_scheduler()
-    content = f"删除计划 {schedule_id} 成功。"
+        raise ValueError("该提醒事项不是由你设置的，不能删除！")
+    await schedule.delete_from_db()
+    content = f"删除提醒事项“{schedule.job_kwargs['title']}”成功。"
     times = Times.from_time_settings((await store_manager.get_settings(agent_id)).main.time_settings)
     artifact = {
         BH_MESSAGE_METADATA_KEY: BHMessageMetadata(
@@ -275,9 +296,9 @@ async def delete_schedule(
     }
     return content, artifact
 
-class AgentSchedulePlugin(Plugin):
+class AgentReminderPlugin(Plugin):
     tools = [
-        AgentTool.from_tool(add_schedule),
-        AgentTool.from_tool(list_schedules),
-        AgentTool.from_tool(delete_schedule)
+        add_reminder,
+        list_reminders,
+        delete_reminder
     ]

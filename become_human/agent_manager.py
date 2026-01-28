@@ -1,4 +1,4 @@
-from typing import Optional, Union, Any, Literal, Self
+from typing import Optional, Union, Any, Literal
 import os
 import asyncio
 from dateutil.relativedelta import relativedelta
@@ -21,12 +21,12 @@ from become_human.recycling import recycle_memories
 from become_human.memory import get_activated_memory_types, memory_manager, construct_default_memory_update_schedules
 from become_human.config import load_config, get_agent_configs
 from become_human.utils import is_valid_json
-from become_human.times import now_seconds, format_time, format_duration, Times, real_seconds_to_agent_seconds, parse_timedelta
+from become_human.times import now_seconds, format_time, format_duration, Times, real_seconds_to_agent_seconds, parse_timedelta, AgentTimeSettings
 from become_human.message import format_messages_for_ai, extract_text_parts, construct_system_message, BH_MESSAGE_METADATA_KEY, BHMessageMetadata
 from become_human.store.base import store_setup, store_stop_listener, store_adelete_namespace
 from become_human.store.manager import store_manager
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
-from become_human.scheduler import tick_schedules, delete_schedules, add_schedules, get_schedules_by_agent_id_and_type, init_schedules_db
+from become_human.scheduler import get_schedules, tick_schedules, delete_schedules, add_schedules, init_schedules_db, Schedule, update_schedules
 from become_human.plugin import Plugin
 
 
@@ -36,6 +36,7 @@ class AgentManager:
     有些地方会出现的thread、thread_id，跟agent是一回事。thread指langgraph checkpointer的thread，在这里就被当作agent。"""
 
     event_queue: asyncio.Queue
+    plugins: list[Plugin]
 
     activated_agent_id_datas: dict[str, dict[str, Any]]
     heartbeat_interval: float
@@ -53,6 +54,7 @@ class AgentManager:
     # 缓冲用于当双发但还没调用graph时，最后一次调用可以连上之前的输入给agent，而前面的调用直接取消即可。
     _call_agent_buffers: dict[str, list[dict[str, Any]]]
     _agent_interrupt_datas: dict[str, InterruptData]
+    _agent_run_id_on_before_call_agent: dict[str, str]
 
     def __init__(self):
         """
@@ -63,7 +65,7 @@ class AgentManager:
 请导入 agent_manager 实例变量，再调用实例方法 init_manager 完成初始化。""")
 
 
-    async def init_manager(self, plugins: Optional[list[type[Plugin]]] = None, heartbeat_interval: float = 5.0):
+    async def init_manager(self, plugins: Optional[list[Union[type[Plugin], Plugin]]] = None, heartbeat_interval: float = 5.0):
         logger.info("Initializing agent manager...")
 
         req_envs = ["CHAT_MODEL_NAME", "STRUCTURED_MODEL_NAME"]
@@ -85,6 +87,7 @@ class AgentManager:
 
         self._call_agent_buffers = {}
         self._agent_interrupt_datas = {}
+        self._agent_run_id_on_before_call_agent = {}
 
 
         await store_setup()
@@ -93,7 +96,7 @@ class AgentManager:
 
         if plugins is None:
             plugins = []
-        self.plugins = [plugin() for plugin in dict.fromkeys(plugins)]
+        self.plugins = [plugin() if isinstance(plugin, type) else plugin for plugin in dict.fromkeys(plugins)]
 
         def create_model(model_name: str, enable_thinking: bool = False):
             splited_model_name = model_name.split(':', 1)
@@ -150,9 +153,10 @@ class AgentManager:
             structured_enable_thinking = False
         self.structured_model = create_model(os.getenv("STRUCTURED_MODEL_NAME", ""), structured_enable_thinking)
 
+        tools_plugins = [plugin for plugin in self.plugins if hasattr(plugin, 'tools')]
         self.main_graph = await MainGraph.create(
             llm=self.chat_model,
-            tools=list(dict.fromkeys([tool for plugin in self.plugins for tool in plugin.tools])),
+            tools=[tool for plugin in tools_plugins for tool in plugin.tools],
             llm_for_structured_output=self.structured_model)
         self.main_graph_state_merger = StateMerger(MainState)
 
@@ -372,18 +376,26 @@ class AgentManager:
         await store_manager.init_agent(agent_id)
 
         # 初始化计划
-        memory_updaters = await get_schedules_by_agent_id_and_type(agent_id, 'memory:updater')
+        memory_updaters = await get_schedules([
+            Schedule.Condition(key='agent_id', value=agent_id),
+            Schedule.Condition(key='schedule_type', value='memory:updater')
+        ])
         if len(memory_updaters) != 5:
             await delete_schedules([s.schedule_id for s in memory_updaters])
             await add_schedules(construct_default_memory_update_schedules(agent_id))
 
         await self.trigger_agent(agent_id)
 
+        for plugin in self.plugins:
+            await plugin.on_agent_init(agent_id)
+
     async def close_agent(self, agent_id: str):
         """手动关闭agent，若agent处于triggering则等待"""
         if self.activated_agent_id_datas.get(agent_id):
             await self.activated_agent_id_datas[agent_id]['on_trigger_finished'].wait()
             del self.activated_agent_id_datas[agent_id]
+        for plugin in self.plugins:
+            await plugin.on_agent_close(agent_id)
         store_manager.close_agent(agent_id)
 
     async def close_manager(self):
@@ -506,30 +518,48 @@ class AgentManager:
     ):
         """如果使用enqueue，那么这一次调用实际可能调用多次agent，造成返回等待时间较长，最好使用create_task，不用等待方法返回
 
-        如果使用enqueue或reject，那么自然也触发不了打断了"""
+        如果使用enqueue或reject，那么自然也触发不了打断了（但依然有可能在还没开始调用图时被打断）"""
         agent_id = graph_context.agent_id
         agent_run_id = graph_context.agent_run_id
         config = {"configurable": {"thread_id": agent_id}}
-        store_settings = await store_manager.get_settings(agent_id)
+        call_agent_kwargs = {
+            "graph_input": graph_input,
+            "graph_context": graph_context,
+            "double_texting_strategy": double_texting_strategy,
+            "random_wait": random_wait,
+            "is_self_call": is_self_call
+        }
+
+        async def processing_after_call_agent(set_interrupted: Optional[bool] = None, rejected_or_queuing: bool = False):
+            for plugin in self.plugins:
+                await plugin.after_call_agent(
+                    call_agent_kwargs,
+                    self.main_graph.agent_run_ids.get(agent_id) != agent_run_id if set_interrupted is None else set_interrupted,
+                    rejected_or_queuing
+                )
 
         if double_texting_strategy != 'reject':
             # 首先把参数加入buffer
-            call_agent_kwargs = {
-                "graph_input": graph_input,
-                "graph_context": graph_context,
-                "double_texting_strategy": double_texting_strategy,
-                "random_wait": random_wait,
-                "is_self_call": is_self_call
-            }
             if agent_id not in self._call_agent_buffers:
-                args_index = 0
+                kwargs_index = 0
                 self._call_agent_buffers[agent_id] = [call_agent_kwargs]
             else:
-                args_index = len(self._call_agent_buffers[agent_id])
+                kwargs_index = len(self._call_agent_buffers[agent_id])
                 self._call_agent_buffers[agent_id].append(call_agent_kwargs)
+
+        # 处理插件，支持在调用插件时就被打断
+        self._agent_run_id_on_before_call_agent[agent_id] = agent_run_id
+        for plugin in self.plugins:
+            await plugin.before_call_agent(call_agent_kwargs)
+        if self._agent_run_id_on_before_call_agent.get(agent_id) != agent_run_id:
+            await processing_after_call_agent(set_interrupted=True)
+            return
+        else:
+            del self._agent_run_id_on_before_call_agent[agent_id]
 
         # 如果策略不为merge的同时已有运行，则不重复运行。如果agent_run_id相同，则允许运行，这是为enqueue准备的
         if double_texting_strategy != 'merge' and self.main_graph.agent_run_ids.get(agent_id) != agent_run_id:
+            await processing_after_call_agent(set_interrupted=False, rejected_or_queuing=True)
             return
 
         # 将运行id加入main_graph的运行id字典
@@ -547,6 +577,7 @@ class AgentManager:
             await asyncio.sleep(random.uniform(1.0, 4.0))
             # 如果在等待期间又有新的调用，则取消这次调用
             if self.main_graph.agent_run_ids.get(agent_id, '') != agent_run_id:
+                await processing_after_call_agent(set_interrupted=True)
                 return
 
         # 如果main_graph正在运行"tools"节点，则等待其运行完毕再打断。
@@ -564,6 +595,7 @@ class AgentManager:
                 await asyncio.sleep(0.2)
                 # 如果在等待期间又有新的调用，则取消这次调用
                 if self.main_graph.agent_run_ids.get(agent_id) != agent_run_id:
+                    await processing_after_call_agent(set_interrupted=True)
                     return
                 main_graph_state = await self.main_graph.graph.aget_state(config)
                 current_node = main_graph_state.next[0]
@@ -575,7 +607,7 @@ class AgentManager:
             graph_input = self.main_graph_state_merger.merge(graph_inputs)
         elif double_texting_strategy == 'enqueue':
             # 把自己刚存进去的数据拿出来
-            graph_input = self._call_agent_buffers[agent_id].pop(args_index)['graph_input']
+            graph_input = self._call_agent_buffers[agent_id].pop(kwargs_index)['graph_input']
         elif self._call_agent_buffers.get(agent_id):
             del self._call_agent_buffers[agent_id]
             logger.warning("在使用reject策略调用agent时意外发现存在残留未处理的用户输入，已删除。")
@@ -587,6 +619,7 @@ class AgentManager:
         canceled = False
         gathered = None
         streaming_tool_messages = []
+        store_settings = await store_manager.get_settings(agent_id)
         async for typ, msg in self.main_graph.graph.astream(graph_input, config=config, context=graph_context, stream_mode=["updates", "messages"]):
             if typ == "updates":
                 #print(msg)
@@ -725,6 +758,7 @@ class AgentManager:
                                 tool_index += 1
                                 loop_once = True
 
+        await processing_after_call_agent()
 
         if self.main_graph.agent_run_ids.get(agent_id) == agent_run_id:
             if self._call_agent_buffers.get(agent_id):
@@ -739,6 +773,41 @@ class AgentManager:
             else:
                 del self.main_graph.agent_run_ids[agent_id]
         return
+
+
+    async def set_agent_time_settings(self, agent_id: str, new_time_settings: AgentTimeSettings):
+        """设置agent的时间设置
+
+        这个专门的方法是为了在设置新的时间设置的同时，自动更新所有可能受此时间设置影响的schedule"""
+        store_settings = await store_manager.get_settings(agent_id)
+        current_time_settings = store_settings.main.time_settings
+        current_timeseconds = now_seconds()
+        current_agent_world_timeseconds = real_seconds_to_agent_seconds(current_timeseconds, current_time_settings.world_time_setting)
+        new_times = Times.from_time_settings(new_time_settings, current_timeseconds)
+        store_settings.main.time_settings = new_time_settings
+        # 如果时间倒流
+        if new_times.agent_world_timeseconds < current_agent_world_timeseconds:
+            outdated_schedules = await get_schedules([
+                Schedule.Condition(key='agent_id', value=agent_id),
+                Schedule.Condition(key='time_reference', value='agent_world'),
+                Schedule.Condition(key='repeating', value=True)
+            ])
+            ids_to_delete = []
+            new_values_to_update = []
+            for schedule in outdated_schedules:
+                try:
+                    new_values = schedule.calc_trigger_timeseconds(new_times)
+                    if new_values is None:
+                        ids_to_delete.append(schedule.schedule_id)
+                    else:
+                        new_values_to_update.append(new_values)
+                # 忽略，这意味着计划的触发时间在新的时间下也没有改变，所以不需要任何操作
+                except Schedule.SameTimeError:
+                    pass
+            if ids_to_delete:
+                await delete_schedules(ids_to_delete)
+            if new_values_to_update:
+                await update_schedules(new_values_to_update)
 
 
     async def command_processing(self, agent_id: str, user_input: str):
@@ -958,21 +1027,24 @@ config: 仅重置配置（settings）
                             return "无效的时间类型。"
                         return f"已使agent时间跳过了{format_duration(parsed_time_seconds)}。"
 
-            elif user_input == '/list_agent_schedules' or user_input.startswith("/list_agent_schedules "):
-                if user_input == '/list_agent_schedules help':
-                    return """使用方法：/list_agent_schedules
-返回：该agent已设置的所有定时计划"""
-                elif user_input == '/list_agent_schedules':
-                    schedules = await get_schedules_by_agent_id_and_type(agent_id, 'agent_schedule:schedule')
+            elif user_input == '/list_agent_reminders' or user_input.startswith("/list_agent_reminders "):
+                if user_input == '/list_agent_reminders help':
+                    return """使用方法：/list_agent_reminders
+返回：该agent已设置的所有提醒事项"""
+                elif user_input == '/list_agent_reminders':
+                    schedules = await get_schedules([
+                        Schedule.Condition(key='agent_id', value=agent_id),
+                        Schedule.Condition(key='schedule_type', value='agent_reminder:reminder')
+                    ])
                     time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
                     if schedules:
-                        return f"该agent已设置且还在生效的定时计划有：\n\n{'\n\n'.join(
-                            [f'''计划标题：{schedule.job_kwargs['title']}
-计划描述：{schedule.job_kwargs['description']}
-{schedule.format_schedule(time_settings.time_zone, prefix='计划', include_id=True, include_type=False)}''' for schedule in schedules]
+                        return f"该agent已设置且还在生效的提醒事项有：\n\n{'\n\n'.join(
+                            [f'''提醒事项标题：{schedule.job_kwargs['title']}
+提醒事项描述：{schedule.job_kwargs['description']}
+{schedule.format_schedule(time_settings.time_zone, prefix='提醒事项', include_id=True, include_type=False)}''' for schedule in schedules]
                         )}"
                     else:
-                        return "该agent目前没有设置任何定时计划。"
+                        return "该agent目前没有设置任何提醒事项。"
 
             return '无效命令。'
 
