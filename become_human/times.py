@@ -37,7 +37,7 @@ class SerializableTimeZone(BaseModel):
 
     不设定offset的话会被当成ZoneInfo处理
 
-    特殊情况是当name为"UTC"，offset为None或0，则会返回单例timezone.utc"""
+    特殊情况是当name为"UTC"，offset为None或0，则会返回单例timezone.utc。所以不会存在ZoneInfo('UTC')"""
     name: str = Field(description="时区名称")
     offset: Optional[float] = Field(default=None, gt=-86400.0, lt=86400.0, description="时区偏移，单位为秒")
 
@@ -278,10 +278,9 @@ class Times(BaseModel):
             if time.tzinfo is None:
                 time = time.replace(tzinfo=get_localzone())
             real_world_datetime = time
-            real_world_timeseconds = datetime_to_seconds(time)
         else:
-            real_world_timeseconds = time
             real_world_datetime = seconds_to_datetime(time)
+        real_world_timeseconds = datetime_to_seconds(real_world_datetime)
         if isinstance(real_world_datetime.tzinfo, ZoneInfo):
             real_world_time_zone = SerializableTimeZone(
                 name=real_world_datetime.tzinfo.key

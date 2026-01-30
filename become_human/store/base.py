@@ -203,7 +203,7 @@ class StoreField(BaseModel):
         elif self.default is not Unset:
             return self.default
         else:
-            raise AttributeError(f"{self.readable_name}值没有被设置，并且没有默认值可以提供。")
+            raise AttributeError(f"{self.readable_name}没有设置默认值。")
 
 class StoreItem(BaseModel):
     readable_name: Optional[Union[str, UnsetType]] = Field(default=Unset, exclude_if=Unset.is_unset)
@@ -223,8 +223,8 @@ class StoreModel:
     _description: Optional[str] = None
     _cache: dict[str, StoreItem]
 
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
+    def __init_subclass__(cls):
+        super().__init_subclass__()
         if not hasattr(cls, '_namespace'):
             raise TypeError(f"子类 {cls.__name__} 必须定义类属性 '_namespace'")
 
@@ -248,7 +248,15 @@ class StoreModel:
                         logger.warning(f"Invalid value for {item.key}: {e}, from store.")
                         continue
                 else:
-                    value = Unset
+                    field = self.get_field(item.key)
+                    # 如果是default_factory则生成默认值，并保存到store中
+                    if field.default_factory is not None:
+                        value = field.get_default_value()
+                        new_value = item.value.copy()
+                        new_value['value'] = value
+                        store_queue.put_nowait({'action': 'put', 'namespace': self_namespace, 'key': item.key, 'value': new_value})
+                    else:
+                        value = Unset
                 cached[item.key] = StoreItem(
                     readable_name=item.value.get('readable_name', Unset),
                     description=item.value.get('description', Unset),

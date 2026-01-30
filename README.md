@@ -278,7 +278,7 @@ curl -fsSL https://deno.land/install.sh | sh
 TODO:
 - 测试
 - 考虑不用schedule来更新记忆
-- 专门的调整时间函数，可同步处理schedule是否也需调整next_run
+- 考虑把时间换成int存储
 - 记忆调参
 - agent自主设置定时器，统一定时器
 - 全天总结，按时间段的总结
