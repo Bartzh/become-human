@@ -7,7 +7,7 @@ from langchain_core.messages import (
     AIMessageChunk,
     ToolMessage
 )
-from become_human.times import now_seconds, Times
+from become_human.times import Times, TimestampUs
 from become_human.message import add_messages
 
 
@@ -34,11 +34,11 @@ class MainState(BaseModel):
 
     react_retry_count: int = Field(default=0, description="在同一轮ReAct循环中因出错导致的重试次数，用于防止死循环")
 
-    last_chat_time_seconds: float = Field(default_factory=now_seconds, description="上次与用户聊天时间")
-    active_time_seconds: float = Field(default=0.0, description="活跃状态终止时间")
-    self_call_time_secondses: list[float] = Field(default_factory=list, description="自我调用时间表")
-    wakeup_call_time_seconds: float = Field(default=0.0, description="唤醒调用时间")
-    active_self_call_time_secondses_and_notes: list[tuple[float, str]] = Field(default_factory=list, description="主动自我调用时间表和备注")
+    last_chat_time_seconds: TimestampUs = Field(default_factory=TimestampUs.now, description="上次与用户聊天时间")
+    active_time_seconds: TimestampUs = Field(default=TimestampUs(0), description="活跃状态终止时间")
+    self_call_time_secondses: list[TimestampUs] = Field(default_factory=list, description="自我调用时间表")
+    wakeup_call_time_seconds: TimestampUs = Field(TimestampUs(0), description="唤醒调用时间")
+    active_self_call_time_secondses_and_notes: list[tuple[TimestampUs, str]] = Field(default_factory=list, description="主动自我调用时间表和备注")
     generated: bool = Field(default=False, description="是否进入了生成流程，即经过了prepare_to_generate节点")
 
 class InterruptData(TypedDict):

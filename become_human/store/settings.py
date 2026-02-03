@@ -73,12 +73,12 @@ class MainSettings(StoreModel):
 class RecyclingSettings(StoreModel):
     _namespace = ('recycling',)
     _readable_name = "回收设置"
-    memory_base_stable_time: float = StoreField(default=259200.0, readable_name='记忆稳定时长基值', description="记忆初始化时stable_time的初始值，单位为秒。目前会乘以一个0~3的随机数")
+    memory_base_stable_duration_ticks: int = StoreField(default=259200_000_000, readable_name='记忆稳定时长基值', description="记忆初始化时stable_duration_ticks的初始值")
     memory_max_words: int = StoreField(default=300, readable_name='记忆最大Tokens数', description="单条记忆最大单词数，决定记忆难度，最大难度0.8")
-    recycling_trigger_threshold: int = StoreField(default=24000, readable_name='溢出回收阈值', description="触发溢出回收的阈值，单位为Tokens")
-    recycling_target_size: int = StoreField(default=18000, readable_name='溢出回收目标大小', description="溢出回收后目标大小，单位为Tokens")
+    recycling_trigger_threshold: int = StoreField(default=24000, readable_name='溢出回收阈值', description="触发溢出回收的阈值，单位为Token")
+    recycling_target_size: int = StoreField(default=18000, readable_name='溢出回收目标大小', description="溢出回收后目标大小，单位为Token")
     cleanup_on_non_active_recycling: bool = StoreField(default=False, readable_name='非活跃回收时清理', description="是否在非活跃自动回收的同时清理回收的消息")
-    cleanup_target_size: int = StoreField(default=2000, readable_name='非活跃清理目标大小', description="非活跃清理后目标大小，单位为Tokens")
+    cleanup_target_size: int = StoreField(default=2000, readable_name='非活跃清理目标大小', description="非活跃清理后目标大小，单位为Token")
 
 class MemoryRetrievalConfig(BaseModel):
     k: int = Field(default=16, ge=0, description="检索返回的记忆数量")
@@ -111,7 +111,7 @@ class RetrievalSettings(StoreModel):
         diversity_weight=0.2,
         strength=0.4
     ), readable_name="被动检索配置")
-    passive_retrieval_ttl: float = StoreField(default=3600.0, readable_name='被动检索存活时长', description="被动检索消息的存活时长，按agent主观时间计算，单位为秒，到点后会被自动清理，设为0.0则不清理")
+    passive_retrieval_ttl: int = StoreField(default=3600_000_000, readable_name='被动检索存活时长', description="被动检索消息的存活时长，按agent主观ticks计算，单位为秒，到点后会被自动清理，设为0则不清理")
 
 class BuiltinSettings(StoreModel):
     _namespace = ('settings',)

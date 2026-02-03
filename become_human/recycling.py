@@ -372,7 +372,7 @@ async def recycle_original_memories(agent_id: str, input_messages: list[AnyMessa
     content_and_kwargs = [{'content': s, 'kwargs': messages[i].additional_kwargs, 'id': messages[i].id} for s, i in formated_messages]
 
     extracted_memories: list[InitialMemory] = []
-    base_stable_time = store_settings.recycling.memory_base_stable_time
+    base_stable_duration_ticks = store_settings.recycling.memory_base_stable_duration_ticks
     message_ids = [message['id'] if message['id'] else str(uuid4()) for message in content_and_kwargs]
     messages_len = len(content_and_kwargs)
 
@@ -380,7 +380,7 @@ async def recycle_original_memories(agent_id: str, input_messages: list[AnyMessa
         stable_mult = random.expovariate(0.8) #TODO:这个值应该由文本的情感强烈程度来决定
         extracted_memories.append(InitialMemory(
             content=message['content'],
-            stable_time=stable_mult * base_stable_time,
+            stable_duration_ticks=int(stable_mult * base_stable_duration_ticks),
             type="original",
             creation_times=BHMessageMetadata.parse(message['kwargs']).creation_times,
             id=message_ids[i],
@@ -398,7 +398,7 @@ async def recycle_episodic_memories(agent_id: str, input_messages: list[AnyMessa
 
     store_settings = await store_manager.get_settings(agent_id)
     time_settings = store_settings.main.time_settings
-    base_stable_time = store_settings.recycling.memory_base_stable_time
+    base_stable_duration_ticks = store_settings.recycling.memory_base_stable_duration_ticks
 
     if messages:
         # 目前就用当前时间了
@@ -419,7 +419,7 @@ async def recycle_episodic_memories(agent_id: str, input_messages: list[AnyMessa
         for i, episodic_memory in enumerate(episodic_memories):
             extracted_memories.append(InitialMemory(
                 content=episodic_memory,
-                stable_time=random.expovariate(1.0) * base_stable_time,
+                stable_duration_ticks=int(random.expovariate(1.0) * base_stable_duration_ticks),
                 type="episodic",
                 creation_times=current_times,
                 id=episodic_memory_ids[i],
@@ -473,10 +473,10 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
             }
         )]
     ).construct_messages(times_after))
-    base_stable_time = store_settings.recycling.memory_base_stable_time
+    base_stable_duration_ticks = store_settings.recycling.memory_base_stable_duration_ticks
     memories = [InitialMemory(
         content=memory,
-        stable_time=random.expovariate(0.4) * base_stable_time,
+        stable_duration_ticks=int(random.expovariate(0.4) * base_stable_duration_ticks),
         type="reflective",
         creation_times=times_after,
         id=ids[i],
@@ -486,7 +486,7 @@ async def recycle_reflective_memories(agent_id: str, input_messages: list[AnyMes
     if 'original' in get_activated_memory_types():
         memories.append(InitialMemory(
             content=process[1].content,
-            stable_time=random.expovariate(0.4) * base_stable_time,
+            stable_duration_ticks=int(random.expovariate(0.4) * base_stable_duration_ticks),
             type="original",
             creation_times=times_after,
             id=process[1].id,

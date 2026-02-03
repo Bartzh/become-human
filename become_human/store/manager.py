@@ -1,3 +1,5 @@
+from typing import TypeVar
+from become_human.times import AgentTimeSettings
 from become_human.store.base import StoreModel, store_asearch
 from become_human.store.settings import BuiltinSettings
 from become_human.store.states import BuiltinStates
@@ -8,6 +10,7 @@ class BuiltinStore(StoreModel):
     settings: BuiltinSettings
     states: BuiltinStates
 
+StoreType = TypeVar('StoreType', bound=StoreModel)
 class StoreManager:
     agents: dict[str, dict[type[StoreModel], StoreModel]]
     models: list[type[StoreModel]]
@@ -32,15 +35,13 @@ class StoreManager:
             for agent_id in self.agents.keys():
                 await self._init_model(agent_id, model)
 
-    async def get_model(self, agent_id: str, model: type[StoreModel]) -> StoreModel:
+    async def get_model(self, agent_id: str, model: type[StoreType]) -> StoreType:
+        await self.register_model(model)
         if agent_id not in self.agents.keys():
             await self.init_agent(agent_id)
-        if model not in self.agents[agent_id].keys():
-            self.models.append(model)
-            await self._init_model(agent_id, model)
         return self.agents[agent_id][model]
 
-    def get_model_sync(self, agent_id: str, model: type[StoreModel]) -> StoreModel:
+    def get_model_sync(self, agent_id: str, model: type[StoreType]) -> StoreType:
         if agent_id not in self.agents.keys():
             raise ValueError(f"agent {agent_id} 未被初始化")
         if model not in self.agents[agent_id].keys():

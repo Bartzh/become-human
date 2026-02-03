@@ -36,7 +36,7 @@ DEFAULT_AGENTS = {
             'sleep_time_range': (82800.0, 32400.0)
         },
         'recycling': {
-            'memory_base_stable_time': 86400.0,
+            'memory_base_stable_duration_ticks': 86400_000_000,
             'memory_max_words': 150,
             'cleanup_on_non_active_recycling': True,
             'cleanup_target_size': 800

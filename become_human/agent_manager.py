@@ -21,7 +21,7 @@ from become_human.recycling import recycle_memories
 from become_human.memory import get_activated_memory_types, memory_manager, construct_default_memory_update_schedules
 from become_human.config import load_config, get_agent_configs
 from become_human.utils import is_valid_json
-from become_human.times import now_seconds, format_time, format_duration, Times, real_seconds_to_agent_seconds, parse_timedelta, AgentTimeSettings
+from become_human.times import format_time, format_duration, Times, parse_timedelta, AgentTimeSettings, timedelta_to_microseconds, TimestampUs
 from become_human.message import format_messages_for_ai, extract_text_parts, construct_system_message, BH_MESSAGE_METADATA_KEY, BHMessageMetadata
 from become_human.store.base import store_setup, store_stop_listener, store_adelete_namespace
 from become_human.store.manager import store_manager
@@ -258,13 +258,13 @@ class AgentManager:
 
             # 自动清理被动检索
             passive_retrieval_ttl = agent_settings.retrieval.passive_retrieval_ttl
-            if passive_retrieval_ttl > 0.0:
+            if passive_retrieval_ttl > 0:
                 passive_retrieval_messages_to_remove = []
                 for m in await self.main_graph.get_messages(agent_id):
                     bh_message_metadata = BHMessageMetadata.parse(m)
                     if (
                         bh_message_metadata.message_type == 'bh:passive_retrieval' and
-                        passive_retrieval_ttl >= abs(current_times.agent_subjective_duration - bh_message_metadata.creation_times.agent_subjective_duration)
+                        passive_retrieval_ttl >= abs(current_times.agent_subjective_tick - bh_message_metadata.creation_times.agent_subjective_tick)
                     ):
                         passive_retrieval_messages_to_remove.append(RemoveMessage(id=m.id))
                 if passive_retrieval_messages_to_remove:
@@ -279,25 +279,25 @@ class AgentManager:
             can_call = False
             if active_self_call_time_secondses_and_notes:
                 for seconds, note in active_self_call_time_secondses_and_notes:
-                    if current_times.agent_world_timeseconds >= seconds:
+                    if current_times.agent_world_timestampus >= seconds:
                         can_call = True
                         self_call_type = 'active'
                         break
             if self_call_time_secondses and not can_call:
                 for seconds in self_call_time_secondses:
-                    if current_times.agent_world_timeseconds >= seconds:
+                    if current_times.agent_world_timestampus >= seconds:
                         can_call = True
                         self_call_type = 'passive'
                         break
             if wakeup_call_time_seconds and not can_call:
-                if current_times.agent_world_timeseconds >= wakeup_call_time_seconds:
+                if current_times.agent_world_timestampus >= wakeup_call_time_seconds:
                     can_call = True
                     self_call_type = 'passive'
             if can_call:
                 await self.call_agent_for_self(agent_id, self_call_type=self_call_type)
 
             # 如果没有自我调用，开始尝试自动回收闲置上下文，先判断是否已超出活跃时间
-            elif main_graph_state.values.get("active_time_seconds") and current_times.agent_world_timeseconds > main_graph_state.values.get("active_time_seconds"):
+            elif main_graph_state.values.get("active_time_seconds") and current_times.agent_world_timestampus > main_graph_state.values.get("active_time_seconds"):
                 messages = await self.main_graph.get_messages(agent_id)
                 # 最后一条消息如果为HumanMessage说明agent还没有响应
                 if not isinstance(messages[-1], HumanMessage):
@@ -356,7 +356,7 @@ class AgentManager:
             # 闲置过久（两个星期）则关闭agent
             elif (
                 agent_id in self.activated_agent_id_datas and
-                current_times.real_world_timeseconds > (self.activated_agent_id_datas.get(agent_id, {}).get("created_at", 0) + 1209600)
+                current_times.real_world_timestampus > (self.activated_agent_id_datas.get(agent_id, {}).get("created_at", 0) + 1209600_000_000)
             ):
                 await self.close_agent(agent_id)
 
@@ -369,7 +369,7 @@ class AgentManager:
         if agent_id in self.activated_agent_id_datas:
             await self.activated_agent_id_datas[agent_id]["on_trigger_finished"].wait()
         self.activated_agent_id_datas[agent_id] = {
-            "created_at": now_seconds(),
+            "created_at": TimestampUs.now(),
             "on_trigger_finished": asyncio.Event()
         }
         self.activated_agent_id_datas[agent_id]["on_trigger_finished"].set()
@@ -781,12 +781,14 @@ class AgentManager:
         这个专门的方法是为了在设置新的时间设置的同时，自动更新所有可能受此时间设置影响的schedule"""
         store_settings = await store_manager.get_settings(agent_id)
         current_time_settings = store_settings.main.time_settings
-        current_timeseconds = now_seconds()
-        current_agent_world_timeseconds = real_seconds_to_agent_seconds(current_timeseconds, current_time_settings.world_time_setting)
-        new_times = Times.from_time_settings(new_time_settings, current_timeseconds)
+        current_times = Times.from_time_settings(current_time_settings)
+        new_times = Times.from_time_settings(new_time_settings, current_times)
+
+        if new_times.agent_subjective_tick < current_times.agent_subjective_tick:
+            logger.warning(f'agent {agent_id} 正在将主观tick倒流，这个操作的语义相当于要使整个系统往后倒退，而这是不可能的，所以应尽量避免这种不合理的操作发生。')
         store_settings.main.time_settings = new_time_settings
-        # 如果时间倒流
-        if new_times.agent_world_timeseconds < current_agent_world_timeseconds:
+        # 如果agent_world时间倒流
+        if new_times.agent_world_timestampus < current_times.agent_world_timestampus:
             outdated_schedules = await get_schedules([
                 Schedule.Condition(key='agent_id', value=agent_id),
                 Schedule.Condition(key='time_reference', value='agent_world'),
@@ -796,7 +798,7 @@ class AgentManager:
             new_values_to_update = []
             for schedule in outdated_schedules:
                 try:
-                    new_values = schedule.calc_trigger_timeseconds(new_times)
+                    new_values = schedule.calc_trigger_time(new_times)
                     if new_values is None:
                         ids_to_delete.append(schedule.schedule_id)
                     else:
@@ -903,9 +905,9 @@ __all__: 加载所有agent配置
                     await self.main_graph.graph.aupdate_state(
                         config,
                         {
-                            "active_time_seconds": 0.0,
+                            "active_time_seconds": TimestampUs(0),
                             "self_call_time_secondses": [],
-                            "wakeup_call_time_seconds": 0.0
+                            "wakeup_call_time_seconds": TimestampUs(0)
                         },
                         as_node='final'
                     )
@@ -951,7 +953,7 @@ __all__: 加载所有agent配置
 
 content: {get_result["documents"][i]}
 
-stable_time: {get_result["metadatas"][i]["stable_time"]}
+stable_duration_ticks: {get_result["metadatas"][i]["stable_duration_ticks"]}
 
 retrievability: {get_result["metadatas"][i]["retrievability"]}''' for i in range(len(get_result["ids"]))])
                     if not message:
@@ -976,6 +978,10 @@ config: 仅重置配置（settings）
                         elif reset_type == 'all':
                             if not self.main_graph.is_agent_running(agent_id):
                                 await self.close_agent(agent_id)
+                                agent_schedules = await get_schedules([
+                                    Schedule.Condition(key='agent_id', value=agent_id)
+                                ])
+                                await delete_schedules(agent_schedules)
                                 await self.main_graph.graph.checkpointer.adelete_thread(agent_id)
                                 memory_manager.delete_collection(agent_id, "original")
                                 memory_manager.delete_collection(agent_id, "episodic")
@@ -990,7 +996,7 @@ config: 仅重置配置（settings）
             elif user_input == "/skip_agent_time" or user_input.startswith("/skip_agent_time "):
                 if user_input == "/skip_agent_time help":
                     return """使用方法：/skip_agent_time <world|subjective> <时间>
-类型：世界时间（world）或主观时间（subjective）
+类型：世界时间（world）或主观tick（subjective）
 时间: 要跳过的时间（忽略时间膨胀），格式为`1w2d3h4m5s`，意为1周2天3小时4分钟5秒（也可有小数）。例如 /skip_agent_time 1w1.5d，意为跳过1周加1.5天。
 注意：在涉及现实时间的一些场景如网络搜索时agent可能会感到混乱"""
                 elif user_input != "/skip_agent_time":
@@ -999,33 +1005,23 @@ config: 仅重置配置（settings）
                         time_type = splited_input[1]
                         delta_str = splited_input[2]
                         try:
-                            parsed_time_seconds = parse_timedelta(delta_str).total_seconds()
+                            parsed_microseconds = timedelta_to_microseconds(parse_timedelta(delta_str))
                         except ValueError:
-                            return "时间格式错误，请确认格式正确，如 1w2d3h4m5s。"
+                            try:
+                                parsed_microseconds = int(delta_str)
+                            except (ValueError, TypeError):
+                                return "时间格式错误，请确认格式正确，如 1w2d3h4m5s，或输入微秒整数。"
                         store_settings = await store_manager.get_settings(agent_id)
                         time_settings = store_settings.main.time_settings
-                        current_time_seconds = now_seconds()
                         if time_type == 'world':
-                            new_agent_time_anchor = real_seconds_to_agent_seconds(
-                                current_time_seconds,
-                                time_settings.world_time_setting
-                            ) + parsed_time_seconds
-                            new_time_settings = time_settings.model_copy(deep=True)
-                            new_time_settings.world_time_setting.real_time_anchor = current_time_seconds
-                            new_time_settings.world_time_setting.agent_time_anchor = new_agent_time_anchor
-                            store_settings.main.time_settings = new_time_settings
+                            new_time_settings = time_settings.add_offset_from_now(parsed_microseconds, 'world')
+                            await self.set_agent_time_settings(agent_id, new_time_settings)
                         elif time_type == 'subjective':
-                            new_agent_time_anchor = real_seconds_to_agent_seconds(
-                                current_time_seconds,
-                                time_settings.subjective_duration_setting
-                            ) + parsed_time_seconds
-                            new_time_settings = time_settings.model_copy(deep=True)
-                            new_time_settings.subjective_duration_setting.real_time_anchor = current_time_seconds
-                            new_time_settings.subjective_duration_setting.agent_time_anchor = new_agent_time_anchor
-                            store_settings.main.time_settings = new_time_settings
+                            new_time_settings = time_settings.add_offset_from_now(parsed_microseconds, 'subjective')
+                            await self.set_agent_time_settings(agent_id, new_time_settings)
                         else:
                             return "无效的时间类型。"
-                        return f"已使agent时间跳过了{format_duration(parsed_time_seconds)}。"
+                        return f"已使agent时间跳过了{format_duration(parsed_microseconds)}。"
 
             elif user_input == '/list_agent_reminders' or user_input.startswith("/list_agent_reminders "):
                 if user_input == '/list_agent_reminders help':

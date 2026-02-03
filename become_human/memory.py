@@ -41,7 +41,7 @@ from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_core.documents import Document
 from langchain_dev_utils.embeddings import load_embeddings
 
-from become_human.times import format_time, Times, now_agent_seconds, datetime_to_seconds, now_agent_time, AnyTz, seconds_to_datetime
+from become_human.times import format_time, Times, TimestampUs, AnyTz
 from become_human.store.settings import MemoryRetrievalConfig
 from become_human.store.manager import store_manager
 from become_human.utils import parse_env_array
@@ -255,7 +255,7 @@ class InitialMemory(BaseModel):
     content: str = Field(description="The content of the memory")
     type: AnyMemoryType = Field(description="The type of the memory")
     creation_times: Times = Field(description="The creation times of the memory")
-    stable_time: float = Field(description="The stable time of the memory", gt=0.0)
+    stable_duration_ticks: int = Field(description="The stable duration ticks of the memory", gt=0)
     id: str = Field(default_factory=lambda: str(uuid4()), description="The id of the memory")
     previous_memory_id: Optional[str] = Field(default=None, description="The previous memory id")
     next_memory_id: Optional[str] = Field(default=None, description="The next memory id")
@@ -275,31 +275,31 @@ def construct_default_memory_update_schedules(agent_id: str) -> list[Schedule]:
     return [
         Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=5.0, job=update_memories_job, job_kwargs={
             'agent_id': agent_id,
-            'stable_time_range': [{'$gte': 0.0}, {'$lt': 43200.0}]
+            'stable_duration_ticks_range': [{'$gte': 0}, {'$lt': 43200}]
         }),
         Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=30.0, job=update_memories_job, job_kwargs={
             'agent_id': agent_id,
-            'stable_time_range': [{'$gte': 43200.0}, {'$lt': 86400.0}]
+            'stable_duration_ticks_range': [{'$gte': 43200}, {'$lt': 86400}]
         }),
         Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=60.0, job=update_memories_job, job_kwargs={
             'agent_id': agent_id,
-            'stable_time_range': [{'$gte': 86400.0}, {'$lt': 864000.0}]
+            'stable_duration_ticks_range': [{'$gte': 86400}, {'$lt': 864000}]
         }),
         Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=500.0, job=update_memories_job, job_kwargs={
             'agent_id': agent_id,
-            'stable_time_range': [{'$gte': 864000.0}, {'$lt': 8640000.0}]
+            'stable_duration_ticks_range': [{'$gte': 864000}, {'$lt': 8640000}]
         }),
         Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=3600.0, job=update_memories_job, job_kwargs={
             'agent_id': agent_id,
-            'stable_time_range': [{'$gte': 8640000.0}]
+            'stable_duration_ticks_range': [{'$gte': 8640000}]
         }),
     ]
 
-async def update_memories_job(agent_id: str, stable_time_range: list[dict[str, float]]) -> None:
+async def update_memories_job(agent_id: str, stable_duration_ticks_range: list[dict[str, int]]) -> None:
     """更新记忆"""
     update_count = 0
     for t in get_activated_memory_types():
-        where = validated_where({'$and': [{'stable_time': item} for item in stable_time_range]})
+        where = validated_where({'$and': [{'stable_duration_ticks': item} for item in stable_duration_ticks_range]})
         result = await memory_manager.aget(
             agent_id=agent_id,
             memory_type=t,
@@ -325,7 +325,7 @@ class MemoryManager():
 
     async def update_memories(self, results: GetResult, memory_type: str, agent_id: str) -> None:
         time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
-        current_agent_subjective_duration = now_agent_seconds(time_settings.subjective_duration_setting)
+        current_times = Times.from_time_settings(time_settings)
         if not results["ids"]:
             return
         ids = results["ids"]
@@ -336,7 +336,7 @@ class MemoryManager():
         ids_new = []
         ids_to_delete = set()
         for i in range(len(ids)):
-            metadata_patch = tick_memory(metadatas[i], current_agent_subjective_duration)
+            metadata_patch = tick_memory(metadatas[i], current_times)
             if metadata_patch.get("forgot"):
                 ids_to_delete.add(ids[i])
             else:
@@ -351,7 +351,7 @@ class MemoryManager():
         docs: dict[str, list[Document]] = {t: [] for t in MEMORY_TYPES}
         agent_settings = await store_manager.get_settings(agent_id)
         time_settings = agent_settings.main.time_settings
-        current_agent_subjective_duration = now_agent_seconds(time_settings.subjective_duration_setting)
+        current_times = Times.from_time_settings(time_settings)
         for memory in memories:
             # 使用jieba对memory.content进行分词并过滤掉重复词
             words = set(jieba.cut(memory.content))
@@ -359,11 +359,11 @@ class MemoryManager():
             difficulty = min(0.8, (len(words) / max_words_length) ** 3)
             creation_times = memory.creation_times
             memory_of_day = calculate_memory_of_day(creation_times.agent_world_datetime)
-            stable_time = memory.stable_time * (1 - difficulty) * memory_of_day # 稳定性，决定了可检索性的衰减速度
+            stable_duration_ticks = int(memory.stable_duration_ticks * (1 - difficulty) * memory_of_day) # 稳定性，决定了可检索性的衰减速度
             metadata = generate_time_metadatas(creation_times, 'creation')
             metadata.update(generate_time_metadatas(creation_times, 'last_accessed'))
             metadata.update({
-                "stable_time": stable_time, # 稳定时长，单位为秒
+                "stable_duration_ticks": stable_duration_ticks, # 稳定ticks
                 "retrievability": 1.0, # 可检索性，决定了检索的概率
                 "difficulty": difficulty, # 难度，决定了稳定性基数增长的多少。可能会出现无法长期保留的记忆，如整本书的内容。
                 "memory_type": memory.type,
@@ -373,7 +373,7 @@ class MemoryManager():
                 metadata["previous_memory_id"] = memory.previous_memory_id
             if memory.next_memory_id:
                 metadata["next_memory_id"] = memory.next_memory_id
-            r = tick_memory(metadata, current_agent_subjective_duration)
+            r = tick_memory(metadata, current_times)
             if not r.get("forgot"):
                 metadata["retrievability"] = r["retrievability"]
                 document = Document(
@@ -425,12 +425,12 @@ class MemoryManager():
 
         if creation_time_range_start:
             if isinstance(creation_time_range_start, datetime):
-                creation_time_range_start = datetime_to_seconds(creation_time_range_start)
-            filters.append({"creation_agent_world_timeseconds": {"$gte": creation_time_range_start}})
+                creation_time_range_start = TimestampUs(creation_time_range_start)
+            filters.append({"creation_agent_world_timestampus": {"$gte": creation_time_range_start}})
         if creation_time_range_end:
             if isinstance(creation_time_range_end, datetime):
-                creation_time_range_end = datetime_to_seconds(creation_time_range_end)
-            filters.append({"creation_agent_world_timeseconds": {"$lte": creation_time_range_end}})
+                creation_time_range_end = TimestampUs(creation_time_range_end)
+            filters.append({"creation_agent_world_timestampus": {"$lte": creation_time_range_end}})
 
         if exclude_memory_ids:
             # 使用exclude_memory_ids过滤，一般用于过滤掉与消息id相同的original记忆
@@ -1308,22 +1308,22 @@ def query_result_to_docs_and_scores(results: QueryResult) -> list[tuple[Document
 
 
 
-def tick_memory(metadata: dict, current_agent_subjective_duration: Union[float, Times]) -> dict:
+def tick_memory(metadata: dict, current_agent_subjective_tick: Union[int, Times]) -> dict:
     """
     更新记忆的可检索性（模拟时间流逝）
     """
     #retrievability = metadata["retrievability"] * math.exp(-delta_t / metadata["stability"])
 
-    if isinstance(current_agent_subjective_duration, (float, int)):
-        duration = current_agent_subjective_duration
+    if isinstance(current_agent_subjective_tick, int):
+        tick = current_agent_subjective_tick
     else:
-        duration = current_agent_subjective_duration.agent_subjective_duration
+        tick = current_agent_subjective_tick.agent_subjective_tick
 
-    if metadata["stable_time"] == 0.0:
-        logger.warning('意外的stable_time为0，metadata：' + str(metadata))
+    if metadata["stable_duration_ticks"] == 0:
+        logger.warning('意外的stable_duration_ticks为0，metadata：' + str(metadata))
         return {"forgot": True}
 
-    x = (duration - metadata["last_accessed_agent_subjective_duration"]) / metadata["stable_time"]
+    x = (tick - metadata["last_accessed_agent_subjective_tick"]) / metadata["stable_duration_ticks"]
     if x >= 1:
         return {"forgot": True}
     retrievability = 1 - x ** 0.4
@@ -1342,17 +1342,18 @@ def recall_memory(metadata: dict, current_times: Times, strength: float = 1.0) -
     reversed_difficulty = 1 - metadata["difficulty"]
     memory_of_day = calculate_memory_of_day(current_times.agent_world_datetime)
     stable_strength = calculate_stability_curve(updated_metadata["retrievability"])
-    stable_time_diff = metadata["stable_time"] * stable_strength - metadata["stable_time"]
-    if stable_time_diff >= 0:
-        stable_time_diff = stable_time_diff * reversed_difficulty * strength * memory_of_day
-    stable_time = metadata["stable_time"] + stable_time_diff
+    current_stable_duration_ticks = int(metadata["stable_duration_ticks"])
+    stable_duration_ticks_diff = int(current_stable_duration_ticks * stable_strength) - current_stable_duration_ticks
+    if stable_duration_ticks_diff >= 0:
+        stable_duration_ticks_diff = int(stable_duration_ticks_diff * reversed_difficulty * strength * memory_of_day)
+    new_stable_duration_ticks = current_stable_duration_ticks + stable_duration_ticks_diff
 
     retrievability = min(1.0, updated_metadata["retrievability"] + strength * memory_of_day)
 
     metadata_patch = generate_time_metadatas(current_times, 'last_accessed')
     metadata_patch.update({
         "retrievability": retrievability,
-        "stable_time": stable_time
+        "stable_duration_ticks": new_stable_duration_ticks
     })
 
     if metadata["difficulty"] > 0.0:
@@ -1437,9 +1438,9 @@ def format_retrieved_memory_groups(groups: list[RetrievedMemoryGroup], time_zone
         for memory in group.memories:
             content = memory.doc.page_content
             memory_type = memory.doc.metadata["memory_type"]
-            timeseconds = memory.doc.metadata.get("creation_agent_world_timeseconds")
-            if isinstance(timeseconds, (float, int)):
-                readable_time = format_time(timeseconds, time_zone)
+            timestampus = memory.doc.metadata.get("creation_agent_world_timestampus")
+            if isinstance(timestampus, (int, float)):
+                readable_time = format_time(TimestampUs(timestampus), time_zone)
             else:
                 readable_time = "未知时间"
             output.append(f"{'<memory_group>\n' if i == 0 else ''}{'<memory>\n「目标记忆」' if memory.is_source_memory else '「相邻记忆」'}score: {round(memory.score, 3)}\ntype: {memory_type}\ncreation_time: {readable_time}\n<content>\n{content}\n</content>\n</memory>{'\n</memory_group>' if i == memories_len - 1 else ''}")
@@ -1449,10 +1450,10 @@ def format_retrieved_memory_groups(groups: list[RetrievedMemoryGroup], time_zone
 
 
 def generate_time_metadatas(times: Times, prefix: str) -> dict:
-    def _generate_time_metadatas(timeseconds: float, datetime: datetime, time_type: str) -> dict:
+    def _generate_time_metadatas(timestampus: TimestampUs, datetime: datetime, time_type: str) -> dict:
         datetime_isocalendar = datetime.isocalendar()
         return {
-            f"{prefix}_{time_type}_timeseconds": timeseconds,
+            f"{prefix}_{time_type}_timestampus": timestampus,
             f"{prefix}_{time_type}_datetime_iso": datetime.isoformat(),
             f"{prefix}_{time_type}_datetime_year": datetime.year,
             f"{prefix}_{time_type}_datetime_month": datetime.month,
@@ -1466,11 +1467,11 @@ def generate_time_metadatas(times: Times, prefix: str) -> dict:
     result = {}
     for time_type in ['real_world', 'agent_world']:
         result.update(_generate_time_metadatas(
-            getattr(times, f'{time_type}_timeseconds'),
+            getattr(times, f'{time_type}_timestampus'),
             getattr(times, f'{time_type}_datetime'),
             time_type
         ))
-    result[f"{prefix}_agent_subjective_duration"] = times.agent_subjective_duration
+    result[f"{prefix}_agent_subjective_tick"] = times.agent_subjective_tick
     result[f"{prefix}_real_world_time_zone_name"] = times.real_world_time_zone.name
     if times.real_world_time_zone.offset is not None:
         result[f"{prefix}_real_world_time_zone_offset"] = times.real_world_time_zone.offset

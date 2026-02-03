@@ -3,11 +3,10 @@ from datetime import datetime
 
 from langchain.tools import ToolRuntime, tool
 
-from become_human.times import Times, format_time, format_duration, datetime_to_seconds
+from become_human.times import Times, format_time, format_duration, TimestampUs
 from become_human.message import BHMessageMetadata, BH_MESSAGE_METADATA_KEY
 from become_human.scheduler import Schedule, get_schedules
 from become_human.store.manager import store_manager
-from become_human.tool import AgentTool
 from become_human.types.main import MainContext
 from become_human.plugin import Plugin
 from become_human.agent_manager import agent_manager
@@ -23,7 +22,7 @@ async def agent_schedule_job(schedule: Schedule, agent_id: str, title: str, desc
     time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
     current_times = Times.from_time_settings(time_settings)
 
-    time_diff = current_times.agent_world_timeseconds - schedule.trigger_timeseconds
+    time_diff = current_times.agent_world_timestampus - schedule.trigger_time
 
     await agent_manager.call_agent_for_system(
         agent_id=agent_id,
@@ -196,9 +195,9 @@ async def add_reminder(
         except ValueError:
             raise ValueError("start_time参数的时间字符串格式错误，请检查是否符合YYYY-MM-DD HH:MM:SS格式。")
         start_time = start_time.replace(tzinfo=time_settings.time_zone.tz())
-        next_run_timeseconds = datetime_to_seconds(start_time)
+        next_run_timestampus = TimestampUs(start_time)
     else:
-        next_run_timeseconds = -1.0
+        next_run_timestampus = -1
     if time_of_day:
         time_of_day_seconds = time_of_day['hour'] * 3600 + time_of_day['minute'] * 60 + time_of_day['second']
     else:
@@ -221,11 +220,11 @@ async def add_reminder(
         scheduled_months=months,
         time_reference='agent_world',
         max_triggers=max_triggers,
-        trigger_timeseconds=next_run_timeseconds,
+        trigger_time=next_run_timestampus,
     )
     times = Times.from_time_settings(time_settings)
-    if next_run_timeseconds < 0.0:
-        calc_result = schedule.calc_trigger_timeseconds(times)
+    if next_run_timestampus < 0.0:
+        calc_result = schedule.calc_trigger_time(times)
         if calc_result is None:
             raise ValueError("非every_month且没有设置months意为提醒事项只在当月生效，而计算得出该提醒事项的下次触发时间却并非当月，此提醒事项无效！")
     await schedule.add_to_db()

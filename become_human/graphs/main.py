@@ -36,7 +36,7 @@ from become_human.message import add_messages, get_all_retrieved_memory_ids, BHM
 from become_human.types.main import MainState, MainContext, StateEntry, InterruptData
 from become_human.memory import get_activated_memory_types, memory_manager, format_retrieved_memory_groups
 from become_human.recycling import recycle_memories
-from become_human.times import datetime_to_seconds, format_time, format_duration, Times
+from become_human.times import format_time, format_duration, Times, TimestampUs
 from become_human.message import format_messages_for_ai, extract_text_parts, construct_system_message
 from become_human.store.manager import store_manager
 from become_human.tool import AgentTool
@@ -140,7 +140,7 @@ class MainGraph(BaseGraph):
         # active_time_seconds不需要在意睡觉的问题
         if not state.active_time_seconds:
             active_time_range = main_config.active_time_range
-            active_time_seconds = current_times.agent_world_timeseconds + random.uniform(active_time_range[0], active_time_range[1])
+            active_time_seconds = current_times.agent_world_timestampus + random.uniform(active_time_range[0], active_time_range[1]) * 1_000_000
             new_state["active_time_seconds"] = active_time_seconds
         else:
             active_time_seconds = state.active_time_seconds
@@ -151,7 +151,7 @@ class MainGraph(BaseGraph):
         # 第二种逻辑，只要在活跃时间之外发送消息，都会生成wakeup_call_time_seconds，增加self_call的机会
         if (
             runtime.context.call_type == 'human' and
-            current_times.agent_world_timeseconds >= active_time_seconds
+            current_times.agent_world_timestampus >= active_time_seconds
         ):
             new_wakeup_call_time_seconds = await generate_new_wakeup_call_timeseconds(agent_id, current_times.agent_world_datetime)
             if (
@@ -244,24 +244,24 @@ class MainGraph(BaseGraph):
         can_self_call = False
         # 检查是否可以自我调用，是否超时。如果不自我调用则清理可能过时的时间
         if is_self_call:
-            if wakeup_call_time_seconds and current_times.agent_world_timeseconds >= wakeup_call_time_seconds and current_times.agent_world_timeseconds < (wakeup_call_time_seconds + 3600):
+            if wakeup_call_time_seconds and current_times.agent_world_timestampus >= wakeup_call_time_seconds and current_times.agent_world_timestampus < (wakeup_call_time_seconds + 3600):
                 can_self_call = True
             else:
                 for seconds in state.self_call_time_secondses:
                     # 如果因某些原因如服务关闭导致离原定时间太远，则忽略这些self_call
-                    if current_times.agent_world_timeseconds >= seconds and current_times.agent_world_timeseconds < (seconds + 3600):
+                    if current_times.agent_world_timestampus >= seconds and current_times.agent_world_timestampus < (seconds + 3600) * 1_000_000:
                         can_self_call = True
                         break
             if not can_self_call:
-                new_state["self_call_time_secondses"] = [s for s in state.self_call_time_secondses if current_times.agent_world_timeseconds < s]
-                if wakeup_call_time_seconds and current_times.agent_world_timeseconds >= wakeup_call_time_seconds:
-                    new_state["wakeup_call_time_seconds"] = 0.0
+                new_state["self_call_time_secondses"] = [s for s in state.self_call_time_secondses if current_times.agent_world_timestampus < s]
+                if wakeup_call_time_seconds and current_times.agent_world_timestampus >= wakeup_call_time_seconds:
+                    new_state["wakeup_call_time_seconds"] = TimestampUs(0)
 
 
         # 要么自我调用，要么在活跃状态时被用户调用
         if (
             can_self_call or
-            (runtime.context.call_type == 'human' and (current_times.agent_world_timeseconds < active_time_seconds or main_config.always_active)) or
+            (runtime.context.call_type == 'human' and (current_times.agent_world_timestampus < active_time_seconds or main_config.always_active)) or
             runtime.context.call_type == 'system'
         ):
             return Command(update=new_state, goto='prepare_to_generate')
@@ -291,19 +291,19 @@ class MainGraph(BaseGraph):
 
             self_call_type = runtime.context.self_call_type
             # 只是用来处理提示词
-            is_active = current_times.agent_world_timeseconds < state.active_time_seconds or main_config.always_active
+            is_active = current_times.agent_world_timestampus < state.active_time_seconds or main_config.always_active
 
             if self_call_type == 'active':
-                next_active_self_call_time_secondses_and_notes = [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds > current_times.agent_world_timeseconds]
+                next_active_self_call_time_secondses_and_notes = [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds > current_times.agent_world_timestampus]
                 new_state["active_self_call_time_secondses_and_notes"] = next_active_self_call_time_secondses_and_notes
-                active_self_call_note = '\n'.join([f'[{format_time(s, main_config.time_settings.time_zone)}] {n}' for s, n in [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds <= current_times.agent_world_timeseconds]])
+                active_self_call_note = '\n'.join([f'[{format_time(s, main_config.time_settings.time_zone)}] {n}' for s, n in [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds <= current_times.agent_world_timestampus]])
 
             # 有新的消息
             if input_messages:
-                new_state["last_chat_time_seconds"] = current_times.agent_world_timeseconds
-                new_state["self_call_time_secondses"] = await generate_new_self_call_timesecondses(agent_id, current_time=current_times.agent_world_timeseconds)
-                new_state["wakeup_call_time_seconds"] = 0.0
-                new_state["active_time_seconds"] = current_times.agent_world_timeseconds + random.uniform(main_config.active_time_range[0], main_config.active_time_range[1])
+                new_state["last_chat_time_seconds"] = current_times.agent_world_timestampus
+                new_state["self_call_time_secondses"] = await generate_new_self_call_timesecondses(agent_id, current_time=current_times.agent_world_timestampus)
+                new_state["wakeup_call_time_seconds"] = TimestampUs(0)
+                new_state["active_time_seconds"] = current_times.agent_world_timestampus + random.uniform(main_config.active_time_range[0], main_config.active_time_range[1]) * 1_000_000
                 if self_call_type == 'active':
                     input_content3 = f'请检查你之前留下的笔记内容并考虑要如何行动，同时需注意上下文中还存在新的可能需要回应的用户消息。'
                 else:
@@ -312,16 +312,16 @@ class MainGraph(BaseGraph):
 
             # 没有新的消息
             else:
-                next_self_call_time_secondses = [s for s in state.self_call_time_secondses if s > current_times.agent_world_timeseconds]
+                next_self_call_time_secondses = [s for s in state.self_call_time_secondses if s > current_times.agent_world_timestampus]
                 new_state["self_call_time_secondses"] = next_self_call_time_secondses
-                temporary_active_time_seconds = current_times.agent_world_timeseconds + random.uniform(main_config.temporary_active_time_range[0], main_config.temporary_active_time_range[1])
+                temporary_active_time_seconds = current_times.agent_world_timestampus + random.uniform(main_config.temporary_active_time_range[0], main_config.temporary_active_time_range[1]) * 1_000_000
                 if temporary_active_time_seconds > state.active_time_seconds:
                     new_state["active_time_seconds"] = temporary_active_time_seconds
                 if self_call_type == 'active':
                     input_content3 = '请检查你之前留下的笔记内容并考虑要如何行动。'
                 else:
                     if next_self_call_time_secondses:
-                        parsed_next_self_call_time_secondses = f'系统接下来为你随机安排的唤醒时间（一般间隔会越来越长）{'分别' if len(next_self_call_time_secondses) > 1 else ''}为：' + '、'.join([f'{format_duration(s - current_times.agent_world_timeseconds)}后（{format_time(s, main_config.time_settings.time_zone)}）' for s in next_self_call_time_secondses])
+                        parsed_next_self_call_time_secondses = f'系统接下来为你随机安排的唤醒时间（一般间隔会越来越长）{'分别' if len(next_self_call_time_secondses) > 1 else ''}为：' + '、'.join([f'{format_duration(s - current_times.agent_world_timestampus)}后（{format_time(s, main_config.time_settings.time_zone)}）' for s in next_self_call_time_secondses])
                     else:
                         parsed_next_self_call_time_secondses = '唤醒次数已耗尽，这是你的最后一次唤醒。接下来你将不再被唤醒，直到用户发送新的消息的一段时间后。'
                     input_content3 = f'''{'检查到当前没有新的消息，' if not is_active else ''}请结合上下文、时间以及你的角色设定考虑是否要尝试主动给用户发送消息，或保持沉默继续等待用户的新消息。只需控制`{SEND_MESSAGE}`工具的使用与否即可实现。
@@ -329,7 +329,7 @@ class MainGraph(BaseGraph):
 {parsed_next_self_call_time_secondses}
 以上的唤醒时间仅供你自己作为接下来行动的参考，不要将其暴露给用户。'''
 
-            past_seconds = current_times.agent_world_timeseconds - state.last_chat_time_seconds
+            past_seconds = current_times.agent_world_timestampus - state.last_chat_time_seconds
             if self_call_type == 'active':
                 input_content2 = f'距离上一次与用户交互过去了{format_duration(past_seconds)}。现在将你唤醒是由于你之前主动设置的自我唤醒时间到了，同时以下还有你为了提醒自己留下的笔记内容：\n\n{active_self_call_note}\n\n{input_content3}'
             else:
@@ -350,11 +350,11 @@ class MainGraph(BaseGraph):
 
         # 直接响应
         else:
-            new_state["last_chat_time_seconds"] = current_times.agent_world_timeseconds
+            new_state["last_chat_time_seconds"] = current_times.agent_world_timestampus
             new_state["self_call_time_secondses"] = await generate_new_self_call_timesecondses(agent_id, current_time=current_times.agent_world_datetime)
-            new_state["wakeup_call_time_seconds"] = 0.0
+            new_state["wakeup_call_time_seconds"] = TimestampUs(0)
             active_time_range = store_settings.main.active_time_range
-            new_state["active_time_seconds"] = current_times.agent_world_timeseconds + random.uniform(active_time_range[0], active_time_range[1])
+            new_state["active_time_seconds"] = current_times.agent_world_timestampus + random.uniform(active_time_range[0], active_time_range[1]) * 1_000_000
 
 
         # passive_retrieval，只会跟在另一条humanmessage的后面，所以可以随时清理
@@ -823,7 +823,7 @@ def parse_agent_state(agent_state: list[StateEntry]) -> str:
     return '- ' + '\n- '.join([string for string in agent_state])
 
 
-async def generate_new_self_call_timesecondses(agent_id: str, current_time: datetime, is_wakeup: bool = False) -> list[float]:
+async def generate_new_self_call_timesecondses(agent_id: str, current_time: datetime, is_wakeup: bool = False) -> list[TimestampUs]:
     def is_sleep_time(seconds: float) -> bool:
         if no_sleep_time:
             return False
@@ -885,12 +885,12 @@ async def generate_new_self_call_timesecondses(agent_id: str, current_time: date
             new_timedelta += timedelta(seconds=sleep_time_total)
 
         _delta += timedelta(seconds=new_seconds)
-        self_call_time_secondses.append(datetime_to_seconds(current_date + _delta))
+        self_call_time_secondses.append(TimestampUs(current_date + _delta))
     return self_call_time_secondses
 
-async def generate_new_wakeup_call_timeseconds(agent_id: str, current_time: datetime) -> float:
+async def generate_new_wakeup_call_timeseconds(agent_id: str, current_time: datetime) -> TimestampUs:
     result = await generate_new_self_call_timesecondses(agent_id, current_time, is_wakeup=True)
     if result:
         return result[0]
     else:
-        return 0.0
+        return TimestampUs(0)

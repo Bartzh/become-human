@@ -3,7 +3,7 @@ import json
 import inspect
 import importlib
 import aiosqlite
-from pydantic import BaseModel, Field, field_validator, computed_field, model_validator
+from pydantic import BaseModel, Field, field_validator, computed_field, model_validator, ValidationInfo
 from typing import Any, Union, Optional, Self, Literal, Callable
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
@@ -11,7 +11,7 @@ import random
 from loguru import logger
 from tzlocal import get_localzone
 
-from become_human.times import seconds_to_datetime, datetime_to_seconds, Times, nowtz, SerializableTimeZone, format_time
+from become_human.times import TimestampUs, Times, nowtz, SerializableTimeZone, format_time, seconds_to_datetime
 from become_human.store.manager import store_manager
 
 
@@ -21,20 +21,20 @@ SCHEDULE_KEYS = ['agent_id','schedule_id', 'schedule_type', 'job_module', 'job_f
                 'scheduled_time_of_day', 'scheduled_every_day', 'scheduled_weekdays',
                 'scheduled_monthdays', 'scheduled_every_month', 'scheduled_months',
                 'timeout_seconds', 'max_triggers', 'time_reference',
-                'time_zone_name', 'time_zone_offset', 'trigger_timeseconds', 'trigger_count', 'repeating']
+                'time_zone_name', 'time_zone_offset', 'trigger_time', 'trigger_count', 'repeating']
 AnyScheduleKey = Literal['agent_id','schedule_id', 'schedule_type', 'job_module', 'job_func', 'job_args', 'job_kwargs',
                 'interval_fixed', 'interval_random_min', 'interval_random_max',
                 'scheduled_time_of_day', 'scheduled_every_day', 'scheduled_weekdays',
                 'scheduled_monthdays', 'scheduled_every_month', 'scheduled_months',
                 'timeout_seconds', 'max_triggers', 'time_reference',
-                'time_zone_name', 'time_zone_offset', 'trigger_timeseconds', 'trigger_count', 'repeating']
+                'time_zone_name', 'time_zone_offset', 'trigger_time', 'trigger_count', 'repeating']
 
 class Schedule(BaseModel):
     """定时计划
 
-    如interval和scheduled系列参数都不设置，表示这是一次性计划，将在trigger_timeseconds时触发一次后被删除（又或者max_triggers设置为1也是同样的效果）
+    如interval和scheduled系列参数都不设置，表示这是一次性计划，将在trigger_time时触发一次后被删除（又或者max_triggers设置为1也是同样的效果）
 
-    trigger_timeseconds的默认值是-1.0，如果不修改将在下次tick时直接被触发一次（没有设置timeout的话）
+    trigger_time的默认值是-1，如果不修改将在下次tick时直接被触发一次（没有设置timeout的话）
 
     如只设置interval，表示将按指定时间间隔触发。间隔时间总是在scheduled之后被加上
 
@@ -60,7 +60,7 @@ class Schedule(BaseModel):
     max_triggers: int = Field(default=0, ge=0, description="计划最大触发次数（包括因超时未成功执行job），0表示无限制")
     time_reference: Literal['real_world', 'agent_world', 'agent_subjective'] = Field(default='real_world', description="基于何种时间计算scheduled系列参数。当为agent_subjective时，不能设置任何scheduled系列参数，只能使用interval系列参数来重复触发")
     time_zone: Optional[SerializableTimeZone] = Field(default=None, description="计算scheduled系列参数时使用的时区，若没有则使用tick输入的datetime的时区或是自动获取当前时区")
-    trigger_timeseconds: float = Field(default=-1.0, description="下次触发时间的timeseconds。如果设置为负数则跳过这次触发（不消耗trigger次数，不会使一次性计划直接失效）")
+    trigger_time: Union[TimestampUs, int] = Field(default=-1, description="下次触发时间的微秒数。如果设置为负数int则跳过这次触发（不消耗trigger次数，不会使一次性计划直接失效）。如果time_reference为agent_subjective，这个值则为int而非TimestampUs")
     trigger_count: int = Field(default=0, description="已触发次数（包括超时时）")
     added: bool = Field(default=False, description="计划是否已被添加")
     deleted: bool = Field(default=False, description="计划是否已被移除。不保证可靠，因为有可能从其他地方被移除")
@@ -68,7 +68,7 @@ class Schedule(BaseModel):
 
     @field_validator("job", mode="after")
     @classmethod
-    def job_validator(cls, v: Callable) -> Callable:
+    def validate_job(cls, v: Callable) -> Callable:
         if v.__name__ == "<lambda>":
             raise ValueError("Lambda functions are not persistable")
         if "<locals>" in v.__qualname__:
@@ -77,20 +77,49 @@ class Schedule(BaseModel):
 
     @field_validator("job_args", mode="after")
     @classmethod
-    def job_args_validator(cls, v: list[Any]) -> list[Any]:
+    def validate_job_args(cls, v: list[Any]) -> list[Any]:
+        try:
+            json.dumps(v)
+        except TypeError:
+            raise ValueError("Job args cannot be serialized")
+        return v
+
+    @field_validator("job_kwargs", mode="after")
+    @classmethod
+    def validate_job_kwargs(cls, v: dict[str, Any]) -> dict[str, Any]:
         try:
             json.dumps(v)
         except TypeError:
             raise ValueError("Job kwargs cannot be serialized")
         return v
 
-    @field_validator("job_kwargs", mode="after")
+    @field_validator("trigger_time", mode="plain")
     @classmethod
-    def job_kwargs_validator(cls, v: dict[str, Any]) -> dict[str, Any]:
-        try:
-            json.dumps(v)
-        except TypeError:
-            raise ValueError("Job kwargs cannot be serialized")
+    def validate_trigger_time(cls, v: Union[TimestampUs, int], info: ValidationInfo) -> Union[TimestampUs, int]:
+        is_strict = bool(info.config and info.config.get('strict'))
+        if v < 0:
+            if is_strict and type(v) is not int:
+                raise ValueError("当trigger_time为负数时，在strict模式下必须为int")
+            else:
+                try:
+                    v = int(v)
+                except (TypeError, ValueError):
+                    raise ValueError("当trigger_time为负数时，必须可转换为int")
+        elif info.data['time_reference'] == 'agent_subjective':
+            if is_strict:
+                if type(v) is not int:
+                    raise ValueError("当time_reference为agent_subjective时，trigger_time在strict模式下必须为int")
+            else:
+                try:
+                    v = int(v)
+                except (TypeError, ValueError):
+                    raise ValueError("当time_reference为agent_subjective时，trigger_time必须可转换为int")
+        else:
+            if is_strict:
+                if not isinstance(v, TimestampUs):
+                    raise ValueError("trigger_time不是一个TimestampUs实例，在strict模式下必须为TimestampUs")
+            else:
+                v = TimestampUs(v)
         return v
 
     @model_validator(mode="after")
@@ -133,14 +162,14 @@ class Schedule(BaseModel):
     def job_func(self) -> str:
         return self.job.__qualname__
 
-    def tick(self, current_time: Union[Times, datetime]) -> tuple[bool, Optional[dict[str, Any]], bool]:
+    def tick(self, current_time: Union[Times, datetime, TimestampUs, int]) -> tuple[bool, Optional[dict[str, Any]], bool]:
         """
         计算Schedule是否应更新？是否应执行job？
 
         会同步更新实例属性
 
         Args:
-            current_time: 当前时间。如果输入的是Times实例，则会自动使用合适的时间类型计算，否则需调用者自行确认时间类型，若输入的datetime没有时区信息，则使用当前时区
+            current_time: 当前时间。如果输入的是Times实例，则会自动使用合适的时间类型计算，否则需调用者自行确认时间类型，若输入的datetime没有时区信息，则使用当前时区。int类型仅用于agent_subjective时间参考，其他时间参考请使用Times或TimestampUs。
 
         Returns:
             输出一个tuple，按顺序包含以下内容：
@@ -164,59 +193,65 @@ class Schedule(BaseModel):
         # 如果输入是Times实例，则自动使用合适时间类型计算
         if isinstance(current_time, Times):
             if self.time_reference == 'real_world':
-                current_timeseconds = current_time.real_world_timeseconds
+                current_timestampus = current_time.real_world_timestampus
             elif self.time_reference == 'agent_world':
-                current_timeseconds = current_time.agent_world_timeseconds
+                current_timestampus = current_time.agent_world_timestampus
             elif self.time_reference == 'agent_subjective':
-                current_timeseconds = current_time.agent_subjective_duration
+                current_timestampus = current_time.agent_subjective_tick
             else:
                 raise ValueError(f"Invalid time_reference: {self.time_reference}")
+        elif type(current_time) is int:
+            if self.time_reference != 'agent_subjective':
+                raise ValueError("int类型只能用于agent_subjective时间参考！")
+            else:
+                current_timestampus = current_time
         else:
-            current_timeseconds = datetime_to_seconds(current_time)
-
-        # 如果当前时间小于下次触发时间，则直接返回
-        if current_timeseconds < self.trigger_timeseconds:
-            return False, None, False
+            current_timestampus = TimestampUs(current_time)
 
         # 负数表示无需触发，但需要计算下次触发时间，且不增加trigger_count
-        is_negative = False
-        if self.trigger_timeseconds < 0.0:
-            is_negative = True
+        trigger_is_negative = False
+        if self.trigger_time < 0:
+            trigger_is_negative = True
             not_timeout = False
+
+        # 如果当前时间小于下次触发时间，则直接返回
+        elif current_timestampus < self.trigger_time:
+            return False, None, False
 
         # 检查是否超时
         elif (
             self.timeout_seconds > 0.0 and
-            current_timeseconds > (self.trigger_timeseconds + self.timeout_seconds)
+            current_timestampus > (self.trigger_time + self.timeout_seconds * 1_000_000)
         ):
             not_timeout = False
         else:
             not_timeout = True
 
-        # 如果没有计划和间隔，则等于一次性计划（除非当trigger_timeseconds为负数时）
+        # 如果没有计划和间隔，则等于一次性计划（除非当trigger_time为负数时）
         if (
-            not is_negative and
+            not trigger_is_negative and
             self.scheduled_time_of_day is None and
             (not self.interval_fixed and (not self.interval_random_min or not self.interval_random_max))
         ):
             self.deleted = True
             return True, None, not_timeout
 
-        new_values = self.calc_trigger_timeseconds(current_time)
+        new_values = self.calc_trigger_time(current_time)
         # 返回None则表示schedule之前就已触发完毕。又或是参数设置错误，下次触发时间永远不会变化
         if new_values is None:
             return True, None, False
 
-        # 是否达到最大循环次数
-        self.trigger_count += 1
-        new_values["trigger_count"] = self.trigger_count
-        if self.max_triggers > 0 and not is_negative and self.trigger_count >= self.max_triggers:
-            self.deleted = True
-            return True, None, not_timeout
+        # 是否达到最大触发次数
+        if not trigger_is_negative:
+            self.trigger_count += 1
+            new_values["trigger_count"] = self.trigger_count
+            if self.max_triggers > 0 and self.trigger_count >= self.max_triggers:
+                self.deleted = True
+                return True, None, not_timeout
 
         return True, new_values, not_timeout
 
-    async def process(self, current_time: Union[Times, datetime]) -> tuple[bool, Optional[dict[str, Any]], bool]:
+    async def process(self, current_time: Union[Times, datetime, TimestampUs, int]) -> tuple[bool, Optional[dict[str, Any]], bool]:
         """若想要单独处理schedule，请使用此方法。会在方法内直接完成更新、删除、执行操作。"""
         if self.deleted:
             logger.warning(f"Schedule {self.schedule_id} has been deleted, shouldn't call process.")
@@ -317,48 +352,48 @@ class Schedule(BaseModel):
         """当计算下次触发时间时，发现与当前的触发时间相同（没有变化）"""
         pass
 
-    def calc_trigger_timeseconds(
+    def calc_trigger_time(
         self,
-        current_time: Union[Times, datetime, float]
+        current_time: Union[Times, datetime, TimestampUs, int]
     ) -> Optional[dict[str, Any]]:
         """直接计算下次触发时间，会同时更新实例属性。返回None则表示schedule之前就已触发完毕，应被删除。
 
         对于current_time的输入类型：
         - Times适用于所有情况
-        - datetime不适用于agent_subjective，由于其只是duration，与datetime没有关系
-        - float适用于agent_subjective与real_world，对于real_world来说，float会转换为datetime，时区UTC
+        - TimestampUs适用于real_world和agent_subjective，对于real_world来说，TimestampUs会转换为datetime，时区UTC
+        - int只适用于agent_subjective
 
         ### Raises:
             Schedule.SameTimeError: 当计算结果与当前触发时间相同（没有变化）时抛出
         """
-        if isinstance(current_time, (float, int)):
+        if isinstance(current_time, TimestampUs):
             if self.time_reference == 'real_world':
-                current_datetime = seconds_to_datetime(current_time)
+                current_datetime = current_time.to_datetime()
             elif self.time_reference == 'agent_subjective':
-                next_trigger_timeseconds = current_time
+                next_trigger_time = int(current_time)
             elif self.time_reference == 'agent_world':
-                raise ValueError("当输入为float时，不能计算agent_world的下次触发时间！")
+                raise ValueError("当输入为TimestampUs时，不能计算agent_world的下次触发时间！")
             else:
                 raise ValueError(f"Invalid time_reference: {self.time_reference}")
-            #current_timeseconds = current_time
         # 如果输入是Times实例，则自动使用合适时间类型计算
         elif isinstance(current_time, Times):
             if self.time_reference == 'real_world':
                 current_datetime = current_time.real_world_datetime
-                #current_timeseconds = current_time.real_world_timeseconds
             elif self.time_reference == 'agent_world':
                 current_datetime = current_time.agent_world_datetime
-                #current_timeseconds = current_time.agent_world_timeseconds
             elif self.time_reference == 'agent_subjective':
-                next_trigger_timeseconds = current_time.agent_subjective_duration
-                #current_timeseconds = next_trigger_timeseconds
+                next_trigger_time = current_time.agent_subjective_tick
             else:
                 raise ValueError(f"Invalid time_reference: {self.time_reference}")
-        else:
+        elif isinstance(current_time, datetime):
             if self.time_reference == 'agent_subjective':
-                raise ValueError("agent_subjective只能用Times或float来计算下次触发时间！当前输入为datetime")
+                raise ValueError("agent_subjective只能用Times或TimestampUs来计算下次触发时间！当前输入为datetime")
             current_datetime = current_time
             #current_timeseconds = datetime_to_seconds(current_datetime)
+        else:
+            if self.time_reference != 'agent_subjective':
+                raise ValueError("当前输入为int时，只接受agent_subjective的时间参考！")
+            next_trigger_time = current_time
 
         if self.time_reference != 'agent_subjective':
 
@@ -436,7 +471,7 @@ class Schedule(BaseModel):
                             self.deleted = True
                             return None
 
-            next_trigger_timeseconds = datetime_to_seconds(next_trigger_datetime)
+            next_trigger_time = TimestampUs(next_trigger_datetime)
 
         # 添加间隔时间
         if self.interval_fixed:
@@ -446,31 +481,21 @@ class Schedule(BaseModel):
         else:
             interval_seconds = None
         if interval_seconds:
-            next_trigger_timeseconds += interval_seconds
+            next_trigger_time += int(interval_seconds * 1_000_000)
 
         # 如果计算得出下次触发时间与当前没有变化，返回一个异常
         # 一般情况下比如，在tick中，出现这种情况意味着异常，可能是参数设置错误
         # 而如果调用者主动调用该方法，就是想看看时间有没有需要更新，那么需要try&except SameTimeError
-        if abs(next_trigger_timeseconds - self.trigger_timeseconds) < 1e-6:
+        if next_trigger_time == self.trigger_time:
             raise self.SameTimeError(f"schedule {self.schedule_id} 的下次触发时间计算结果意外地与当前的触发时间相同！")
 
         new_values = {'schedule_id': self.schedule_id}
-        self.trigger_timeseconds = next_trigger_timeseconds
-        new_values['trigger_timeseconds'] = next_trigger_timeseconds
+        self.trigger_time = next_trigger_time
+        new_values['trigger_time'] = int(next_trigger_time)
         if not self.repeating:
             self.repeating = True
             new_values['repeating'] = True
         return new_values
-
-    # async def calc_trigger_timeseconds_and_update_to_db(self, current_time: Union[Times, datetime, float]) -> bool:
-    #     """直接计算下次触发时间，会同时更新实例属性。返回False表示schedule之前就已触发完毕，已被删除；返回True表示schedule已完成更新。"""
-    #     new_values = self.calc_trigger_timeseconds(current_time)
-    #     if new_values is None:
-    #         await self.delete_from_db()
-    #         return False
-    #     else:
-    #         await self.update_to_db(new_values)
-    #         return True
 
     def format_schedule(
         self,
@@ -479,13 +504,18 @@ class Schedule(BaseModel):
         include_id: bool = True,
         include_type: bool = True
     ) -> str:
-        next_trigger_datetime = seconds_to_datetime(self.trigger_timeseconds)
-        if self.time_zone is not None:
-            next_trigger_datetime = next_trigger_datetime.astimezone(self.time_zone.tz())
-        elif fallback_time_zone is not None:
-            next_trigger_datetime = next_trigger_datetime.astimezone(fallback_time_zone.tz())
+        if self.time_reference == 'agent_subjective':
+            formated_next_trigger_datetime = str(int(self.trigger_time))
         else:
-            raise ValueError("schedule自身没有指定时区的情况下，格式化时必须提供一个时区")
+            next_trigger_datetime = self.trigger_time.to_datetime()
+            if self.time_zone is not None:
+                next_trigger_datetime = next_trigger_datetime.astimezone(self.time_zone.tz())
+            elif fallback_time_zone is not None:
+                next_trigger_datetime = next_trigger_datetime.astimezone(fallback_time_zone.tz())
+            else:
+                raise ValueError("schedule自身没有指定时区的情况下，格式化时必须提供一个时区")
+            formated_next_trigger_datetime = format_time(next_trigger_datetime)
+
 
         formated_scheduled = ''
         if self.scheduled_time_of_day is not None:
@@ -518,17 +548,29 @@ class Schedule(BaseModel):
             if self.scheduled_time_of_day is not None:
                 formated_scheduled += "，再加上"
                 if self.interval_fixed:
-                    formated_scheduled += f"{self.interval_fixed}秒的间隔"
+                    if self.time_reference != 'agent_subjective':
+                        formated_scheduled += f"{self.interval_fixed}秒的间隔"
+                    else:
+                        formated_scheduled += f"{int(self.interval_fixed * 1_000_000)}个单位的间隔"
                 else:
-                    formated_scheduled += f"{self.interval_random_min}秒到{self.interval_random_max}秒的随机间隔"
+                    if self.time_reference != 'agent_subjective':
+                        formated_scheduled += f"{self.interval_random_min}秒到{self.interval_random_max}秒的随机间隔"
+                    else:
+                        formated_scheduled += f"{int(self.interval_random_min * 1_000_000)}个单位到{int(self.interval_random_max * 1_000_000)}个单位的随机间隔"
             else:
                 if self.interval_fixed:
-                    formated_scheduled = f"每间隔{self.interval_fixed}秒"
+                    if self.time_reference != 'agent_subjective':
+                        formated_scheduled = f"每间隔{self.interval_fixed}秒"
+                    else:
+                        formated_scheduled = f"每间隔{int(self.interval_fixed * 1_000_000)}个单位"
                 else:
-                    formated_scheduled = f"每随机间隔{self.interval_random_min}秒到{self.interval_random_max}秒"
+                    if self.time_reference != 'agent_subjective':
+                        formated_scheduled = f"每随机间隔{self.interval_random_min}秒到{self.interval_random_max}秒"
+                    else:
+                        formated_scheduled = f"每随机间隔{int(self.interval_random_min * 1_000_000)}个单位到{int(self.interval_random_max * 1_000_000)}个单位"
 
         return f'''{f'{prefix}ID：{self.schedule_id}\n' if include_id else ''}{f'{prefix}类型：{self.schedule_type}\n' if include_type else ''}
-{prefix}下次运行时间：{format_time(next_trigger_datetime)}
+{prefix}下次运行时间：{formated_next_trigger_datetime}
 {prefix}重复时间：{formated_scheduled or '该计划不可重复'}
 {prefix}最大触发次数：{self.max_triggers if self.max_triggers > 0 else '无限次'}
 {prefix}已触发次数：{self.trigger_count}'''
@@ -566,12 +608,12 @@ async def init_schedules_db():
                 time_reference TEXT NOT NULL DEFAULT 'real_world' CHECK(time_reference IN ('real_world', 'agent_world', 'agent_subjective')),
                 time_zone_name TEXT NOT NULL DEFAULT '',
                 time_zone_offset REAL,
-                trigger_timeseconds REAL NOT NULL DEFAULT -1.0,
+                trigger_time INTEGER NOT NULL DEFAULT -1,
                 trigger_count INTEGER NOT NULL DEFAULT 0,
                 repeating BOOLEAN NOT NULL DEFAULT 0
             )
         """)
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_trigger_timeseconds ON schedules (trigger_timeseconds) WHERE time_reference = 'real_world'")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_trigger_time ON schedules (trigger_time) WHERE time_reference = 'real_world'")
         #await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_id ON schedules (agent_id)")
         #await db.execute("CREATE INDEX IF NOT EXISTS idx_schedule_type ON schedules (schedule_type)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_and_type ON schedules (agent_id, schedule_type)")
@@ -677,7 +719,7 @@ async def delete_schedules(schedules: list[Union[Schedule, str]]) -> None:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute(
             f"DELETE FROM schedules WHERE schedule_id IN ({', '.join(['?'] * len(schedule_ids))})",
-            schedule_ids
+            list(schedule_ids)
         )
         if cursor.rowcount != schedules_len:
             logger.warning(f"有{schedules_len-cursor.rowcount}个schedule删除失败，可能是由于找不到指定id的schedule（已经被删除了）")
@@ -685,7 +727,7 @@ async def delete_schedules(schedules: list[Union[Schedule, str]]) -> None:
 
 
 ticking = False
-async def tick_schedules(real_world_datetime: Optional[Union[datetime, float]] = None) -> None:
+async def tick_schedules(real_world_time: Optional[Union[datetime, TimestampUs]] = None) -> None:
     global ticking
     if ticking:
         logger.warning("tick schedules 已在运行，将跳过")
@@ -700,12 +742,15 @@ async def tick_schedules(real_world_datetime: Optional[Union[datetime, float]] =
 
         current_times_caches = {}
 
-        if real_world_datetime is None:
+        if real_world_time is None:
             current_datetime = nowtz()
-        elif isinstance(real_world_datetime, (float, int)):
-            current_datetime = seconds_to_datetime(real_world_datetime)
-        elif real_world_datetime.tzinfo is None:
-            current_datetime = real_world_datetime.replace(tzinfo=get_localzone())
+        elif isinstance(real_world_time, TimestampUs):
+            current_datetime = real_world_time.to_datetime()
+        else:
+            if real_world_time.tzinfo is None:
+                current_datetime = real_world_time.replace(tzinfo=get_localzone())
+            else:
+                current_datetime = real_world_time
 
         def tick_schedule(schedule: Schedule, time: Union[Times, datetime]) -> None:
             should_update, new_values, should_execute = schedule.tick(time)
@@ -721,7 +766,7 @@ async def tick_schedules(real_world_datetime: Optional[Union[datetime, float]] =
 
         real_world_schedules = await get_schedules(where=[
             Schedule.Condition(key='time_reference', value='real_world'),
-            Schedule.Condition(key='trigger_timeseconds', op='<=', value=datetime_to_seconds(current_datetime)),
+            Schedule.Condition(key='trigger_time', op='<=', value=TimestampUs(current_datetime)),
         ])
         for schedule in real_world_schedules:
             tick_schedule(schedule, current_datetime)
@@ -742,7 +787,7 @@ async def tick_schedules(real_world_datetime: Optional[Union[datetime, float]] =
         await delete_schedules(schedule_ids_to_delete)
         await update_schedules(schedules_to_update)
 
-        schedules_to_execute.sort(key=lambda x: x.trigger_timeseconds)
+        schedules_to_execute.sort(key=lambda x: x.trigger_time)
         for schedule in schedules_to_execute:
             await schedule.call_job()
             logger.debug(f"schedule {schedule.schedule_id} 执行完成")

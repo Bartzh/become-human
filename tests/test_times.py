@@ -12,15 +12,11 @@ import pytest
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from pydantic import ValidationError
-from tzlocal import get_localzone
 
 from become_human.times import (
-    nowtz, utcnow, datetime_to_seconds, seconds_to_datetime, now_seconds,
-    SerializableTimeZone, AgentTimeSettings, AgentTimeSetting,
-    real_time_to_agent_time,
-    real_seconds_to_agent_seconds,
-    agent_seconds_to_datetime, now_agent_time, now_agent_seconds,
-    format_time, format_duration, parse_timedelta, Times, AnyTz
+    nowtz, utcnow, timedelta_to_microseconds, TimestampUs,
+    SerializableTimeZone, AgentTimeSettings,
+    format_time, format_duration, parse_timedelta, Times
 )
 
 
@@ -41,40 +37,17 @@ class TestBasicTimeFunctions:
         assert isinstance(result, datetime)
         assert result.tzinfo == timezone.utc
     
-    def test_datetime_to_seconds(self):
-        """测试datetime转秒数功能"""
-        # 测试正常datetime转换
-        dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        seconds = datetime_to_seconds(dt)
-        assert isinstance(seconds, float)
-        assert seconds > 0
+    def test_timedelta_to_microseconds(self):
+        """测试timedelta转微秒数功能"""
+        # 测试正常timedelta转换
+        td = timedelta(hours=2, minutes=30, seconds=15)
+        microseconds = timedelta_to_microseconds(td)
+        assert isinstance(microseconds, int)
+        assert microseconds == 2 * 3600 * 1000000 + 30 * 60 * 1000000 + 15 * 1000000
         
-        # 测试无时区信息的datetime
-        dt_naive = datetime(2024, 1, 1, 12, 0, 0)
-        seconds_naive = datetime_to_seconds(dt_naive)
-        assert isinstance(seconds_naive, float)
-    
-    def test_seconds_to_datetime(self):
-        """测试秒数转datetime功能"""
-        # 测试正常秒数转换，使用当前时间的秒数
-        current_seconds = now_seconds()
-        dt = seconds_to_datetime(current_seconds)
-        assert isinstance(dt, datetime)
-        assert dt.tzinfo == timezone.utc
-        
-        # 测试从零开始
-        dt_zero = seconds_to_datetime(0.0)
-        assert dt_zero.year == 1
-        assert dt_zero.month == 1
-        assert dt_zero.day == 1
-        assert dt_zero.tzinfo == timezone.utc
-    
-    def test_now_seconds(self):
-        """测试当前时间秒数获取"""
-        result = now_seconds()
-        assert isinstance(result, float)
-        assert result > 0
-
+        # 测试零timedelta
+        td_zero = timedelta(0)
+        assert timedelta_to_microseconds(td_zero) == 0
 
 class TestAgentTimeZone:
     """AgentTimeZone类测试"""
@@ -110,29 +83,27 @@ class TestAgentTimeSettings:
     def test_agent_time_settings_defaults(self):
         """测试默认设置创建"""
         settings = AgentTimeSettings()
-        now_sec = now_seconds()
-        assert settings.world_time_setting.agent_time_anchor == 0.0
-        assert settings.world_time_setting.real_time_anchor == 0.0
-        assert settings.world_time_setting.agent_time_scale == 1.0
-        assert settings.subjective_duration_setting.agent_time_anchor == 0.0
-        assert abs(settings.subjective_duration_setting.real_time_anchor - now_sec) < 2.0
-        assert settings.subjective_duration_setting.agent_time_scale == 1.0
+        now_timestampus = TimestampUs.now()
+        assert settings.world_agent_anchor == 0
+        assert settings.world_real_anchor == 0
+        assert settings.world_scale == 1
+        assert settings.subjective_agent_anchor == 0
+        assert abs(settings.subjective_real_anchor - now_timestampus) < 1_000_000
+        assert settings.subjective_scale == 1
         assert isinstance(settings.time_zone, SerializableTimeZone)
     
     def test_agent_time_settings_custom_values(self):
         """测试自定义值设置"""
         tz = SerializableTimeZone(name="UTC")
         settings = AgentTimeSettings(
-            world_time_setting=AgentTimeSetting(
-                agent_time_anchor=1000.0,
-                real_time_anchor=2000.0,
-                agent_time_scale=2.0,
-            ),
+            world_agent_anchor=TimestampUs(1000),
+            world_real_anchor=2000,
+            world_scale=2,
             time_zone=tz
         )
-        assert settings.world_time_setting.agent_time_anchor == 1000.0
-        assert settings.world_time_setting.real_time_anchor == 2000.0
-        assert settings.world_time_setting.agent_time_scale == 2.0
+        assert settings.world_agent_anchor == 1000
+        assert settings.world_real_anchor == 2000
+        assert settings.world_scale == 2
 
 
 class TestTimeConversionFunctions:
@@ -141,11 +112,9 @@ class TestTimeConversionFunctions:
     def setup_method(self):
         """设置测试用的时区设置"""
         self.settings_with_anchors = AgentTimeSettings(
-            world_time_setting=AgentTimeSetting(
-                agent_time_anchor=1000.0,
-                real_time_anchor=2000.0,
-                agent_time_scale=1.0,
-            ),
+            world_agent_anchor=1000,
+            world_real_anchor=2000,
+            world_scale=1,
             time_zone=SerializableTimeZone(name="UTC")
         )
         self.settings_without_anchors = AgentTimeSettings(
@@ -155,66 +124,23 @@ class TestTimeConversionFunctions:
     def test_real_time_to_agent_time_with_anchors(self):
         """测试有锚点时的真实时间转agent时间"""
         real_dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        agent_dt = real_time_to_agent_time(
-            real_dt,
-            self.settings_with_anchors.world_time_setting,
-            self.settings_with_anchors.time_zone
-        )
+        agent_dt = self.settings_with_anchors.to_world_datetime(real_dt)
         assert isinstance(agent_dt, datetime)
         assert agent_dt.tzinfo is not None
     
     def test_real_time_to_agent_time_without_anchors(self):
         """测试无锚点时的真实时间转agent时间"""
         real_dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        agent_dt = real_time_to_agent_time(
-            real_dt,
-            self.settings_without_anchors.world_time_setting,
-            self.settings_without_anchors.time_zone
-        )
+        agent_dt = self.settings_without_anchors.to_world_datetime(real_dt)
         assert isinstance(agent_dt, datetime)
         assert agent_dt.tzinfo is not None
     
-    def test_real_time_to_agent_time_with_seconds(self):
-        """测试使用秒数输入的时间转换"""
+    def test_real_time_to_agent_time_with_timestampus(self):
+        """测试使用TimestampUs输入的时间转换"""
         # 使用当前时间的秒数避免溢出
-        current_seconds = now_seconds()
-        agent_dt = real_time_to_agent_time(
-            current_seconds,
-            self.settings_with_anchors.world_time_setting,
-            self.settings_with_anchors.time_zone
-        )
+        current_timestampus = TimestampUs.now()
+        agent_dt = self.settings_with_anchors.to_world_datetime(current_timestampus)
         assert isinstance(agent_dt, datetime)
-    
-    def test_real_seconds_to_agent_seconds_with_anchors(self):
-        """测试有锚点时的真实秒数转agent秒数"""
-        current_seconds = now_seconds()
-        agent_seconds = real_seconds_to_agent_seconds(current_seconds, self.settings_with_anchors.world_time_setting)
-        assert isinstance(agent_seconds, float)
-    
-    def test_real_seconds_to_agent_seconds_without_anchors(self):
-        """测试无锚点时的真实秒数转agent秒数"""
-        current_seconds = now_seconds()
-        agent_seconds = real_seconds_to_agent_seconds(current_seconds, self.settings_without_anchors.world_time_setting)
-        assert agent_seconds == current_seconds
-    
-    def test_agent_seconds_to_datetime_function(self):
-        """测试agent秒数转datetime函数"""
-        current_seconds = now_seconds()
-        dt = agent_seconds_to_datetime(current_seconds, self.settings_without_anchors.time_zone)
-        assert isinstance(dt, datetime)
-        assert dt.tzinfo is not None
-    
-    def test_now_agent_time(self):
-        """测试获取当前agent时间"""
-        agent_time = now_agent_time(self.settings_without_anchors.world_time_setting, self.settings_without_anchors.time_zone)
-        assert isinstance(agent_time, datetime)
-        assert agent_time.tzinfo is not None
-    
-    def test_now_agent_seconds(self):
-        """测试获取当前agent秒数"""
-        agent_seconds = now_agent_seconds(self.settings_without_anchors.world_time_setting)
-        assert isinstance(agent_seconds, float)
-        assert agent_seconds > 0
 
 
 class TestFormattingFunctions:
@@ -234,29 +160,25 @@ class TestFormattingFunctions:
         assert "Monday" in result
     
     def test_format_time_seconds(self):
-        """测试秒数格式化"""
-        # 使用当前时间的秒数避免溢出
-        from become_human.times import now_seconds
-        seconds = now_seconds()
-        result = format_time(seconds)
-        # 检查包含日期部分和时间格式
-        assert any(char.isdigit() for char in result)
-        assert ":" in result  # 时间格式应该包含冒号
-        # 检查包含月份格式（XX格式）
-        import re
-        month_pattern = r'\b(0[1-9]|1[0-2])\b'  # 匹配01-12格式
-        assert re.search(month_pattern, result) is not None
+        """测试TimestampUs格式化"""
+        dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        timestampus = TimestampUs(dt)
+        result = format_time(timestampus)
+        assert "2024-01-01" in result
+        assert "12:00:00" in result
+        assert "Monday" in result
     
     def test_format_time_seconds_with_timezone(self):
         """测试秒数带时区格式化"""
         # 使用当前时间的秒数避免溢出
-        from become_human.times import now_seconds
-        seconds = now_seconds()
+        dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        timestampus = TimestampUs(dt)
+        result = format_time(timestampus)
         tz = timezone(timedelta(hours=8))
-        result = format_time(seconds, tz)
-        # 检查包含日期部分和时间格式
-        assert any(char.isdigit() for char in result)
-        assert ":" in result  # 时间格式应该包含冒号
+        result = format_time(timestampus, tz)
+        assert "2024-01-01" in result
+        assert "20:00:00" in result
+        assert "Monday" in result
     
     def test_format_time_invalid_data(self):
         """测试无效时间数据格式化"""
@@ -270,9 +192,9 @@ class TestFormattingFunctions:
         (timedelta(minutes=30), ["30分"]),
         (timedelta(days=1), ["1天"]),
         (timedelta(weeks=1), ["7天"]),  # 1周 = 7天
-        (3600.0, ["1小时"]),  # 3600秒 = 1小时
-        (90.0, ["1分", "30秒"]),  # 90秒 = 1分30秒
-        (-3600.0, ["负", "1小时"]),  # 负数
+        (3600000000, ["1小时"]),  # 3600秒 = 1小时
+        (90000000, ["1分", "30秒"]),  # 90秒 = 1分30秒
+        (-3600000000, ["负", "1小时"]),  # 负数
     ])
     def test_format_duration_parametrized(self, input_value, expected_parts):
         """测试时长格式化参数化测试"""
@@ -348,18 +270,16 @@ class TestTimesClass:
     def setup_method(self):
         """设置测试数据"""
         self.settings = AgentTimeSettings(
-            world_time_setting=AgentTimeSetting(
-                agent_time_anchor=1000.0,
-                real_time_anchor=2000.0,
-                agent_time_scale=1.0,
-            ),
+            world_agent_anchor=1000,
+            world_real_anchor=2000,
+            world_scale=1,
             time_zone=SerializableTimeZone(name="UTC")
         )
     
     def test_times_init_real_time(self):
         """测试使用真实时间初始化"""
-        real_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        times = Times.from_time_settings(settings=self.settings, time=real_time)
+        real_time = nowtz()
+        times = Times.from_time_settings(settings=self.settings, real_time=real_time)
         
         assert times.real_world_datetime == real_time
         assert times.agent_time_settings == self.settings
@@ -367,10 +287,10 @@ class TestTimesClass:
     
     def test_times_init_real_time_seconds(self):
         """测试使用真实时间秒数初始化"""
-        current_seconds = now_seconds()
-        times = Times.from_time_settings(settings=self.settings, time=current_seconds)
+        current_datetime = nowtz()
+        times = Times.from_time_settings(settings=self.settings, real_time=current_datetime)
         
-        assert times.real_world_timeseconds == current_seconds
+        assert times.real_world_timestampus == TimestampUs(current_datetime)
         assert isinstance(times.real_world_datetime, datetime)
     
     def test_times_init_default_time(self):
@@ -378,7 +298,7 @@ class TestTimesClass:
         times = Times.from_time_settings(settings=self.settings)
         
         assert isinstance(times.real_world_datetime, datetime)
-        assert isinstance(times.real_world_timeseconds, float)
+        assert isinstance(times.real_world_timestampus, TimestampUs)
 
 
 class TestEdgeCasesAndBoundaryConditions:
@@ -388,62 +308,38 @@ class TestEdgeCasesAndBoundaryConditions:
         """测试极值时间转换"""
         # 测试最早时间
         early_dt = datetime(1, 1, 1, tzinfo=timezone.utc)
-        seconds = datetime_to_seconds(early_dt)
-        assert seconds == 0.0
+        timestampus = TimestampUs(early_dt)
+        assert timestampus == 0
         
         # 测试转换回来
-        converted_dt = seconds_to_datetime(seconds)
+        converted_dt = timestampus.to_datetime()
         assert converted_dt == early_dt
     
     def test_time_scale_zero(self):
         """测试时间缩放为零"""
         settings = AgentTimeSettings(
-            world_time_setting=AgentTimeSetting(
-                agent_time_anchor=1000.0,
-                real_time_anchor=2000.0,
-                agent_time_scale=0.0,
-            ),
+            world_agent_anchor=1000,
+            world_real_anchor=2000,
+            world_scale=0,
             time_zone=SerializableTimeZone(name="UTC")
         )
         
         real_dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        agent_dt = real_time_to_agent_time(real_dt, settings.world_time_setting, settings.time_zone)
+        agent_dt = settings.to_world_datetime(real_dt)
         # 时间缩放为零时，所有时间都应该等于锚点时间
-        assert isinstance(agent_dt, datetime)
+        assert TimestampUs(agent_dt) == 1000
     
     def test_negative_time_scale(self):
         """测试负时间缩放"""
-        # 使用较小的锚点值避免溢出
-        current_seconds = now_seconds()
         settings = AgentTimeSettings(
-            world_time_setting=AgentTimeSetting(
-                agent_time_anchor=current_seconds,
-                real_time_anchor=current_seconds,
-                agent_time_scale=-1.0,
-            ),
+            world_agent_anchor=1000,
+            world_real_anchor=2000,
+            world_scale=-1,
             time_zone=SerializableTimeZone(name="UTC")
         )
         
-        real_dt = datetime.now(timezone.utc)
-        agent_dt = real_time_to_agent_time(real_dt, settings.world_time_setting, settings.time_zone)
-        assert isinstance(agent_dt, datetime)
-    
-    def test_large_time_scale(self):
-        """测试大时间缩放"""
-        # 使用较小的锚点值避免溢出
-        current_seconds = now_seconds()
-        settings = AgentTimeSettings(
-            world_time_setting=AgentTimeSetting(
-                agent_time_anchor=current_seconds,
-                real_time_anchor=current_seconds,
-                agent_time_scale=100.0,
-            ),
-            time_zone=SerializableTimeZone(name="UTC")
-        )
-        
-        real_dt = datetime.now(timezone.utc)
-        agent_dt = real_time_to_agent_time(real_dt, settings.world_time_setting, settings.time_zone)
-        assert isinstance(agent_dt, datetime)
+        agent_dt = settings.to_world_datetime(TimestampUs(3000))
+        assert TimestampUs(agent_dt) == 0
 
 
 class TestTimezoneHandling:
@@ -464,7 +360,7 @@ class TestTimezoneHandling:
             )
             
             real_dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-            agent_dt = real_time_to_agent_time(real_dt, settings.world_time_setting, settings.time_zone)
+            agent_dt = settings.to_world_datetime(real_dt)
             
             assert isinstance(agent_dt, datetime)
             assert agent_dt.tzinfo is not None
@@ -497,23 +393,16 @@ class TestTimezoneHandling:
 def sample_agent_settings():
     """提供示例agent时间设置"""
     return AgentTimeSettings(
-        world_time_setting=AgentTimeSetting(
-            agent_time_anchor=1000.0,
-            real_time_anchor=2000.0,
-            agent_time_scale=1.0,
-        ),
+        world_agent_anchor=1000.0,
+        world_real_anchor=2000.0,
+        world_scale=1.0,
         time_zone=SerializableTimeZone(name="UTC")
     )
 
 @pytest.fixture
 def sample_datetime():
     """提供示例datetime。在我的测试中，微秒最高可以设置到999969，再往上会溢出"""
-    return datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
-
-@pytest.fixture
-def sample_seconds():
-    """提供示例秒数"""
-    return now_seconds()  # 使用当前时间避免溢出
+    return datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
 
 
 class TestWithFixtures:
@@ -521,11 +410,7 @@ class TestWithFixtures:
     
     def test_sample_fixture_usage(self, sample_agent_settings, sample_datetime):
         """测试fixture使用"""
-        agent_time = real_time_to_agent_time(
-            sample_datetime, 
-            sample_agent_settings.world_time_setting, 
-            sample_agent_settings.time_zone
-        )
+        agent_time = sample_agent_settings.to_world_datetime(sample_datetime)
         assert isinstance(agent_time, datetime)
 
 

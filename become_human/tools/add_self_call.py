@@ -3,7 +3,7 @@ from datetime import datetime
 from langchain.tools import tool, ToolRuntime
 from langchain.messages import ToolMessage
 from langgraph.types import Command
-from become_human.times import datetime_to_seconds, Times
+from become_human.times import TimestampUs, Times
 from become_human.message import BH_MESSAGE_METADATA_KEY, BHMessageMetadata
 from become_human.store.manager import store_manager
 from become_human.types.main import MainContext, MainState
@@ -28,7 +28,7 @@ async def add_self_call(
     tool_call_id = runtime.tool_call_id
     agent_id = runtime.context.agent_id
 
-    self_call_seconds = datetime_to_seconds(self_call_datetime)
+    self_call_seconds = TimestampUs(self_call_datetime)
     active_self_call_time_secondses = [s for s, n in active_self_call_time_secondses_and_notes]
     content = "添加自我唤醒计划成功。"
     new_state = {'active_self_call_time_secondses_and_notes': active_self_call_time_secondses_and_notes + [(self_call_seconds, note)]}
@@ -41,7 +41,7 @@ async def add_self_call(
     )
     if not force_add:
         for s in active_self_call_time_secondses:
-            if abs(s - self_call_seconds) < 3600.0:
+            if abs(s - self_call_seconds) < 3600_000_000:
                 content = '在你指定时间的附近一小时范围内已经存在主动自我唤醒计划，为避免重复此次添加被取消。若确定要添加，请将force_add参数设置为True再次调用此工具。'
                 new_state = {}
                 metadata.is_streaming_tool = None
