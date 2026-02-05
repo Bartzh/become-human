@@ -9,7 +9,7 @@ from become_human.scheduler import Schedule, get_schedules
 from become_human.store.manager import store_manager
 from become_human.types.main import MainContext
 from become_human.plugin import Plugin
-from become_human.agent_manager import agent_manager
+from become_human.manager import agent_manager
 
 async def agent_schedule_job(schedule: Schedule, agent_id: str, title: str, description: str) -> None:
     """
@@ -296,6 +296,7 @@ async def delete_reminder(
     return content, artifact
 
 class AgentReminderPlugin(Plugin):
+    name = 'agent_reminder'
     tools = [
         add_reminder,
         list_reminders,

@@ -73,7 +73,7 @@ class MainSettings(StoreModel):
 class RecyclingSettings(StoreModel):
     _namespace = ('recycling',)
     _readable_name = "回收设置"
-    memory_base_stable_duration_ticks: int = StoreField(default=259200_000_000, readable_name='记忆稳定时长基值', description="记忆初始化时stable_duration_ticks的初始值")
+    memory_base_ttl: int = StoreField(default=259200_000_000, readable_name='记忆稳定时长基值', description="记忆初始化时ttl的初始值")
     memory_max_words: int = StoreField(default=300, readable_name='记忆最大Tokens数', description="单条记忆最大单词数，决定记忆难度，最大难度0.8")
     recycling_trigger_threshold: int = StoreField(default=24000, readable_name='溢出回收阈值', description="触发溢出回收的阈值，单位为Token")
     recycling_target_size: int = StoreField(default=18000, readable_name='溢出回收目标大小', description="溢出回收后目标大小，单位为Token")

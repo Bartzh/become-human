@@ -255,7 +255,7 @@ class InitialMemory(BaseModel):
     content: str = Field(description="The content of the memory")
     type: AnyMemoryType = Field(description="The type of the memory")
     creation_times: Times = Field(description="The creation times of the memory")
-    stable_duration_ticks: int = Field(description="The stable duration ticks of the memory", gt=0)
+    ttl: int = Field(description="The ttl of the memory", gt=0)
     id: str = Field(default_factory=lambda: str(uuid4()), description="The id of the memory")
     previous_memory_id: Optional[str] = Field(default=None, description="The previous memory id")
     next_memory_id: Optional[str] = Field(default=None, description="The next memory id")
@@ -275,31 +275,31 @@ def construct_default_memory_update_schedules(agent_id: str) -> list[Schedule]:
     return [
         Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=5.0, job=update_memories_job, job_kwargs={
             'agent_id': agent_id,
-            'stable_duration_ticks_range': [{'$gte': 0}, {'$lt': 43200}]
+            'ttl_range': [{'$gte': 0}, {'$lt': 43200}]
         }),
         Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=30.0, job=update_memories_job, job_kwargs={
             'agent_id': agent_id,
-            'stable_duration_ticks_range': [{'$gte': 43200}, {'$lt': 86400}]
+            'ttl_range': [{'$gte': 43200}, {'$lt': 86400}]
         }),
         Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=60.0, job=update_memories_job, job_kwargs={
             'agent_id': agent_id,
-            'stable_duration_ticks_range': [{'$gte': 86400}, {'$lt': 864000}]
+            'ttl_range': [{'$gte': 86400}, {'$lt': 864000}]
         }),
         Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=500.0, job=update_memories_job, job_kwargs={
             'agent_id': agent_id,
-            'stable_duration_ticks_range': [{'$gte': 864000}, {'$lt': 8640000}]
+            'ttl_range': [{'$gte': 864000}, {'$lt': 8640000}]
         }),
         Schedule(agent_id=agent_id, schedule_type='memory:updater', interval_fixed=3600.0, job=update_memories_job, job_kwargs={
             'agent_id': agent_id,
-            'stable_duration_ticks_range': [{'$gte': 8640000}]
+            'ttl_range': [{'$gte': 8640000}]
         }),
     ]
 
-async def update_memories_job(agent_id: str, stable_duration_ticks_range: list[dict[str, int]]) -> None:
+async def update_memories_job(agent_id: str, ttl_range: list[dict[str, int]]) -> None:
     """更新记忆"""
     update_count = 0
     for t in get_activated_memory_types():
-        where = validated_where({'$and': [{'stable_duration_ticks': item} for item in stable_duration_ticks_range]})
+        where = validated_where({'$and': [{'ttl': item} for item in ttl_range]})
         result = await memory_manager.aget(
             agent_id=agent_id,
             memory_type=t,
@@ -359,11 +359,11 @@ class MemoryManager():
             difficulty = min(0.8, (len(words) / max_words_length) ** 3)
             creation_times = memory.creation_times
             memory_of_day = calculate_memory_of_day(creation_times.agent_world_datetime)
-            stable_duration_ticks = int(memory.stable_duration_ticks * (1 - difficulty) * memory_of_day) # 稳定性，决定了可检索性的衰减速度
+            ttl = int(memory.ttl * (1 - difficulty) * memory_of_day) # 稳定性，决定了可检索性的衰减速度
             metadata = generate_time_metadatas(creation_times, 'creation')
             metadata.update(generate_time_metadatas(creation_times, 'last_accessed'))
             metadata.update({
-                "stable_duration_ticks": stable_duration_ticks, # 稳定ticks
+                "ttl": ttl, # 稳定ticks
                 "retrievability": 1.0, # 可检索性，决定了检索的概率
                 "difficulty": difficulty, # 难度，决定了稳定性基数增长的多少。可能会出现无法长期保留的记忆，如整本书的内容。
                 "memory_type": memory.type,
@@ -1319,11 +1319,11 @@ def tick_memory(metadata: dict, current_agent_subjective_tick: Union[int, Times]
     else:
         tick = current_agent_subjective_tick.agent_subjective_tick
 
-    if metadata["stable_duration_ticks"] == 0:
-        logger.warning('意外的stable_duration_ticks为0，metadata：' + str(metadata))
+    if metadata["ttl"] == 0:
+        logger.warning('意外的ttl为0，metadata：' + str(metadata))
         return {"forgot": True}
 
-    x = (tick - metadata["last_accessed_agent_subjective_tick"]) / metadata["stable_duration_ticks"]
+    x = (tick - metadata["last_accessed_agent_subjective_tick"]) / metadata["ttl"]
     if x >= 1:
         return {"forgot": True}
     retrievability = 1 - x ** 0.4
@@ -1342,18 +1342,18 @@ def recall_memory(metadata: dict, current_times: Times, strength: float = 1.0) -
     reversed_difficulty = 1 - metadata["difficulty"]
     memory_of_day = calculate_memory_of_day(current_times.agent_world_datetime)
     stable_strength = calculate_stability_curve(updated_metadata["retrievability"])
-    current_stable_duration_ticks = int(metadata["stable_duration_ticks"])
-    stable_duration_ticks_diff = int(current_stable_duration_ticks * stable_strength) - current_stable_duration_ticks
-    if stable_duration_ticks_diff >= 0:
-        stable_duration_ticks_diff = int(stable_duration_ticks_diff * reversed_difficulty * strength * memory_of_day)
-    new_stable_duration_ticks = current_stable_duration_ticks + stable_duration_ticks_diff
+    current_ttl = int(metadata["ttl"])
+    ttl_diff = int(current_ttl * stable_strength) - current_ttl
+    if ttl_diff >= 0:
+        ttl_diff = int(ttl_diff * reversed_difficulty * strength * memory_of_day)
+    new_ttl = current_ttl + ttl_diff
 
     retrievability = min(1.0, updated_metadata["retrievability"] + strength * memory_of_day)
 
     metadata_patch = generate_time_metadatas(current_times, 'last_accessed')
     metadata_patch.update({
         "retrievability": retrievability,
-        "stable_duration_ticks": new_stable_duration_ticks
+        "ttl": new_ttl
     })
 
     if metadata["difficulty"] > 0.0:

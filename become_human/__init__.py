@@ -1,9 +1,21 @@
 import os
+from typing import TYPE_CHECKING
 from dotenv import load_dotenv
 from langchain_dev_utils.chat_models import batch_register_model_provider
 from langchain_dev_utils.embeddings import batch_register_embeddings_provider
 from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama, OllamaEmbeddings
+
+if TYPE_CHECKING:
+    from become_human.manager import agent_manager
+
+__all__ = ['agent_manager']
+
+def __getattr__(name):
+    if name == 'agent_manager':
+        from become_human.manager import agent_manager
+        return agent_manager
+    raise AttributeError(f"module {__name__} has no attribute {name}")
 
 load_dotenv()
 

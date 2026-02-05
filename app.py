@@ -23,8 +23,8 @@ from webpush import WebPush, WebPushSubscription
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from become_human.plugins.agent_reminder import AgentReminderPlugin
-from become_human.agent_manager import agent_manager
+from become_human.plugins import AgentReminderPlugin, AgentTimeIncrementerPlugin
+from become_human import agent_manager
 from become_human.message import extract_text_parts, BHMessageMetadata
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 
@@ -48,6 +48,7 @@ async def lifespan(app: FastAPI):
     await init_db()
     await agent_manager.init_manager(plugins=[
         AgentReminderPlugin,
+        AgentTimeIncrementerPlugin,
     ])
     event_listener_task = asyncio.create_task(event_listener(agent_manager.event_queue))
     yield

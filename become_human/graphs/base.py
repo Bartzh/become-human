@@ -21,15 +21,8 @@ class BaseGraph:
     llm: BaseChatModel
     tools: list[AgentTool]
 
-    def __init__(self, llm: Optional[BaseChatModel] = None,
-        tools: Optional[list[Union[Callable, BaseTool, AgentTool]]] = None
-    ):
-        if llm is not None:
-            self.llm = llm
-        if not hasattr(self, 'tools'):
-            self.tools = []
-        if tools:
-            self.tools.extend([tool if isinstance(tool, AgentTool) else AgentTool(tool) for tool in tools])
+    def __init__(self):
+        pass
 
 # 基本是对langgraph.graph.channels.binop的改造简化版本
 MISSING = object()

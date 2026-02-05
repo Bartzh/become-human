@@ -1,7 +1,7 @@
 from langgraph.store.sqlite import AsyncSqliteStore
 from langgraph.store.base import Item, NotProvided, NOT_PROVIDED, Op, Result, NamespacePath, SearchItem, PutOp
 
-from pydantic import BaseModel, Field, TypeAdapter, PydanticSchemaGenerationError
+from pydantic import BaseModel, Field, TypeAdapter, PydanticSchemaGenerationError, PrivateAttr, field_validator, ValidationInfo
 from pydantic_core import ValidationError, core_schema
 from typing import Literal, Any, Iterable, Optional, Self, Union, Callable, get_type_hints
 #from weakref import WeakKeyDictionary
@@ -196,6 +196,23 @@ class StoreField(BaseModel):
     description: Optional[str] = Field(default=None)
     default: Union[Any, UnsetType] = Field(default=Unset)
     default_factory: Optional[Callable[[], Any]] = Field(default=None)
+    _owner: type['StoreModel'] = PrivateAttr()
+    _attribute_name: str = PrivateAttr()
+
+    @field_validator('default_factory', mode='after')
+    @classmethod
+    def validate_default_factory(cls, value: Optional[Callable[[], Any]], info: ValidationInfo) -> Optional[Callable[[], Any]]:
+        if value is None:
+            return None
+        elif info.data['default'] is not Unset:
+            raise ValueError("default_factory 不能与 default 同时设置。")
+        return value
+
+    def __set_name__(self, owner: type, name: str):
+        if not issubclass(owner, StoreModel):
+            raise TypeError(f"{owner.__name__} 不是 StoreModel 的子类，不能设置 StoreField。")
+        self._owner = owner
+        self._attribute_name = name
 
     def get_default_value(self) -> Any:
         if self.default_factory is not None:
@@ -203,7 +220,40 @@ class StoreField(BaseModel):
         elif self.default is not Unset:
             return self.default
         else:
-            raise AttributeError(f"{self.readable_name}没有设置默认值。")
+            raise AttributeError(f"{self._owner.__name__}的{self._attribute_name}没有设置默认值。")
+
+    def get_default_value_with_global_config(self, namespace: tuple[str, ...]) -> tuple[Any, bool]:
+        """优先从全局配置中获取默认值，若不存在则返回默认值。
+
+        Returns:
+            tuple[Any, bool]: 第一个元素为默认值，第二个元素为是否是从全局配置中获取的默认值。
+        """
+        from become_human.config import global_config
+        value = global_config.get(namespace[3])
+        if isinstance(value, dict):
+            for key in namespace[4:]:
+                value = value.get(key)
+                if not isinstance(value, dict):
+                    value = Unset
+                    break
+            if isinstance(value, dict):
+                value = value.get(self._attribute_name, Unset)
+        else:
+            value = Unset
+        if value is not Unset:
+            type_hints = get_store_type_hints(self._owner)
+            if self._attribute_name in type_hints:
+                try:
+                    value = TypeAdapter(type_hints[self._attribute_name]).validate_python(value)
+                    return value, True
+                except ValidationError:
+                    logger.warning(f"全局配置中存在 {namespace[3:]}.{self._attribute_name} 的值，但其不符合 {type_hints[self._attribute_name]} 的类型。将使用默认值。")
+        elif self.default_factory is not None:
+            return self.default_factory(), False
+        elif self.default is not Unset:
+            return self.default, False
+        else:
+            raise AttributeError(f"{self._owner.__name__}的{self._attribute_name}没有设置默认值。")
 
 class StoreItem(BaseModel):
     readable_name: Optional[Union[str, UnsetType]] = Field(default=Unset, exclude_if=Unset.is_unset)
@@ -226,7 +276,11 @@ class StoreModel:
     def __init_subclass__(cls):
         super().__init_subclass__()
         if not hasattr(cls, '_namespace'):
-            raise TypeError(f"子类 {cls.__name__} 必须定义类属性 '_namespace'")
+            raise TypeError(f"StoreModel子类 {cls.__name__} 必须定义类属性 '_namespace'")
+        if isinstance(cls._namespace, str):
+            cls._namespace = (cls._namespace,)
+        elif not isinstance(cls._namespace, tuple):
+            raise TypeError(f"StoreModel子类 {cls.__name__} 的_namespace 必须是 str 或 tuple[str, ...] 类型。")
 
     def __init__(self, agent_id: str, search_items: list[SearchItem], namespace: Optional[tuple[str, ...]] = None):
         self._agent_id = agent_id
@@ -248,10 +302,15 @@ class StoreModel:
                         logger.warning(f"Invalid value for {item.key}: {e}, from store.")
                         continue
                 else:
-                    field = self.get_field(item.key)
-                    # 如果是default_factory则生成默认值，并保存到store中
-                    if field.default_factory is not None:
-                        value = field.get_default_value()
+                    try:
+                        field = self.get_field(item.key)
+                    except AttributeError:
+                        logger.warning(f"在store中找到了 {item.key} ，虽然model的type_hints中存在其定义，但不是StoreField，这个值将被忽略。")
+                        continue
+                    # 如果要由default_factory生成默认值，则直接生成并保存到store中
+                    default_value, is_global = field.get_default_value_with_global_config(self_namespace)
+                    if not is_global and field.default_factory is not None:
+                        value = default_value
                         new_value = item.value.copy()
                         new_value['value'] = value
                         store_queue.put_nowait({'action': 'put', 'namespace': self_namespace, 'key': item.key, 'value': new_value})
@@ -283,9 +342,9 @@ class StoreModel:
                 item = StoreItem()
             value = item.value
             if value is Unset:
-                value = attr.get_default_value()
+                value, is_global = attr.get_default_value_with_global_config(self._namespace)
                 # 如果是default_factory生成的默认值，则保存到store中
-                if attr.default_factory is not None:
+                if not is_global and attr.default_factory is not None:
                     item.value = value
                     self._cache[name] = item
                     store_queue.put_nowait({'action': 'put', 'namespace': self._namespace, 'key': name, 'value': item.model_dump()})

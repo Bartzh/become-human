@@ -15,11 +15,12 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langchain_dev_utils.chat_models import load_chat_model
 
 from become_human.types.main import MainContext, InterruptData, MainState
+from become_human.types.agent_manager import CallAgentKwargs
 from become_human.graphs.base import StateMerger
 from become_human.graphs.main import MainGraph, SEND_MESSAGE_TOOL_CONTENT
 from become_human.recycling import recycle_memories
 from become_human.memory import get_activated_memory_types, memory_manager, construct_default_memory_update_schedules
-from become_human.config import load_config, get_agent_configs
+from become_human.config import load_config, get_init_on_startup_agent_ids, get_agent_enabled_plugin_names
 from become_human.utils import is_valid_json
 from become_human.times import format_time, format_duration, Times, parse_timedelta, AgentTimeSettings, timedelta_to_microseconds, TimestampUs
 from become_human.message import format_messages_for_ai, extract_text_parts, construct_system_message, BH_MESSAGE_METADATA_KEY, BHMessageMetadata
@@ -27,7 +28,7 @@ from become_human.store.base import store_setup, store_stop_listener, store_adel
 from become_human.store.manager import store_manager
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 from become_human.scheduler import get_schedules, tick_schedules, delete_schedules, add_schedules, init_schedules_db, Schedule, update_schedules
-from become_human.plugin import Plugin
+from become_human.plugin import Plugin, Cancelled
 
 
 class AgentManager:
@@ -36,7 +37,7 @@ class AgentManager:
     有些地方会出现的thread、thread_id，跟agent是一回事。thread指langgraph checkpointer的thread，在这里就被当作agent。"""
 
     event_queue: asyncio.Queue
-    plugins: list[Plugin]
+    plugins_with_name: dict[str, Plugin]
 
     activated_agent_id_datas: dict[str, dict[str, Any]]
     heartbeat_interval: float
@@ -52,7 +53,7 @@ class AgentManager:
     main_graph: MainGraph
     main_graph_state_merger: StateMerger
     # 缓冲用于当双发但还没调用graph时，最后一次调用可以连上之前的输入给agent，而前面的调用直接取消即可。
-    _call_agent_buffers: dict[str, list[dict[str, Any]]]
+    _call_agent_buffers: dict[str, list[CallAgentKwargs]]
     _agent_interrupt_datas: dict[str, InterruptData]
     _agent_run_id_on_before_call_agent: dict[str, str]
 
@@ -91,12 +92,36 @@ class AgentManager:
 
 
         await store_setup()
-        await load_config()
         await init_schedules_db()
 
         if plugins is None:
             plugins = []
-        self.plugins = [plugin() if isinstance(plugin, type) else plugin for plugin in dict.fromkeys(plugins)]
+        plugins_with_name = {}
+        for plugin in plugins:
+            # name必须是类属性
+            if plugin.name not in plugins_with_name:
+                plugins_with_name[plugin.name] = plugin() if isinstance(plugin, type) else plugin
+            else:
+                raise ValueError(f"Plugin name {plugin.name} is duplicated.")
+        self.plugins_with_name = plugins_with_name
+
+        await load_config(self.plugins_with_name)
+
+        store_namespaces = set(['builtin'])
+        for name, plugin in self.plugins_with_name.items():
+            if hasattr(plugin, 'config'):
+                if plugin.config._namespace not in store_namespaces:
+                    store_namespaces.add(plugin.config._namespace)
+                    await store_manager.register_model(plugin.config)
+                else:
+                    raise ValueError(f"Plugin {name} config namespace {plugin.config._namespace} is duplicated.")
+            if hasattr(plugin, 'data'):
+                if plugin.data._namespace not in store_namespaces:
+                    store_namespaces.add(plugin.data._namespace)
+                    await store_manager.register_model(plugin.data)
+                else:
+                    raise ValueError(f"Plugin {name} data namespace {plugin.data._namespace} is duplicated.")
+
 
         def create_model(model_name: str, enable_thinking: bool = False):
             splited_model_name = model_name.split(':', 1)
@@ -153,20 +178,18 @@ class AgentManager:
             structured_enable_thinking = False
         self.structured_model = create_model(os.getenv("STRUCTURED_MODEL_NAME", ""), structured_enable_thinking)
 
-        tools_plugins = [plugin for plugin in self.plugins if hasattr(plugin, 'tools')]
         self.main_graph = await MainGraph.create(
             llm=self.chat_model,
-            tools=[tool for plugin in tools_plugins for tool in plugin.tools],
+            plugins_with_name=self.plugins_with_name,
             llm_for_structured_output=self.structured_model)
         self.main_graph_state_merger = StateMerger(MainState)
 
-        for plugin in self.plugins:
+        for plugin in self.plugins_with_name.values():
             await plugin.on_manager_init()
 
         # 启动heartbeat
-        for key, value in get_agent_configs().items():
-            if value.get('init_on_startup'):
-                await self.init_agent(key)
+        for agent_id in get_init_on_startup_agent_ids():
+            await self.init_agent(agent_id)
         if self.heartbeat_task is None:
             self.heartbeat_task = asyncio.create_task(self.start_heartbeat_task())
 
@@ -386,16 +409,21 @@ class AgentManager:
 
         await self.trigger_agent(agent_id)
 
-        for plugin in self.plugins:
-            await plugin.on_agent_init(agent_id)
+        enabled_plugins = get_agent_enabled_plugin_names(agent_id)
+        for name, plugin in self.plugins_with_name.items():
+            if name in enabled_plugins:
+                await plugin.on_agent_init(agent_id)
 
     async def close_agent(self, agent_id: str):
         """手动关闭agent，若agent处于triggering则等待"""
         if self.activated_agent_id_datas.get(agent_id):
             await self.activated_agent_id_datas[agent_id]['on_trigger_finished'].wait()
             del self.activated_agent_id_datas[agent_id]
-        for plugin in self.plugins:
-            await plugin.on_agent_close(agent_id)
+        enabled_plugins = get_agent_enabled_plugin_names(agent_id)
+        for name, plugin in self.plugins_with_name.items():
+            # 如果插件在运行途中被禁用，则不会调用on_agent_close，这可能存在问题
+            if name in enabled_plugins:
+                await plugin.on_agent_close(agent_id)
         store_manager.close_agent(agent_id)
 
     async def close_manager(self):
@@ -410,7 +438,7 @@ class AgentManager:
                 pass
             self.heartbeat_task = None
 
-        for plugin in self.plugins:
+        for plugin in self.plugins_with_name.values():
             await plugin.on_manager_close()
 
         await self.main_graph.conn.close()
@@ -522,21 +550,34 @@ class AgentManager:
         agent_id = graph_context.agent_id
         agent_run_id = graph_context.agent_run_id
         config = {"configurable": {"thread_id": agent_id}}
-        call_agent_kwargs = {
-            "graph_input": graph_input,
-            "graph_context": graph_context,
-            "double_texting_strategy": double_texting_strategy,
-            "random_wait": random_wait,
-            "is_self_call": is_self_call
-        }
+        call_agent_kwargs = CallAgentKwargs(
+            graph_input=graph_input,
+            graph_context=graph_context,
+            double_texting_strategy=double_texting_strategy,
+            random_wait=random_wait,
+            is_self_call=is_self_call
+        )
 
-        async def processing_after_call_agent(set_interrupted: Optional[bool] = None, rejected_or_queuing: bool = False):
-            for plugin in self.plugins:
-                await plugin.after_call_agent(
-                    call_agent_kwargs,
-                    self.main_graph.agent_run_ids.get(agent_id) != agent_run_id if set_interrupted is None else set_interrupted,
-                    rejected_or_queuing
-                )
+        async def processing_after_call_agent(cancelled: Optional[Cancelled] = None):
+            enabled_plugins = get_agent_enabled_plugin_names(agent_id)
+            for name, plugin in self.plugins_with_name.items():
+                # 同样的，如果插件在运行途中被禁用，则不会调用after_call_agent，这可能存在问题
+                if name in enabled_plugins:
+                    if cancelled:
+                        await plugin.after_call_agent(
+                            call_agent_kwargs,
+                            cancelled
+                        )
+                    elif self.main_graph.agent_run_ids.get(agent_id) != agent_run_id:
+                        await plugin.after_call_agent(
+                            call_agent_kwargs,
+                            Cancelled('interrupted')
+                        )
+                    else:
+                        await plugin.after_call_agent(
+                            call_agent_kwargs,
+                            None
+                        )
 
         if double_texting_strategy != 'reject':
             # 首先把参数加入buffer
@@ -548,19 +589,34 @@ class AgentManager:
                 self._call_agent_buffers[agent_id].append(call_agent_kwargs)
 
         # 处理插件，支持在调用插件时就被打断
+        cancelled_plugin_name = None
         self._agent_run_id_on_before_call_agent[agent_id] = agent_run_id
-        for plugin in self.plugins:
-            await plugin.before_call_agent(call_agent_kwargs)
-        if self._agent_run_id_on_before_call_agent.get(agent_id) != agent_run_id:
-            await processing_after_call_agent(set_interrupted=True)
+        enabled_plugins = get_agent_enabled_plugin_names(agent_id)
+        for name, plugin in self.plugins_with_name.items():
+            if name in enabled_plugins:
+                if cancelled_plugin_name:
+                    await plugin.before_call_agent(call_agent_kwargs, Cancelled('plugin', cancelled_plugin_name))
+                else:
+                    cancelled = await plugin.before_call_agent(call_agent_kwargs, None)
+                    if cancelled:
+                        cancelled_plugin_name = name
+        if cancelled_plugin_name:
+            await processing_after_call_agent(Cancelled('plugin', cancelled_plugin_name))
+            return
+        elif self._agent_run_id_on_before_call_agent.get(agent_id) != agent_run_id:
+            await processing_after_call_agent(Cancelled('interrupted'))
             return
         else:
             del self._agent_run_id_on_before_call_agent[agent_id]
 
         # 如果策略不为merge的同时已有运行，则不重复运行。如果agent_run_id相同，则允许运行，这是为enqueue准备的
-        if double_texting_strategy != 'merge' and self.main_graph.agent_run_ids.get(agent_id) != agent_run_id:
-            await processing_after_call_agent(set_interrupted=False, rejected_or_queuing=True)
-            return
+        if self.main_graph.agent_run_ids.get(agent_id) != agent_run_id:
+            if double_texting_strategy == 'reject':
+                await processing_after_call_agent(Cancelled('rejected'))
+                return
+            elif double_texting_strategy == 'enqueue':
+                await processing_after_call_agent(Cancelled('queuing'))
+                return
 
         # 将运行id加入main_graph的运行id字典
         self.main_graph.agent_run_ids[agent_id] = agent_run_id
@@ -577,7 +633,7 @@ class AgentManager:
             await asyncio.sleep(random.uniform(1.0, 4.0))
             # 如果在等待期间又有新的调用，则取消这次调用
             if self.main_graph.agent_run_ids.get(agent_id, '') != agent_run_id:
-                await processing_after_call_agent(set_interrupted=True)
+                await processing_after_call_agent(Cancelled('interrupted'))
                 return
 
         # 如果main_graph正在运行"tools"节点，则等待其运行完毕再打断。
@@ -595,7 +651,7 @@ class AgentManager:
                 await asyncio.sleep(0.2)
                 # 如果在等待期间又有新的调用，则取消这次调用
                 if self.main_graph.agent_run_ids.get(agent_id) != agent_run_id:
-                    await processing_after_call_agent(set_interrupted=True)
+                    await processing_after_call_agent(Cancelled('interrupted'))
                     return
                 main_graph_state = await self.main_graph.graph.aget_state(config)
                 current_node = main_graph_state.next[0]
@@ -603,11 +659,11 @@ class AgentManager:
         # 从buffer中取出user_input
         # 默认buffer中是有数据的，除了reject不使用buffer
         if double_texting_strategy == 'merge':
-            graph_inputs = [args['graph_input'] for args in self._call_agent_buffers.pop(agent_id)]
+            graph_inputs = [kwargs.graph_input for kwargs in self._call_agent_buffers.pop(agent_id)]
             graph_input = self.main_graph_state_merger.merge(graph_inputs)
         elif double_texting_strategy == 'enqueue':
             # 把自己刚存进去的数据拿出来
-            graph_input = self._call_agent_buffers[agent_id].pop(kwargs_index)['graph_input']
+            graph_input = self._call_agent_buffers[agent_id].pop(kwargs_index).graph_input
         elif self._call_agent_buffers.get(agent_id):
             del self._call_agent_buffers[agent_id]
             logger.warning("在使用reject策略调用agent时意外发现存在残留未处理的用户输入，已删除。")
@@ -763,10 +819,10 @@ class AgentManager:
         if self.main_graph.agent_run_ids.get(agent_id) == agent_run_id:
             if self._call_agent_buffers.get(agent_id):
                 kwargs = self._call_agent_buffers[agent_id][0]
-                if kwargs['double_texting_strategy'] == 'enqueue':
+                if kwargs.double_texting_strategy == 'enqueue':
                     del self._call_agent_buffers[agent_id][0]
-                    self.main_graph.agent_run_ids[agent_id] = kwargs['agent_run_id']
-                    await self.call_agent(**kwargs)
+                    self.main_graph.agent_run_ids[agent_id] = kwargs.graph_context.agent_run_id
+                    await self.call_agent(**kwargs.model_dump())
                 else:
                     logger.warning('当call_agent运行完毕且agent_run_id没有改变时，该agent_id的_call_agent_buffer中不应会出现策略非enqueue（也就是merge，reject不会使用buffer）的调用。也许有极小概率两次调用刚好擦肩而过，总之这里就将其忽略了')
                 return
@@ -883,19 +939,16 @@ __all__: 加载所有agent配置
 例如：/load_config agent_1 或 /load_config __all__"""
                 else:
                     if user_input == "/load_config":
-                        result = await load_config(agent_id, force=True)
+                        await load_config(self.plugins_with_name, agent_id, force=True)
                     else:
                         splited_input = user_input.split(" ")
                         if splited_input[1]:
                             if splited_input[1] == "__all__":
-                                result = await load_config(force=True)
+                                await load_config(self.plugins_with_name, force=True)
                             else:
-                                result = await load_config(splited_input[1], force=True)
-                    if result:
-                        await store_manager.init_agent(agent_id)
-                        return "配置文件已加载。"
-                    else:
-                        return "不存在指定的agentID。"
+                                await load_config(self.plugins_with_name, splited_input[1], force=True)
+                    await store_manager.init_agent(agent_id)
+                    return "配置文件已加载。"
 
             elif user_input == "/wakeup" or user_input == "/wakeup help":
                 if user_input == "/wakeup help":
@@ -953,7 +1006,7 @@ __all__: 加载所有agent配置
 
 content: {get_result["documents"][i]}
 
-stable_duration_ticks: {get_result["metadatas"][i]["stable_duration_ticks"]}
+ttl: {get_result["metadatas"][i]["ttl"]}
 
 retrievability: {get_result["metadatas"][i]["retrievability"]}''' for i in range(len(get_result["ids"]))])
                     if not message:
@@ -987,7 +1040,7 @@ config: 仅重置配置（settings）
                                 memory_manager.delete_collection(agent_id, "episodic")
                                 memory_manager.delete_collection(agent_id, "reflective")
                                 await store_adelete_namespace(('agents', agent_id))
-                                await load_config(agent_id)
+                                await load_config(self.plugins_with_name, agent_id)
                                 await self.init_agent(agent_id)
                                 return "已重置该agent所有数据。"
                             else:

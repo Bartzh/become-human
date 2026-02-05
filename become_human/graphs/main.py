@@ -44,6 +44,8 @@ from become_human.tools import CORE_TOOLS
 from become_human.tools.send_message import SEND_MESSAGE_TOOL_CONTENT, SEND_MESSAGE, SEND_MESSAGE_CONTENT
 from become_human.tools.record_thoughts import RECORD_THOUGHTS
 from become_human.tools.retrieve_memories import RETRIEVE_MEMORIES
+from become_human.plugin import Plugin
+from become_human.config import get_agent_enabled_plugin_names
 
 
 
@@ -56,7 +58,9 @@ class StreamingTools:
 
 class MainGraph(BaseGraph):
 
+    llm: BaseChatModel
     llm_for_structured_output: BaseChatModel
+    plugin_tools: dict[str, list[AgentTool]]
     streaming_tools: StreamingTools
     agent_run_ids: dict[str, str] # 所有agent的当前运行id，这个字典实际是由agent_manager管理的，不代表图的状态
     agent_interrupt_datas: dict[str, InterruptData] # 所有agent被打断后留下的'chunk'与'called_tool_messages'
@@ -65,11 +69,15 @@ class MainGraph(BaseGraph):
     def __init__(
         self,
         llm: BaseChatModel,
-        tools: Optional[list[Union[Callable, BaseTool, AgentTool]]] = None,
+        plugins_with_name: Optional[dict[str, Plugin]] = None,
         llm_for_structured_output: Optional[BaseChatModel] = None
     ):
-        self.tools = CORE_TOOLS
-        super().__init__(llm=llm, tools=tools)
+        super().__init__()
+        self.llm = llm
+        plugins_with_name = plugins_with_name or {}
+        tools_plugins = [(name, plugin) for name, plugin in plugins_with_name.items() if hasattr(plugin, 'tools')]
+        self.plugin_tools = {name: [t if isinstance(t, AgentTool) else AgentTool(t) for t in plugin.tools] for name, plugin in tools_plugins}
+
         if llm_for_structured_output is None:
             self.llm_for_structured_output = self.llm
         self.streaming_tools = StreamingTools()
@@ -86,7 +94,8 @@ class MainGraph(BaseGraph):
         graph_builder.add_node("recycle_messages", self.recycle_messages)
         graph_builder.add_node("prepare_to_recycle", self.prepare_to_recycle)
 
-        tool_node = ToolNode(tools=[t.tool for t in self.tools], messages_key="tool_messages", handle_tool_errors=True)
+        agent_tools = [tool for tools in self.plugin_tools.values() for tool in tools]
+        tool_node = ToolNode(tools=[t.tool for t in CORE_TOOLS + agent_tools], messages_key="tool_messages", handle_tool_errors=True)
         graph_builder.add_node("tools", tool_node)
 
         graph_builder.add_node("tool_node_post_process", self.tool_node_post_process)
@@ -102,10 +111,10 @@ class MainGraph(BaseGraph):
     async def create(
         cls,
         llm: BaseChatModel,
-        tools: Optional[list[Union[Callable, BaseTool, AgentTool]]] = None,
+        plugins_with_name: Optional[dict[str, Plugin]] = None,
         llm_for_structured_output: Optional[BaseChatModel] = None
     ):
-        instance = cls(llm, tools, llm_for_structured_output)
+        instance = cls(llm, plugins_with_name, llm_for_structured_output)
         instance.conn = await aiosqlite.connect("./data/checkpoints_main.sqlite")
         instance.graph = instance.graph_builder.compile(checkpointer=AsyncSqliteSaver(instance.conn))
         return instance
@@ -415,7 +424,10 @@ class MainGraph(BaseGraph):
             break_state = {"messages": [break_message], "new_messages": [break_message]}
             return Command(update=break_state, goto="prepare_to_recycle")
 
-        tool_schemas = [t.get_agent_tool_schema(agent_id) for t in self.tools]
+        enabled_plugin_names = get_agent_enabled_plugin_names(agent_id)
+        enabled_plugin_tools = [tools for name, tools in self.plugin_tools.items() if name in enabled_plugin_names]
+        enabled_plugin_tools = [tool for tools in enabled_plugin_tools for tool in tools]
+        tool_schemas = [tool.get_agent_tool_schema(agent_id) for tool in CORE_TOOLS + enabled_plugin_tools]
         llm_with_tools = self.llm.bind_tools(tool_schemas, tool_choice=RECORD_THOUGHTS, parallel_tool_calls=True)
         unicode_prompt = '- 不要使用 Unicode 编码，所有工具均支持中文及其他语言直接输入，使用 Unicode 编码会导致输出速度下降。'
         thought_prompt = '- 也因此，在`content`也就是正常的输出内容中，你可以自由地进行推理（思维链），制定计划，评估工具调用结果等。又或者如果你有什么想记下来给未来的自己看的，也可以放在这里。但请记住，就如刚才所说，除你自己之外没人看得到这些内容。'
