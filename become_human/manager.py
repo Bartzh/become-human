@@ -133,7 +133,8 @@ class AgentManager:
             kwargs = {}
             if (
                 'deepseek-v3.2' in model or
-                'glm' in model
+                'glm' in model or
+                'kimi-k2.5' in model
             ):
                 kwargs['reasoning_keep_policy'] = 'current'
             elif 'mimo-v2-flash' in model:
