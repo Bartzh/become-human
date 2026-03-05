@@ -1,6 +1,7 @@
 from typing import Callable, Union
 from weakref import WeakMethod
 from inspect import iscoroutinefunction
+from loguru import logger
 from become_human.utils import filter_kwargs
 from become_human.names import PROJECT_NAME
 
@@ -115,10 +116,13 @@ class EventBus:
                 handler = callback
 
             filtered_kwargs = filter_kwargs(kwargs, handler)
-            if iscoroutinefunction(handler):
-                await handler(*args, **filtered_kwargs)
-            else:
-                handler(*args, **filtered_kwargs)
+            try:
+                if iscoroutinefunction(handler):
+                    await handler(*args, **filtered_kwargs)
+                else:
+                    handler(*args, **filtered_kwargs)
+            except Exception:
+                logger.exception(f'事件 {event_name} 处理函数 {handler.__name__} 执行时出错')
 
     def publish_sync(self, event_name: str, *args, **kwargs) -> None:
         """发布同步事件
@@ -143,7 +147,10 @@ class EventBus:
             else:
                 handler = callback
             filtered_kwargs = filter_kwargs(kwargs, handler)
-            handler(*args, **filtered_kwargs)
+            try:
+                handler(*args, **filtered_kwargs)
+            except Exception:
+                logger.exception(f'事件 {event_name} 处理函数 {handler.__name__} 执行时出错')
 
     def unsubscribe(self, event_name: str, callback: Callable) -> None:
         """取消订阅事件
