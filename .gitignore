@@ -16,6 +16,7 @@ node_modules
 .lingma
 .vscode
 *.code-workspace
+.idea
 
 deno.exe
 

@@ -1,17 +1,13 @@
 import os
 #from langchain_sandbox import PyodideSandboxTool
-from become_human.tool import AgentTool
+from become_human.tool import SpriteTool
 from become_human.tools.record_thoughts import record_thoughts
 from become_human.tools.send_message import send_message
-from become_human.tools.retrieve_memories import retrieve_memories
-from become_human.tools.add_self_call import add_self_call
 from become_human.tools.web_search import web_search
 
 CORE_TOOLS = [
     record_thoughts,
     send_message,
-    retrieve_memories,
-    #add_self_call,
 ]
 if (
     os.getenv('QIANFAN_API_KEY') or
@@ -29,4 +25,4 @@ if (
 # 注意：
 # - 沙盒没有连接网络。
 # - 沙盒是无状态的，变量不会被继承到下一次调用。'''))
-CORE_TOOLS = [AgentTool(tool) for tool in CORE_TOOLS]
+CORE_TOOLS = [SpriteTool(tool) for tool in CORE_TOOLS]

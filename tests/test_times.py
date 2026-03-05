@@ -2,7 +2,7 @@
 
 测试覆盖：
 - 时间转换函数
-- Agent时区模型
+- Sprite时区模型
 - 时间格式化函数
 - 时间差解析函数
 - Times工具类
@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 from become_human.times import (
     nowtz, utcnow, timedelta_to_microseconds, TimestampUs,
-    SerializableTimeZone, AgentTimeSettings,
+    SerializableTimeZone, SpriteTimeSettings,
     format_time, format_duration, parse_timedelta, Times
 )
 
@@ -49,10 +49,10 @@ class TestBasicTimeFunctions:
         td_zero = timedelta(0)
         assert timedelta_to_microseconds(td_zero) == 0
 
-class TestAgentTimeZone:
-    """AgentTimeZone类测试"""
+class TestSerializableTimeZone:
+    """SerializableTimeZone类测试"""
     
-    def test_agent_timezone_with_name_only(self):
+    def test_timezone_with_name_only(self):
         """测试仅使用名称创建时区"""
         tz = SerializableTimeZone(name="UTC")
         result = tz.tz()
@@ -64,44 +64,44 @@ class TestAgentTimeZone:
             # 如果是timezone，应该是UTC
             assert result == timezone.utc
     
-    def test_agent_timezone_with_offset(self):
+    def test_timezone_with_offset(self):
         """测试使用偏移量创建时区"""
         tz = SerializableTimeZone(name="UTC+8", offset=28800.0)  # 8小时
         result = tz.tz()
         assert isinstance(result, timezone)
     
-    def test_agent_timezone_invalid_offset(self):
+    def test_imezone_invalid_offset(self):
         """测试无效偏移量"""
         # 测试超出范围的偏移量
         with pytest.raises(ValidationError):
             SerializableTimeZone(name="Test", offset=100000.0)  # 超过86400
 
 
-class TestAgentTimeSettings:
-    """AgentTimeSettings类测试"""
+class TestSpriteTimeSettings:
+    """SpriteTimeSettings类测试"""
     
-    def test_agent_time_settings_defaults(self):
+    def test_time_settings_defaults(self):
         """测试默认设置创建"""
-        settings = AgentTimeSettings()
+        settings = SpriteTimeSettings()
         now_timestampus = TimestampUs.now()
-        assert settings.world_agent_anchor == 0
+        assert settings.world_sprite_anchor == 0
         assert settings.world_real_anchor == 0
         assert settings.world_scale == 1
-        assert settings.subjective_agent_anchor == 0
+        assert settings.subjective_sprite_anchor == 0
         assert abs(settings.subjective_real_anchor - now_timestampus) < 1_000_000
         assert settings.subjective_scale == 1
         assert isinstance(settings.time_zone, SerializableTimeZone)
     
-    def test_agent_time_settings_custom_values(self):
+    def test_time_settings_custom_values(self):
         """测试自定义值设置"""
         tz = SerializableTimeZone(name="UTC")
-        settings = AgentTimeSettings(
-            world_agent_anchor=TimestampUs(1000),
+        settings = SpriteTimeSettings(
+            world_sprite_anchor=TimestampUs(1000),
             world_real_anchor=2000,
             world_scale=2,
             time_zone=tz
         )
-        assert settings.world_agent_anchor == 1000
+        assert settings.world_sprite_anchor == 1000
         assert settings.world_real_anchor == 2000
         assert settings.world_scale == 2
 
@@ -111,36 +111,36 @@ class TestTimeConversionFunctions:
     
     def setup_method(self):
         """设置测试用的时区设置"""
-        self.settings_with_anchors = AgentTimeSettings(
-            world_agent_anchor=1000,
+        self.settings_with_anchors = SpriteTimeSettings(
+            world_sprite_anchor=1000,
             world_real_anchor=2000,
             world_scale=1,
             time_zone=SerializableTimeZone(name="UTC")
         )
-        self.settings_without_anchors = AgentTimeSettings(
+        self.settings_without_anchors = SpriteTimeSettings(
             time_zone=SerializableTimeZone(name="UTC")
         )
     
-    def test_real_time_to_agent_time_with_anchors(self):
-        """测试有锚点时的真实时间转agent时间"""
+    def test_real_time_to_sprite_time_with_anchors(self):
+        """测试有锚点时的真实时间转sprite时间"""
         real_dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        agent_dt = self.settings_with_anchors.to_world_datetime(real_dt)
-        assert isinstance(agent_dt, datetime)
-        assert agent_dt.tzinfo is not None
+        sprite_dt = self.settings_with_anchors.to_world_datetime(real_dt)
+        assert isinstance(sprite_dt, datetime)
+        assert sprite_dt.tzinfo is not None
     
-    def test_real_time_to_agent_time_without_anchors(self):
-        """测试无锚点时的真实时间转agent时间"""
+    def test_real_time_to_sprite_time_without_anchors(self):
+        """测试无锚点时的真实时间转sprite时间"""
         real_dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        agent_dt = self.settings_without_anchors.to_world_datetime(real_dt)
-        assert isinstance(agent_dt, datetime)
-        assert agent_dt.tzinfo is not None
+        sprite_dt = self.settings_without_anchors.to_world_datetime(real_dt)
+        assert isinstance(sprite_dt, datetime)
+        assert sprite_dt.tzinfo is not None
     
-    def test_real_time_to_agent_time_with_timestampus(self):
+    def test_real_time_to_sprite_time_with_timestampus(self):
         """测试使用TimestampUs输入的时间转换"""
         # 使用当前时间的秒数避免溢出
         current_timestampus = TimestampUs.now()
-        agent_dt = self.settings_with_anchors.to_world_datetime(current_timestampus)
-        assert isinstance(agent_dt, datetime)
+        sprite_dt = self.settings_with_anchors.to_world_datetime(current_timestampus)
+        assert isinstance(sprite_dt, datetime)
 
 
 class TestFormattingFunctions:
@@ -269,8 +269,8 @@ class TestTimesClass:
     
     def setup_method(self):
         """设置测试数据"""
-        self.settings = AgentTimeSettings(
-            world_agent_anchor=1000,
+        self.settings = SpriteTimeSettings(
+            world_sprite_anchor=1000,
             world_real_anchor=2000,
             world_scale=1,
             time_zone=SerializableTimeZone(name="UTC")
@@ -282,8 +282,8 @@ class TestTimesClass:
         times = Times.from_time_settings(settings=self.settings, real_time=real_time)
         
         assert times.real_world_datetime == real_time
-        assert times.agent_time_settings == self.settings
-        assert times.agent_world_datetime.tzinfo is not None
+        assert times.sprite_time_settings == self.settings
+        assert times.sprite_world_datetime.tzinfo is not None
     
     def test_times_init_real_time_seconds(self):
         """测试使用真实时间秒数初始化"""
@@ -317,29 +317,29 @@ class TestEdgeCasesAndBoundaryConditions:
     
     def test_time_scale_zero(self):
         """测试时间缩放为零"""
-        settings = AgentTimeSettings(
-            world_agent_anchor=1000,
+        settings = SpriteTimeSettings(
+            world_sprite_anchor=1000,
             world_real_anchor=2000,
             world_scale=0,
             time_zone=SerializableTimeZone(name="UTC")
         )
         
         real_dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        agent_dt = settings.to_world_datetime(real_dt)
+        sprite_dt = settings.to_world_datetime(real_dt)
         # 时间缩放为零时，所有时间都应该等于锚点时间
-        assert TimestampUs(agent_dt) == 1000
+        assert TimestampUs(sprite_dt) == 1000
     
     def test_negative_time_scale(self):
         """测试负时间缩放"""
-        settings = AgentTimeSettings(
-            world_agent_anchor=1000,
+        settings = SpriteTimeSettings(
+            world_sprite_anchor=1000,
             world_real_anchor=2000,
             world_scale=-1,
             time_zone=SerializableTimeZone(name="UTC")
         )
         
-        agent_dt = settings.to_world_datetime(TimestampUs(3000))
-        assert TimestampUs(agent_dt) == 0
+        sprite_dt = settings.to_world_datetime(TimestampUs(3000))
+        assert TimestampUs(sprite_dt) == 0
 
 
 class TestTimezoneHandling:
@@ -355,15 +355,15 @@ class TestTimezoneHandling:
         ]
         
         for tz_name in timezones:
-            settings = AgentTimeSettings(
+            settings = SpriteTimeSettings(
                 time_zone=SerializableTimeZone(name=tz_name)
             )
             
             real_dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-            agent_dt = settings.to_world_datetime(real_dt)
+            sprite_dt = settings.to_world_datetime(real_dt)
             
-            assert isinstance(agent_dt, datetime)
-            assert agent_dt.tzinfo is not None
+            assert isinstance(sprite_dt, datetime)
+            assert sprite_dt.tzinfo is not None
     
     def test_timezone_offset_conversion(self):
         """测试时区偏移量转换"""
@@ -390,10 +390,10 @@ class TestTimezoneHandling:
 
 # Pytest fixtures
 @pytest.fixture
-def sample_agent_settings():
-    """提供示例agent时间设置"""
-    return AgentTimeSettings(
-        world_agent_anchor=1000.0,
+def sample_sprite_settings():
+    """提供示例sprite时间设置"""
+    return SpriteTimeSettings(
+        world_sprite_anchor=1000.0,
         world_real_anchor=2000.0,
         world_scale=1.0,
         time_zone=SerializableTimeZone(name="UTC")
@@ -407,11 +407,11 @@ def sample_datetime():
 
 class TestWithFixtures:
     """使用fixture的测试"""
-    
-    def test_sample_fixture_usage(self, sample_agent_settings, sample_datetime):
+
+    def test_sample_fixture_usage(self, sample_sprite_settings, sample_datetime):
         """测试fixture使用"""
-        agent_time = sample_agent_settings.to_world_datetime(sample_datetime)
-        assert isinstance(agent_time, datetime)
+        sprite_time = sample_sprite_settings.to_world_datetime(sample_datetime)
+        assert isinstance(sprite_time, datetime)
 
 
 if __name__ == "__main__":

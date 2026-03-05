@@ -7,14 +7,14 @@ from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 if TYPE_CHECKING:
-    from become_human.manager import agent_manager
+    from become_human.manager import sprite_manager
 
-__all__ = ['agent_manager']
+__all__ = ['sprite_manager']
 
 def __getattr__(name):
-    if name == 'agent_manager':
-        from become_human.manager import agent_manager
-        return agent_manager
+    if name == 'sprite_manager':
+        from become_human.manager import sprite_manager
+        return sprite_manager
     raise AttributeError(f"module {__name__} has no attribute {name}")
 
 load_dotenv()

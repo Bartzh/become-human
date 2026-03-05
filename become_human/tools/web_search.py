@@ -13,7 +13,7 @@ dashscope_search_model = os.getenv('DASHSCOPE_SEARCH_MODEL_NAME')
 # 这个工具名似乎与openai/anthropic等厂商的内置工具名冲突？如果将此工具设置为tool_choice可能会有影响
 @tool
 async def web_search(query: Annotated[str, '使用自然语言的搜索语句']) -> str:
-    """使用网络获取信息。这适用于获取未知的信息，或是为了确认信息真实可靠，尤其适合获取那些具有强时效性的信息。"""
+    """使用网络获取信息。适合用于获取未知的信息，或只是为了确认信息真实可靠。尤其适合获取那些具有强时效性的信息。"""
     # 尝试使用百度搜索
     if baidu_api_key:
         url = 'https://qianfan.baidubce.com/v2/ai_search/chat/completions'

@@ -4,7 +4,7 @@ import inspect
 import importlib
 import aiosqlite
 from pydantic import BaseModel, Field, field_validator, computed_field, model_validator, ValidationInfo
-from typing import Any, Union, Optional, Self, Literal, Callable
+from typing import Any, Union, Optional, Self, Literal, Callable, Sequence
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import random
@@ -13,21 +13,24 @@ from tzlocal import get_localzone
 
 from become_human.times import TimestampUs, Times, nowtz, SerializableTimeZone, format_time, seconds_to_datetime
 from become_human.store.manager import store_manager
+from become_human.config import get_sprite_enabled_plugin_names
 
 
 DATABASE_PATH = "./data/schedules.sqlite"
-SCHEDULE_KEYS = ['agent_id','schedule_id', 'schedule_type', 'job_module', 'job_func', 'job_args', 'job_kwargs',
+SCHEDULE_KEYS = ['sprite_id','schedule_id', 'schedule_provider', 'schedule_type', 'job_module', 'job_func', 'job_args', 'job_kwargs',
                 'interval_fixed', 'interval_random_min', 'interval_random_max',
                 'scheduled_time_of_day', 'scheduled_every_day', 'scheduled_weekdays',
                 'scheduled_monthdays', 'scheduled_every_month', 'scheduled_months',
                 'timeout_seconds', 'max_triggers', 'time_reference',
-                'time_zone_name', 'time_zone_offset', 'trigger_time', 'trigger_count', 'repeating']
-AnyScheduleKey = Literal['agent_id','schedule_id', 'schedule_type', 'job_module', 'job_func', 'job_args', 'job_kwargs',
+                'time_zone_name', 'time_zone_offset', 'trigger_time', 'trigger_count', 'repeating',
+                'creation_timestampus', 'last_triggered_timestampus']
+AnyScheduleKey = Literal['sprite_id','schedule_id', 'schedule_provider', 'schedule_type', 'job_module', 'job_func', 'job_args', 'job_kwargs',
                 'interval_fixed', 'interval_random_min', 'interval_random_max',
                 'scheduled_time_of_day', 'scheduled_every_day', 'scheduled_weekdays',
                 'scheduled_monthdays', 'scheduled_every_month', 'scheduled_months',
                 'timeout_seconds', 'max_triggers', 'time_reference',
-                'time_zone_name', 'time_zone_offset', 'trigger_time', 'trigger_count', 'repeating']
+                'time_zone_name', 'time_zone_offset', 'trigger_time', 'trigger_count', 'repeating',
+                'creation_timestampus', 'last_triggered_timestampus']
 
 class Schedule(BaseModel):
     """定时计划
@@ -41,11 +44,12 @@ class Schedule(BaseModel):
     如需设置scheduled系列参数，需至少设置time_of_day参数以及其他任意一个scheduled系列参数
 
     可以不设置every_month和months，表示只在当月触发"""
-    agent_id: str = Field(description="关联的agent_id")
+    sprite_id: str = Field(default="", description="关联的sprite_id，可以为空")
     schedule_id: str = Field(default_factory=lambda: str(uuid4()), description="唯一id")
+    schedule_provider: str = Field(default="", description="计划提供方，方便区分与查询以及禁用")
     schedule_type: str = Field(default="", description="计划类型，方便查询")
     job: Callable = Field(description="计划要执行的任务，不可使用实例方法（不会验证这一点）")
-    job_args: list[Any] = Field(default_factory=list, description="任务位置参数，需可被json序列化")
+    job_args: tuple = Field(default=(), description="任务位置参数，需可被json序列化")
     job_kwargs: dict[str, Any] = Field(default_factory=dict, description="任务关键字参数，需可被json序列化")
     interval_fixed: float = Field(default=0.0, description="固定间隔时间，0为无固定间隔。若设置了fixed则会无视random")
     interval_random_min: float = Field(default=0.0, description="随机时间最小值，0为无随机时间")
@@ -58,13 +62,15 @@ class Schedule(BaseModel):
     scheduled_months: set[int] = Field(default_factory=set, description="指定每年几月触发，1-12分别表示1-12月")
     timeout_seconds: float = Field(default=0.0, description="超时时间，指如果当前时间超过指定时间太久则算作超时，取消job执行。单位为秒，0则为无限制。过短可能会被系统漏掉，小于一小时可能会有夏令时切换的问题")
     max_triggers: int = Field(default=0, ge=0, description="计划最大触发次数（包括因超时未成功执行job），0表示无限制")
-    time_reference: Literal['real_world', 'agent_world', 'agent_subjective'] = Field(default='real_world', description="基于何种时间计算scheduled系列参数。当为agent_subjective时，不能设置任何scheduled系列参数，只能使用interval系列参数来重复触发")
+    time_reference: Literal['real_world', 'sprite_world', 'sprite_subjective'] = Field(default='real_world', description="基于何种时间计算scheduled系列参数。当为sprite_subjective时，不能设置任何scheduled系列参数，只能使用interval系列参数来重复触发")
     time_zone: Optional[SerializableTimeZone] = Field(default=None, description="计算scheduled系列参数时使用的时区，若没有则使用tick输入的datetime的时区或是自动获取当前时区")
-    trigger_time: Union[TimestampUs, int] = Field(default=-1, description="下次触发时间的微秒数。如果设置为负数int则跳过这次触发（不消耗trigger次数，不会使一次性计划直接失效）。如果time_reference为agent_subjective，这个值则为int而非TimestampUs")
+    trigger_time: Union[TimestampUs, int] = Field(default=-1, description="下次触发时间的微秒数。如果设置为负数int则跳过这次触发（不消耗trigger次数，不会使一次性计划直接失效）。如果time_reference为sprite_subjective，这个值则为int而非TimestampUs")
     trigger_count: int = Field(default=0, description="已触发次数（包括超时时）")
     added: bool = Field(default=False, description="计划是否已被添加")
     deleted: bool = Field(default=False, description="计划是否已被移除。不保证可靠，因为有可能从其他地方被移除")
-    repeating: bool = Field(default=False, description="当前是否已处于计划重复阶段，根据下次触发时间是否被计算过来判断。主要用于当agent时间发生变化时（准确来说是倒退时），是否需要根据可能存在的scheduled系列参数重新计算下次触发时间")
+    repeating: bool = Field(default=False, description="当前是否已处于计划重复阶段，根据下次触发时间是否被计算过来判断。主要用于当sprite时间发生变化时（准确来说是倒退时），是否需要根据可能存在的scheduled系列参数重新计算下次触发时间")
+    creation_timestampus: TimestampUs = Field(default_factory=TimestampUs.now, description="计划创建时间的微秒数，这是一个现实时间")
+    last_triggered_timestampus: Optional[TimestampUs] = Field(default=None, description="上次触发时间的微秒数，这是一个现实时间")
 
     @field_validator("job", mode="after")
     @classmethod
@@ -77,7 +83,7 @@ class Schedule(BaseModel):
 
     @field_validator("job_args", mode="after")
     @classmethod
-    def validate_job_args(cls, v: list[Any]) -> list[Any]:
+    def validate_job_args(cls, v: tuple) -> tuple:
         try:
             json.dumps(v)
         except TypeError:
@@ -105,15 +111,15 @@ class Schedule(BaseModel):
                     v = int(v)
                 except (TypeError, ValueError):
                     raise ValueError("当trigger_time为负数时，必须可转换为int")
-        elif info.data['time_reference'] == 'agent_subjective':
+        elif info.data['time_reference'] == 'sprite_subjective':
             if is_strict:
                 if type(v) is not int:
-                    raise ValueError("当time_reference为agent_subjective时，trigger_time在strict模式下必须为int")
+                    raise ValueError("当time_reference为sprite_subjective时，trigger_time在strict模式下必须为int")
             else:
                 try:
                     v = int(v)
                 except (TypeError, ValueError):
-                    raise ValueError("当time_reference为agent_subjective时，trigger_time必须可转换为int")
+                    raise ValueError("当time_reference为sprite_subjective时，trigger_time必须可转换为int")
         else:
             if is_strict:
                 if not isinstance(v, TimestampUs):
@@ -124,16 +130,16 @@ class Schedule(BaseModel):
 
     @model_validator(mode="after")
     def validate_schedule_parameters(self) -> Self:
-        # if (
-        #     self.interval_fixed or
-        #     (
-        #         self.interval_random_min and
-        #         self.interval_random_max
-        #     )
-        # ):
-        #     has_interval = True
-        # else:
-        #     has_interval = False
+        if (
+            self.interval_fixed or
+            (
+                self.interval_random_min and
+                self.interval_random_max
+            )
+        ):
+            has_interval = True
+        else:
+            has_interval = False
         if (
             self.scheduled_every_day or
             self.scheduled_weekdays or
@@ -148,8 +154,12 @@ class Schedule(BaseModel):
             raise ValueError("当scheduled_time_of_day被指定时，至少还需设置其他任何一个scheduled系列参数")
         else:
             has_scheduled = False
-        if self.time_reference == 'agent_subjective' and has_scheduled:
-            raise ValueError("当time_reference为agent_subjective时，不能设置任何scheduled系列参数，因为agent_subjective_duration是时长，而不是具体时间，只能使用interval系列参数来重复触发")
+        if self.time_reference == 'sprite_subjective' and has_scheduled:
+            raise ValueError("当time_reference为sprite_subjective时，不能设置任何scheduled系列参数，因为sprite_subjective_duration是时长，而不是具体时间，只能使用interval系列参数来重复触发")
+        if self.trigger_time < 0 and not has_interval and not has_scheduled:
+            raise ValueError("当trigger_time为负数时，必须设置interval系列参数或scheduled系列参数")
+        if self.time_reference != 'real_world' and not self.sprite_id:
+            raise ValueError("当time_reference不为real_world时，必须指定sprite_id")
         return self
 
     @computed_field
@@ -169,7 +179,7 @@ class Schedule(BaseModel):
         会同步更新实例属性
 
         Args:
-            current_time: 当前时间。如果输入的是Times实例，则会自动使用合适的时间类型计算，否则需调用者自行确认时间类型，若输入的datetime没有时区信息，则使用当前时区。int类型仅用于agent_subjective时间参考，其他时间参考请使用Times或TimestampUs。
+            current_time: 当前时间。如果输入的是Times实例，则会自动使用合适的时间类型计算，否则需调用者自行确认时间类型，若输入的datetime没有时区信息，则使用当前时区。int类型仅用于sprite_subjective时间参考，其他时间参考请使用Times或TimestampUs。
 
         Returns:
             输出一个tuple，按顺序包含以下内容：
@@ -194,15 +204,15 @@ class Schedule(BaseModel):
         if isinstance(current_time, Times):
             if self.time_reference == 'real_world':
                 current_timestampus = current_time.real_world_timestampus
-            elif self.time_reference == 'agent_world':
-                current_timestampus = current_time.agent_world_timestampus
-            elif self.time_reference == 'agent_subjective':
-                current_timestampus = current_time.agent_subjective_tick
+            elif self.time_reference == 'sprite_world':
+                current_timestampus = current_time.sprite_world_timestampus
+            elif self.time_reference == 'sprite_subjective':
+                current_timestampus = current_time.sprite_subjective_tick
             else:
                 raise ValueError(f"Invalid time_reference: {self.time_reference}")
         elif type(current_time) is int:
-            if self.time_reference != 'agent_subjective':
-                raise ValueError("int类型只能用于agent_subjective时间参考！")
+            if self.time_reference != 'sprite_subjective':
+                raise ValueError("int类型只能用于sprite_subjective时间参考！")
             else:
                 current_timestampus = current_time
         else:
@@ -249,6 +259,7 @@ class Schedule(BaseModel):
                 self.deleted = True
                 return True, None, not_timeout
 
+        self.last_triggered_timestampus = TimestampUs.now()
         return True, new_values, not_timeout
 
     async def process(self, current_time: Union[Times, datetime, TimestampUs, int]) -> tuple[bool, Optional[dict[str, Any]], bool]:
@@ -265,7 +276,7 @@ class Schedule(BaseModel):
             else:
                 logger.warning(f"schedule {self.schedule_id} 的tick疑似返回了空字典：{new_values}，将跳过此schedule")
         if should_execute:
-            await self.call_job()
+            await self.do_job()
         return should_update, new_values, should_execute
 
     async def add_to_db(self) -> None:
@@ -293,8 +304,11 @@ class Schedule(BaseModel):
         self.deleted = True
         await delete_schedules([self.schedule_id])
 
-    async def call_job(self) -> Any:
-        """调用计划任务。纯粹的调用，不进行任何检查，对自身实例没有副作用"""
+    async def do_job(self) -> Any:
+        """调用计划任务。纯粹的调用，只会对有sprite_id的计划任务进行插件是否禁用的检查，对自身实例没有副作用"""
+        if self.sprite_id and self.schedule_provider not in get_sprite_enabled_plugin_names(self.sprite_id):
+            logger.warning(f"sprite {self.sprite_id} 已将插件 {self.schedule_provider} 禁用，无法调用计划任务 {self.schedule_id}")
+            return
         sig = inspect.signature(self.job)
         params = list(sig.parameters.values())
         needs_schedule = len(params) > 0 and isinstance(params[0].annotation, type) and issubclass(params[0].annotation, Schedule)
@@ -337,8 +351,13 @@ class Schedule(BaseModel):
         kwargs['scheduled_weekdays'] = set(json.loads(kwargs['scheduled_weekdays']))
         kwargs['scheduled_monthdays'] = set(json.loads(kwargs['scheduled_monthdays']))
         kwargs['scheduled_months'] = set(json.loads(kwargs['scheduled_months']))
-        module = importlib.import_module(kwargs.pop('job_module'))
-        kwargs['job'] = getattr(module, kwargs.pop('job_func'))
+        job_module = kwargs.pop('job_module')
+        job_func = kwargs.pop('job_func')
+        try:
+            module = importlib.import_module(job_module)
+            kwargs['job'] = getattr(module, job_func)
+        except (ModuleNotFoundError, AttributeError) as e:
+            logger.error(f"Failed to import job module or function: {e}, it will be skipped.")
         time_zone_name = kwargs.pop('time_zone_name')
         time_zone_offset = kwargs.pop('time_zone_offset')
         if time_zone_name:
@@ -360,8 +379,8 @@ class Schedule(BaseModel):
 
         对于current_time的输入类型：
         - Times适用于所有情况
-        - TimestampUs适用于real_world和agent_subjective，对于real_world来说，TimestampUs会转换为datetime，时区UTC
-        - int只适用于agent_subjective
+        - TimestampUs适用于real_world和sprite_subjective，对于real_world来说，TimestampUs会转换为datetime，时区UTC
+        - int只适用于sprite_subjective
 
         ### Raises:
             Schedule.SameTimeError: 当计算结果与当前触发时间相同（没有变化）时抛出
@@ -369,33 +388,33 @@ class Schedule(BaseModel):
         if isinstance(current_time, TimestampUs):
             if self.time_reference == 'real_world':
                 current_datetime = current_time.to_datetime()
-            elif self.time_reference == 'agent_subjective':
+            elif self.time_reference == 'sprite_subjective':
                 next_trigger_time = int(current_time)
-            elif self.time_reference == 'agent_world':
-                raise ValueError("当输入为TimestampUs时，不能计算agent_world的下次触发时间！")
+            elif self.time_reference == 'sprite_world':
+                raise ValueError("当输入为TimestampUs时，不能计算sprite_world的下次触发时间！")
             else:
                 raise ValueError(f"Invalid time_reference: {self.time_reference}")
         # 如果输入是Times实例，则自动使用合适时间类型计算
         elif isinstance(current_time, Times):
             if self.time_reference == 'real_world':
                 current_datetime = current_time.real_world_datetime
-            elif self.time_reference == 'agent_world':
-                current_datetime = current_time.agent_world_datetime
-            elif self.time_reference == 'agent_subjective':
-                next_trigger_time = current_time.agent_subjective_tick
+            elif self.time_reference == 'sprite_world':
+                current_datetime = current_time.sprite_world_datetime
+            elif self.time_reference == 'sprite_subjective':
+                next_trigger_time = current_time.sprite_subjective_tick
             else:
                 raise ValueError(f"Invalid time_reference: {self.time_reference}")
         elif isinstance(current_time, datetime):
-            if self.time_reference == 'agent_subjective':
-                raise ValueError("agent_subjective只能用Times或TimestampUs来计算下次触发时间！当前输入为datetime")
+            if self.time_reference == 'sprite_subjective':
+                raise ValueError("sprite_subjective只能用Times或TimestampUs来计算下次触发时间！当前输入为datetime")
             current_datetime = current_time
             #current_timeseconds = datetime_to_seconds(current_datetime)
         else:
-            if self.time_reference != 'agent_subjective':
-                raise ValueError("当前输入为int时，只接受agent_subjective的时间参考！")
+            if self.time_reference != 'sprite_subjective':
+                raise ValueError("当前输入为int时，只接受sprite_subjective的时间参考！")
             next_trigger_time = current_time
 
-        if self.time_reference != 'agent_subjective':
+        if self.time_reference != 'sprite_subjective':
 
             # 确保current_time有时区信息
             if current_datetime.tzinfo is None:
@@ -504,7 +523,9 @@ class Schedule(BaseModel):
         include_id: bool = True,
         include_type: bool = True
     ) -> str:
-        if self.time_reference == 'agent_subjective':
+        if self.trigger_time < 0:
+            formated_next_trigger_datetime = "还未计算下次触发时间"
+        elif self.time_reference == 'sprite_subjective':
             formated_next_trigger_datetime = str(int(self.trigger_time))
         else:
             next_trigger_datetime = self.trigger_time.to_datetime()
@@ -548,29 +569,29 @@ class Schedule(BaseModel):
             if self.scheduled_time_of_day is not None:
                 formated_scheduled += "，再加上"
                 if self.interval_fixed:
-                    if self.time_reference != 'agent_subjective':
+                    if self.time_reference != 'sprite_subjective':
                         formated_scheduled += f"{self.interval_fixed}秒的间隔"
                     else:
                         formated_scheduled += f"{int(self.interval_fixed * 1_000_000)}个单位的间隔"
                 else:
-                    if self.time_reference != 'agent_subjective':
+                    if self.time_reference != 'sprite_subjective':
                         formated_scheduled += f"{self.interval_random_min}秒到{self.interval_random_max}秒的随机间隔"
                     else:
                         formated_scheduled += f"{int(self.interval_random_min * 1_000_000)}个单位到{int(self.interval_random_max * 1_000_000)}个单位的随机间隔"
             else:
                 if self.interval_fixed:
-                    if self.time_reference != 'agent_subjective':
+                    if self.time_reference != 'sprite_subjective':
                         formated_scheduled = f"每间隔{self.interval_fixed}秒"
                     else:
                         formated_scheduled = f"每间隔{int(self.interval_fixed * 1_000_000)}个单位"
                 else:
-                    if self.time_reference != 'agent_subjective':
+                    if self.time_reference != 'sprite_subjective':
                         formated_scheduled = f"每随机间隔{self.interval_random_min}秒到{self.interval_random_max}秒"
                     else:
                         formated_scheduled = f"每随机间隔{int(self.interval_random_min * 1_000_000)}个单位到{int(self.interval_random_max * 1_000_000)}个单位"
 
-        return f'''{f'{prefix}ID：{self.schedule_id}\n' if include_id else ''}{f'{prefix}类型：{self.schedule_type}\n' if include_type else ''}
-{prefix}下次运行时间：{formated_next_trigger_datetime}
+        return f'''{f'{prefix}ID：{self.schedule_id}\n' if include_id else ''}{f'{prefix}类型：{self.schedule_provider}:{self.schedule_type}\n' if include_type else ''}
+{prefix}下次触发时间：{formated_next_trigger_datetime}
 {prefix}重复时间：{formated_scheduled or '该计划不可重复'}
 {prefix}最大触发次数：{self.max_triggers if self.max_triggers > 0 else '无限次'}
 {prefix}已触发次数：{self.trigger_count}'''
@@ -578,7 +599,7 @@ class Schedule(BaseModel):
     class Condition(BaseModel):
         """用于get_schedules的查询条件"""
         key: AnyScheduleKey
-        op: Literal['=', '!=', '<', '<=', '>', '>='] = Field(default='=')
+        op: Literal['=', '!=', '<', '<=', '>', '>=', 'IN', 'NOT IN', 'IS', 'IS NOT', 'LIKE', 'NOT LIKE'] = Field(default='=')
         value: Any
 
 
@@ -587,8 +608,9 @@ async def init_schedules_db():
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS schedules (
-                agent_id TEXT NOT NULL,
+                sprite_id TEXT,
                 schedule_id TEXT PRIMARY KEY,
+                schedule_provider TEXT NOT NULL DEFAULT '',
                 schedule_type TEXT NOT NULL DEFAULT '',
                 job_module TEXT NOT NULL,
                 job_func TEXT NOT NULL,
@@ -605,22 +627,24 @@ async def init_schedules_db():
                 scheduled_months TEXT NOT NULL DEFAULT '[]',
                 timeout_seconds REAL NOT NULL DEFAULT 0.0,
                 max_triggers INTEGER NOT NULL DEFAULT 0,
-                time_reference TEXT NOT NULL DEFAULT 'real_world' CHECK(time_reference IN ('real_world', 'agent_world', 'agent_subjective')),
+                time_reference TEXT NOT NULL DEFAULT 'real_world' CHECK(time_reference IN ('real_world', 'sprite_world', 'sprite_subjective')),
                 time_zone_name TEXT NOT NULL DEFAULT '',
                 time_zone_offset REAL,
                 trigger_time INTEGER NOT NULL DEFAULT -1,
                 trigger_count INTEGER NOT NULL DEFAULT 0,
-                repeating BOOLEAN NOT NULL DEFAULT 0
+                repeating BOOLEAN NOT NULL DEFAULT 0,
+                creation_timestampus INTEGER NOT NULL DEFAULT 0,
+                last_triggered_timestampus INTEGER
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trigger_time ON schedules (trigger_time) WHERE time_reference = 'real_world'")
-        #await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_id ON schedules (agent_id)")
+        #await db.execute("CREATE INDEX IF NOT EXISTS idx_sprite_id ON schedules (sprite_id)")
         #await db.execute("CREATE INDEX IF NOT EXISTS idx_schedule_type ON schedules (schedule_type)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_and_type ON schedules (agent_id, schedule_type)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_sprite_provider_type ON schedules (sprite_id, schedule_provider, schedule_type)")
         await db.commit()
 
 async def get_schedules(
-    where: Optional[list[Schedule.Condition]] = None,
+    where: Optional[Sequence[Schedule.Condition]] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
     order_by: Optional[AnyScheduleKey] = None,
@@ -648,8 +672,20 @@ async def get_schedules(
     else:
         where_clause = ""
 
-    limit_clause = f" LIMIT {limit}" if limit is not None else ""
-    offset_clause = f" OFFSET {offset}" if offset is not None else ""
+    if limit is not None:
+        if isinstance(limit, int) and limit > 0:
+            limit_clause = f" LIMIT {limit}"
+        else:
+            raise ValueError(f"limit {limit} 必须是大于0的整数")
+    else:
+        limit_clause = ""
+    if offset is not None:
+        if isinstance(offset, int) and offset >= 0:
+            offset_clause = f" OFFSET {offset}"
+        else:
+            raise ValueError(f"offset {offset} 必须是大于等于0的整数")
+    else:
+        offset_clause = ""
 
     if order_by:
         if order_by not in SCHEDULE_KEYS:
@@ -771,14 +807,18 @@ async def tick_schedules(real_world_time: Optional[Union[datetime, TimestampUs]]
         for schedule in real_world_schedules:
             tick_schedule(schedule, current_datetime)
 
-        agent_schedules = await get_schedules(where=[
+        sprite_schedules = await get_schedules(where=[
             Schedule.Condition(key='time_reference', op='!=', value='real_world'),
         ])
-        for schedule in agent_schedules:
-            if schedule.agent_id not in current_times_caches:
-                time_settings = (await store_manager.get_settings(schedule.agent_id)).main.time_settings
-                current_times_caches[schedule.agent_id] = Times.from_time_settings(time_settings, current_datetime)
-            tick_schedule(schedule, current_times_caches[schedule.agent_id])
+        for schedule in sprite_schedules:
+            if not schedule.sprite_id:
+                logger.error(f"schedule {schedule.schedule_id} 在time_reference为{schedule.time_reference}的情况下意外的没有指定sprite_id，将移除")
+                schedule_ids_to_delete.append(schedule.schedule_id)
+                continue
+            if schedule.sprite_id not in current_times_caches:
+                time_settings = store_manager.get_settings(schedule.sprite_id).time_settings
+                current_times_caches[schedule.sprite_id] = Times.from_time_settings(time_settings, current_datetime)
+            tick_schedule(schedule, current_times_caches[schedule.sprite_id])
 
         logger.debug(f"有{len(schedules_to_execute)}个schedule需要执行")
         logger.debug(f"有{len(schedules_to_update)}个schedule需要更新")
@@ -789,7 +829,7 @@ async def tick_schedules(real_world_time: Optional[Union[datetime, TimestampUs]]
 
         schedules_to_execute.sort(key=lambda x: x.trigger_time)
         for schedule in schedules_to_execute:
-            await schedule.call_job()
+            await schedule.do_job()
             logger.debug(f"schedule {schedule.schedule_id} 执行完成")
 
         logger.debug("所有schedule tick完成")

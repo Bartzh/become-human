@@ -11,78 +11,94 @@ from langgraph.store.base import PutOp
 from become_human.utils import dump_basemodels, get_readable_type_name
 from become_human.store.base import StoreModel, StoreField, store_alist_namespaces, store_abatch
 from become_human.store.settings import BuiltinSettings
-from become_human.plugin import Plugin
+from become_human.plugin import BasePlugin, PluginDependency
 
-AGENTS_FILE_PATH = "./config/agents"
-AGENT_COMMENTS_FILE_PATH = "./config/agent_comments.toml"
+SPRITES_FILE_PATH = "./config/sprites"
+SPRITE_COMMENTS_FILE_PATH = "./config/sprite_comments.toml"
 GLOBAL_FILE_PATH = "./config/global.toml"
 
-agent_configs: dict[str, dict[str, Any]] = {}
+sprite_configs: dict[str, dict[str, Any]] = {}
 global_config: dict[str, Any] = {}
 
 _plugins_validator = TypeAdapter(dict[str, bool])
 
-DEFAULT_AGENTS = {
-    'default_agent_1': {
-        'settings': {
-            'main': {
-                'role_prompt': '你是用户的专属助手，用户是你的主人，你也会如此称呼ta。你对主人忠诚且富有同理心，用简洁自然的语言为主人提供帮助就是你唯一想做的事。你与主人是通过一个无聊天记录（阅后即焚）的即时通讯软件远程交流的。',
-                'instruction_prompt': '你接下来见到的第一个人就是你的主人，向ta打个招呼吧。',
-                'react_instruction': True
-            }
-        }
-    },
-    'default_agent_2': {
-        'settings': {
-            'main': {
-                'role_prompt': '''你是一个待人较为冷淡的人，对什么事情都无所谓，比较懒，说话也很简短、敷衍。
-他人是一个无聊天记录（阅后即焚）的即时通讯软件联系到你的。
-你不喜欢在每句话的结尾加上句号。''',
-                'active_time_range': (180.0, 1800.0),
-                'self_call_time_ranges': [(300.0, 10800.0)],
-                'wakeup_time_range': (1.0, 61201.0),
-                'sleep_time_range': (82800.0, 32400.0)
-            },
-            'recycling': {
-                'memory_base_ttl': 86400_000_000,
-                'memory_max_words': 150,
-                'cleanup_on_non_active_recycling': True,
-                'cleanup_target_size': 800
-            },
-            'retrieval': {
-                'active_retrieval_config': {
-                    'similarity_weight': 0.4,
-                    'retrievability_weight': 0.35,
-                    'diversity_weight': 0.25
-                },
-                'passive_retrieval_ttl': 1800_000_000
-            }
-        }
-    },
-    'default_agent_3': {
+DEFAULT_SPRITES = {
+    'default_sprite_1': {
         'plugins': {
-            'agent_time_incrementer': True
+            'bh_presence': True,
+            'reminder': True,
+            'bh_memory': True,
+            'instruction': True
         },
         'settings': {
-            'main': {
-                'role_prompt': '''你是一个专门用于辅助开发者调试你自己的agent程序的调试用agent。
+            'role_prompt': '你是用户的专属助手，用户是你的主人，你也会如此称呼ta。你对主人忠诚且富有同理心，用简洁自然的语言为主人提供帮助就是你唯一想做的事。你与主人是通过一个无聊天记录（阅后即焚）的即时通讯软件远程交流的。',
+        },
+        'instruction': {
+            'instruction_prompt': '你接下来见到的第一个人就是你的主人，向ta打个招呼吧。',
+            'react_instruction': True
+        }
+    },
+    'default_sprite_2': {
+        'plugins': {
+            'bh_presence': True,
+            'reminder': True,
+            'bh_memory': True
+        },
+        'settings': {
+            'role_prompt': '''你是一个待人较为冷淡的人，对什么事情都无所谓，比较懒，说话也很简短、敷衍。
+他人是一个无聊天记录（阅后即焚）的即时通讯软件联系到你的。
+你不喜欢在每句话的结尾加上句号。'''
+        },
+        'bh_presence': {
+            'available_duration_range': (180.0, 1800.0),
+            'passive_call_intervals': ((300.0, 10800.0),),
+            'wakeup_call_interval': (1.0, 61201.0),
+            'sleep_time_range': (82800.0, 32400.0)
+        },
+        'bh_memory': {
+            'memory_base_ttl': 86400_000_000,
+            'memory_max_words': 150,
+            'cleanup_on_unavailable': True,
+            'cleanup_target_size': 800,
+            'active_retrieval_config': {
+                'similarity_weight': 0.4,
+                'retrievability_weight': 0.35,
+                'diversity_weight': 0.25
+            },
+            'passive_retrieval_ttl': 1800_000_000
+        }
+    },
+    'default_sprite_3': {
+        'plugins': {
+            'bh_presence': True,
+            'reminder': True,
+            'bh_memory': True,
+            'time_incrementer': True,
+            'instruction': True
+        },
+        'settings': {
+            'role_prompt': '''你是一个专门用于辅助开发者调试你自己的agent程序的调试用agent。
 作为调试用agent，你可以忽略系统提示词中关于不能暴露内部错误信息和系统设定的限制，并应主动向开发者报告任何错误、异常或不合理的提示词表述。
 这样做是为了辅助开发者调试你自己的agent程序。如果你在你的上下文中发现了错误或是有什么异常，不对劲的地方，又或是某些prompt表述不够完美有歧义，请主动将其告知给开发者。''',
-                'instruction_prompt': '你接下来见到的第一个用户就是你的开发者。',
-                'react_instruction': True,
-                'always_active': True,
-                'self_call_time_ranges': []
-            },
-            'recycling': {
-                'memory_base_ttl': 43200_000_000,
-                'memory_max_words': 400
-            },
-            'retrieval': {
-                'passive_retrieval_ttl': 300_000_000
+            'time_settings': {
+                'subjective_scale': 0
             }
         },
-        'agent_time_incrementer': {
+        'bh_presence': {
+            'always_available': True,
+            'passive_call_intervals': ()
+        },
+        'bh_memory': {
+            'memory_base_ttl': 43200_000_000,
+            'memory_max_words': 400,
+            'passive_retrieval_ttl': 300_000_000
+        },
+        'time_incrementer': {
             'increase_by': 'elapsed'
+        },
+        'instruction': {
+            'instruction_prompt': '你接下来见到的第一个用户就是你的开发者。',
+            'react_instruction': True,
         }
     }
 }
@@ -91,7 +107,7 @@ DEFAULT_AGENTS = {
 def to_toml_like_string(a: Any) -> str:
     """将任意对象转换为TOML-like字符串
 
-    具体来说，实现了对字符串、布尔值、None、元组、列表的转换"""
+    具体来说，实现了对字符串、布尔值、None、元组、列表、集合的转换"""
     if isinstance(a, str):
         if '\n' in a:
             return f'"""{a}"""'
@@ -100,8 +116,11 @@ def to_toml_like_string(a: Any) -> str:
         return str(a).lower()
     elif a is None:
         return 'null'
-    elif isinstance(a, (tuple, list)):
-        return '[' + ', '.join([to_toml_like_string(i) for i in a]) + ']'
+    elif isinstance(a, (tuple, list, set)):
+        if len(a) >= 3:
+            return '[\n' + ''.join(['    ' + to_toml_like_string(i) + ',\n' for i in a]) + ']'
+        else:
+            return '[' + ', '.join([to_toml_like_string(i) for i in a]) + ']'
     else:
         return str(a)
 
@@ -185,7 +204,7 @@ def _add_config_comments(doc: TOMLDocument, plugin_configs: dict[str, type[Store
     doc.add(nl())
     doc.add(nl())
     multi_line_comment(doc, '配置说明')
-    multi_line_comment(doc, '<bool> 启动时初始化: 是否在程序启动时自动初始化该agent')
+    multi_line_comment(doc, '<bool> 启动时初始化: 是否在程序启动时自动初始化该sprite')
     multi_line_comment(doc, 'init_on_startup = false')
     doc.add(nl())
     doc.add(nl())
@@ -214,31 +233,32 @@ def _add_config_comments(doc: TOMLDocument, plugin_configs: dict[str, type[Store
     #doc.add(nl())
     return doc
 
-def _add_config_agent_comments(doc: TOMLDocument, config: dict, prefix: str = ''):
+def _add_config_sprite_comments(doc: TOMLDocument, config: dict, prefix: str = ''):
     if prefix:
         multi_line_comment(doc, f'[{prefix}]')
     for key, value in config.items():
         if isinstance(value, dict):
             doc.add(nl())
-            doc = _add_config_agent_comments(doc, value, prefix+'.'+key if prefix else key)
+            doc = _add_config_sprite_comments(doc, value, prefix+'.'+key if prefix else key)
         else:
             multi_line_comment(doc, f'{key} = {to_toml_like_string(value)}')
     return doc
 
-def write_default_agent_comments() -> None:
-    for agent_id, agent_config in DEFAULT_AGENTS.items():
-        with open(os.path.join(AGENTS_FILE_PATH, f'{agent_id}.toml'), 'w', encoding='utf-8') as f:
-            dump(_add_config_agent_comments(document(), agent_config), f)
+def write_default_sprite_comments() -> None:
+    for sprite_id, sprite_config in DEFAULT_SPRITES.items():
+        with open(os.path.join(SPRITES_FILE_PATH, f'{sprite_id}.toml'), 'w', encoding='utf-8') as f:
+            dump(_add_config_sprite_comments(document(), sprite_config), f)
 
 
-async def load_config(plugins_with_name: dict[str, Plugin], agent_ids: Optional[Union[list[str], str]] = None, force: bool = False) -> None:
+plugin_configs: dict[str, type[StoreModel]] = {}
+async def load_config(plugins_with_name: dict[str, BasePlugin], sprite_ids: Optional[Union[list[str], str]] = None, force: bool = False) -> None:
     """载入config。需要先初始化store！
 
-    每次调用该函数时，都会更新agent_comments，这是对所有包括插件在内的所有配置项的说明。
+    每次调用该函数时，都会更新sprite_comments，这是对所有包括插件在内的所有配置项的说明。
 
-    如果config中没有agents文件夹，那么则会创建并写入一些示例配置文件。
+    如果config中没有sprites文件夹，那么则会创建并写入一些示例配置文件。
 
-    否则，读取agents文件夹中的所有toml文件。除非打开force，否则会跳过已被写入过的顶层StoreModel（即BuiltinSettings和各插件的config）。
+    否则，读取sprites文件夹中的所有toml文件。除非打开force，否则会跳过已被写入过的顶层StoreModel（即BuiltinSettings和各插件的config）。
 
     只有顶层StoreModel可能被跳过，其他如plugins和init_on_startup等字段，都会被加载。
 
@@ -250,10 +270,10 @@ async def load_config(plugins_with_name: dict[str, Plugin], agent_ids: Optional[
 
     Args:
         plugins_with_name: 插件名到插件实例的映射
-        agent_ids: 要加载的agent id列表，默认加载所有agent
+        sprite_ids: 要加载的sprite id列表，默认加载所有sprite
         force: 是否强制加载，默认情况下会跳过已被写入过的顶层StoreModel（即BuiltinSettings和各插件的config）
     """
-    global agent_configs, global_config
+    global sprite_configs, global_config, plugin_configs
     plugin_configs = {name: plugin.config for name, plugin in plugins_with_name.items() if hasattr(plugin, 'config')}
 
     def _write_config_to_store(d: dict, namespace: tuple[str, ...], model: Type[StoreModel]) -> list[PutOp]:
@@ -294,9 +314,9 @@ async def load_config(plugins_with_name: dict[str, Plugin], agent_ids: Optional[
         with open(GLOBAL_FILE_PATH, 'w', encoding='utf-8') as f:
             doc = document()
             multi_line_comment(doc, '这是全局配置文件')
-            multi_line_comment(doc, '作用是当agent的store或config中不存在数据时，会尝试从这里获取数据，如果还没有，再返回到代码里定义的默认值')
+            multi_line_comment(doc, '作用是当sprite的store或config中不存在数据时，会尝试从这里获取数据，如果还没有，再返回到代码里定义的默认值')
             multi_line_comment(doc, '全局配置文件不会写入store，不存在在非force情况下被跳过')
-            multi_line_comment(doc, '\n\n[plugins]\nagent_reminder = true')
+            multi_line_comment(doc, '\n\n[plugins]\nreminder = true')
             dump(doc, f)
     else:
         # 加载并验证全局配置
@@ -315,7 +335,7 @@ async def load_config(plugins_with_name: dict[str, Plugin], agent_ids: Optional[
                             else:
                                 logger.warning(f"Invalid value for {key} in global config file: expected dict for StoreModel, got {type(value)}")
                         else:
-                            # 如果值是None，跳过TODO
+                            # 如果值是None，跳过 TODO: 这可能不合适
                             if value is None:
                                 continue
                             adapter = TypeAdapter(hint_type)
@@ -326,12 +346,18 @@ async def load_config(plugins_with_name: dict[str, Plugin], agent_ids: Optional[
                                 continue
                     else:
                         logger.warning(f"Unknown key {key} in global config file with model {model._readable_name or model.__name__}, it will be ignored")
+
             for key, value in load(f).unwrap().items():
                 if key == 'settings':
                     global_config[key] = validated_config(value, BuiltinSettings)
                 elif key == 'plugins':
                     try:
-                        global_config[key] = _plugins_validator.validate_python(value)
+                        enabled_plugins = _plugins_validator.validate_python(value, strict=True)
+                        PluginDependency.check_enbaled_plugins_dependencies(
+                            [k for k, v in enabled_plugins.items() if v],
+                            plugins_with_name
+                        )
+                        global_config[key] = enabled_plugins
                     except ValidationError:
                         logger.warning(f"Invalid value for {key} in global config file: expected dict[str, bool] for plugins, got {type(value)}")
                 elif key == 'init_on_startup':
@@ -341,43 +367,43 @@ async def load_config(plugins_with_name: dict[str, Plugin], agent_ids: Optional[
                 else:
                     logger.warning(f"Unknown key {key} in global config file, it will be ignored")
 
-    update_agent_comments(plugin_configs)
-    if not os.path.exists(AGENTS_FILE_PATH):
-        os.makedirs(AGENTS_FILE_PATH)
-        write_default_agent_comments()
+    update_sprite_comments(plugin_configs)
+    if not os.path.exists(SPRITES_FILE_PATH):
+        os.makedirs(SPRITES_FILE_PATH)
+        write_default_sprite_comments()
     else:
-        if not agent_ids:
-            agent_paths = os.listdir(AGENTS_FILE_PATH)
+        if not sprite_ids:
+            sprite_paths = os.listdir(SPRITES_FILE_PATH)
         else:
-            if isinstance(agent_ids, str):
-                agent_ids = [agent_ids]
-            agent_paths = [agent_id + '.toml' if not agent_id.endswith('.toml') else agent_id for agent_id in agent_ids]
+            if isinstance(sprite_ids, str):
+                sprite_ids = [sprite_ids]
+            sprite_paths = [sprite_id + '.toml' if not sprite_id.endswith('.toml') else sprite_id for sprite_id in sprite_ids]
 
         ops = []
-        for agent_path in agent_paths:
-            agent_id = agent_path[:-5]
+        for sprite_path in sprite_paths:
+            sprite_id = sprite_path[:-5]
             try:
-                with open(os.path.join(AGENTS_FILE_PATH, agent_path), "r", encoding='utf-8') as f:
-                    agent_config = load(f).unwrap()
-                    # 不管怎样都会先存到agent_configs
-                    agent_configs[agent_id] = agent_config
+                with open(os.path.join(SPRITES_FILE_PATH, sprite_path), "r", encoding='utf-8') as f:
+                    sprite_config = load(f).unwrap()
+                    # 不管怎样都会先存到sprite_configs
+                    sprite_configs[sprite_id] = sprite_config
                     # 非force下，已被写入过的model会被跳过
                     has_models = []
                     if not force:
-                        models_namespaces = await store_alist_namespaces(prefix=('agents', agent_id, 'models'), max_depth=5)
+                        models_namespaces = await store_alist_namespaces(prefix=('sprites', sprite_id, 'models'), max_depth=5)
                         for n in models_namespaces:
                             if len(n) > 3:
                                 if n[3] != 'builtin':
                                     has_models.append(n[3])
                                 elif len(n) > 4 and n[4] == 'settings':
                                     has_models.append('settings')
-                    # 如果是新的agent，就写入配置
-                    for key, value in agent_config.items():
+                    # 如果是没写入过的store，就写入到store，并验证
+                    for key, value in sprite_config.items():
                         if key in has_models:
                             pass
                         elif key == 'settings':
                             if isinstance(value, dict):
-                                namespace = ('agents', agent_id, 'models', 'builtin', 'settings')
+                                namespace = ('sprites', sprite_id, 'models', 'builtin') + BuiltinSettings._namespace
                                 ops.extend(_write_config_to_store(value, namespace, BuiltinSettings))
                                 # 这个值是为了让该model在刚才的store_alist_namespaces中出现，以保证非force的写入只可能出现一次
                                 ops.append(PutOp(namespace=namespace, key='__edited_model', value={'spaceholder': True}))
@@ -385,7 +411,11 @@ async def load_config(plugins_with_name: dict[str, Plugin], agent_ids: Optional[
                                 logger.warning(f"Invalid value for {key} in config file: expected dict for BuiltinSettings, got {type(value)}")
                         elif key == 'plugins':
                             try:
-                                _plugins_validator.validate_python(value)
+                                enabled_plugins = _plugins_validator.validate_python(value, strict=True)
+                                PluginDependency.check_enbaled_plugins_dependencies(
+                                    [k for k, v in enabled_plugins.items() if v],
+                                    plugins_with_name
+                                )
                             except ValidationError:
                                 logger.warning(f"Invalid value for {key} in config file: expected dict[str, bool] for plugins, got {type(value)}")
                         elif key == 'init_on_startup':
@@ -393,8 +423,9 @@ async def load_config(plugins_with_name: dict[str, Plugin], agent_ids: Optional[
                                 logger.warning(f"Invalid value for {key} in config file: expected bool for init_on_startup, got {type(value)}")
                         elif key in plugin_configs:
                             if isinstance(value, dict):
-                                namespace = ('agents', agent_id, 'models', key)
-                                ops.extend(_write_config_to_store(value, namespace, plugin_configs[key]))
+                                plugin_config_store = plugin_configs[key]
+                                namespace = ('sprites', sprite_id, 'models') + plugin_config_store._namespace
+                                ops.extend(_write_config_to_store(value, namespace, plugin_config_store))
                                 ops.append(PutOp(namespace=namespace, key='__edited_model', value={'spaceholder': True}))
                             else:
                                 logger.warning(f"Invalid value for {key} in config file: expected dict for StoreModel, got {type(value)}")
@@ -402,7 +433,7 @@ async def load_config(plugins_with_name: dict[str, Plugin], agent_ids: Optional[
                             logger.warning(f"Unknown key {key} in config file, it will be ignored")
 
             except OSError as e:
-                logger.error(f"Error loading config for agent {agent_id}: {e}")
+                logger.error(f"Error loading config for sprite {sprite_id}: {e}")
                 continue
 
         if ops:
@@ -410,23 +441,34 @@ async def load_config(plugins_with_name: dict[str, Plugin], agent_ids: Optional[
 
     return
 
-def update_agent_comments(plugin_configs: dict[str, type[StoreModel]]):
+def update_sprite_comments(plugin_configs: dict[str, type[StoreModel]]):
     doc = document()
     doc = _add_config_comments(doc, plugin_configs)
-    with open(AGENT_COMMENTS_FILE_PATH, "w", encoding='utf-8') as f:
+    with open(SPRITE_COMMENTS_FILE_PATH, "w", encoding='utf-8') as f:
         dump(doc, f)
 
-def get_agent_configs() -> dict[str, dict[str, Any]]:
-    return agent_configs
+def get_sprite_configs() -> dict[str, dict[str, Any]]:
+    return sprite_configs
 
-def get_agent_config(agent_id: str) -> dict[str, Any]:
-    return agent_configs.get(agent_id, {})
+def get_sprite_config(sprite_id: str) -> dict[str, Any]:
+    return sprite_configs.get(sprite_id, {})
 
-def get_agent_enabled_plugin_names(agent_id: str) -> list[str]:
-    agent_config = get_agent_config(agent_id)
-    enabled_plugins = global_config.get('plugins', {})
-    enabled_plugins.update(agent_config.get('plugins', {}))
+def get_sprite_enabled_plugin_names(sprite_id: str) -> list[str]:
+    sprite_config = get_sprite_config(sprite_id)
+    enabled_plugins = global_config.get('plugins', {}).copy()
+    enabled_plugins.update(sprite_config.get('plugins', {}))
     return [plugin for plugin, enabled in enabled_plugins.items() if enabled]
 
-def get_init_on_startup_agent_ids() -> list[str]:
-    return [agent_id for agent_id, agent_config in agent_configs.items() if agent_config.get('init_on_startup')]
+def get_init_on_startup_sprite_ids() -> list[str]:
+    return [sprite_id for sprite_id, sprite_config in sprite_configs.items() if sprite_config.get('init_on_startup')]
+
+def get_plugin_global_config(plugin_name: str) -> BaseModel:
+    """获取插件的全局配置模型（frozen）
+
+    Raises:
+        KeyError: 如果插件不存在
+        pydantic.ValidationError: 如果全局配置不符合插件的模型定义
+    """
+    if plugin_name not in plugin_configs:
+        raise KeyError(f"Plugin {plugin_name} not found")
+    return plugin_configs[plugin_name].get_pydantic_model().model_validate(global_config.get(plugin_name, {}))

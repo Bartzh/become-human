@@ -1,24 +1,37 @@
-from typing import Callable, Any, Union
+from typing import Callable, Any, Union, Optional
+from copy import deepcopy
 from langchain_core.tools import BaseTool
 from langchain_core.tools import tool as create_tool
 
-class AgentTool:
+class SpriteTool:
     tool: BaseTool
-    _agent_schemas: dict[str, dict[str, Any]]
+    default_schema: Optional[dict[str, Any]]
+    _sprite_schemas: dict[str, dict[str, Any]]
 
-    def __init__(self, tool: Union[BaseTool, Callable]):
+    def __init__(self, tool: Union[BaseTool, Callable], default_schema: Optional[dict[str, Any]] = None):
         if isinstance(tool, BaseTool):
             self.tool = tool
         else:
             self.tool = create_tool(tool, parse_docstring=True, error_on_invalid_docstring=False)
-        self._agent_schemas = {}
+        self._sprite_schemas = {}
+        self.default_schema = default_schema
 
-    def get_agent_tool_schema(self, agent_id: str) -> dict[str, Any]:
-        if agent_id not in self._agent_schemas:
-            schema = self.tool.tool_call_schema
-            if not isinstance(schema, dict):
-                schema = schema.model_json_schema()
-            schema['title'] = self.tool.name
-            schema['description'] = self.tool.description
-            self._agent_schemas[agent_id] = schema
-        return self._agent_schemas[agent_id]
+    def get_schema(self, sprite_id: str) -> dict[str, Any]:
+        if self._sprite_schemas.get(sprite_id) is None:
+            self._sprite_schemas[sprite_id] = self.generate_schema()
+        return self._sprite_schemas[sprite_id]
+
+    def set_schema(self, sprite_id: str, schema: Optional[dict[str, Any]]):
+        self._sprite_schemas[sprite_id] = schema
+
+    def generate_schema(self) -> dict[str, Any]:
+        if self.default_schema is not None:
+            return deepcopy(self.default_schema)
+        schema = self.tool.tool_call_schema
+        if not isinstance(schema, dict):
+            schema = schema.model_json_schema()
+        else:
+            schema = deepcopy(schema)
+        schema['title'] = self.tool.name
+        schema['description'] = self.tool.description
+        return schema

@@ -1,4 +1,4 @@
-"""核心思想是用seconds替代timestamp以解决timestamp范围过小的问题，使用seconds可表示1~9999年的所有时间。然后是agent要有自己的时间，以锚点、时间膨胀和时区实现"""
+"""通过使用微秒替代timestamp以解决timestamp范围过小的问题，可表示1~9999年的所有时间。然后是sprite要有自己的时间，以锚点、时间膨胀和时区实现"""
 from typing import Any, Optional, Self, Union, overload, Literal
 from functools import cached_property
 from datetime import datetime, timezone, timedelta
@@ -25,7 +25,7 @@ EPOCH = datetime(1, 1, 1, tzinfo=timezone.utc)
 MAX_TIMESTAMP_US = timedelta_to_microseconds(datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc) - EPOCH)
 class TimestampUs(int):
     """微秒级时间戳，为int子类"""
-    def __new__(cls, value: Union[int, float, timedelta, datetime, str, Self] = 0):
+    def __new__(cls, value: Union[int, float, timedelta, datetime, str, Self] = 0) -> Self:
         if isinstance(value, cls):
             return value
         elif isinstance(value, datetime):
@@ -163,17 +163,17 @@ class SerializableTimeZone(BaseModel):
     def from_local(cls) -> Self:
         return cls(name=get_localzone_name())
 
-class AgentTimeSettings(BaseModel):
-    """agent的时间设置"""
-    world_real_anchor: TimestampUs = Field(default=TimestampUs(0), description="agent世界时间的真实时间锚点，单位为微秒。真实时间在此时间时agent世界时间等于world_agent_anchor")
-    world_agent_anchor: TimestampUs = Field(default=TimestampUs(0), description="agent世界时间的agent时间锚点，单位为微秒")
-    world_scale: Union[float, int] = Field(default=1, description="相对于真实世界的agent世界时间膨胀，控制时间流逝速度")
+class SpriteTimeSettings(BaseModel):
+    """sprite的时间设置"""
+    world_real_anchor: TimestampUs = Field(default=TimestampUs(0), description="sprite世界时间的真实时间锚点，单位为微秒。真实时间在此时间时sprite世界时间等于world_sprite_anchor")
+    world_sprite_anchor: TimestampUs = Field(default=TimestampUs(0), description="sprite世界时间的sprite时间锚点，单位为微秒")
+    world_scale: Union[float, int] = Field(default=1, description="相对于真实世界的sprite世界时间膨胀，控制时间流逝速度")
     # 默认使用当前时间做锚点，这可能是一个问题，如果要用过去的现实时间来计算的话会报错
-    subjective_real_anchor: TimestampUs = Field(default_factory=TimestampUs.now, description="agent主观tick的真实时间锚点，单位为微秒。真实时间在此时间时agent主观tick等于subjective_agent_anchor")
-    subjective_agent_anchor: int = Field(default=0, description="agent主观tick的agent锚点")
-    subjective_scale: Union[float, int] = Field(default=1, description="相对于真实世界的agent主观tick膨胀，设置为0以放弃时间驱动")
+    subjective_real_anchor: TimestampUs = Field(default_factory=TimestampUs.now, description="sprite主观tick的真实时间锚点，单位为微秒。真实时间在此时间时sprite主观tick等于subjective_sprite_anchor")
+    subjective_sprite_anchor: int = Field(default=0, description="sprite主观tick的sprite锚点")
+    subjective_scale: Union[float, int] = Field(default=1, description="相对于真实世界的sprite主观tick膨胀，设置为0以放弃时间驱动")
 
-    time_zone: SerializableTimeZone = Field(default_factory=SerializableTimeZone.from_local, description="agent时区")
+    time_zone: SerializableTimeZone = Field(default_factory=SerializableTimeZone.from_local, description="sprite时区")
 
     @field_validator('world_scale', mode='after')
     def validate_world_scale(cls, v: Union[float, int]) -> Union[float, int]:
@@ -190,23 +190,23 @@ class AgentTimeSettings(BaseModel):
         return v
 
     def to_world_datetime(self, real_time: Optional[Union[datetime, TimestampUs]] = None) -> datetime:
-        """将真实世界时间转换为agent时间datetime
+        """将真实世界时间转换为sprite时间datetime
 
         若未指定real_time，则自动获取当前时间"""
         real_timestampus = TimestampUs(real_time or utcnow())
-        agent_time = self.world_agent_anchor + (real_timestampus - self.world_real_anchor) * self.world_scale
-        return agent_time.to_datetime().astimezone(self.time_zone.tz())
+        sprite_time = self.world_sprite_anchor + (real_timestampus - self.world_real_anchor) * self.world_scale
+        return sprite_time.to_datetime().astimezone(self.time_zone.tz())
 
     def to_subjective_tick(self, real_time: Optional[Union[datetime, TimestampUs]] = None) -> int:
-        """将agent时间datetime转换为agent主观int
+        """将sprite时间datetime转换为sprite主观int
 
         若未指定real_time，则自动获取当前时间"""
         real_timestampus = TimestampUs(real_time or utcnow())
-        agent_time = self.subjective_agent_anchor + (real_timestampus - self.subjective_real_anchor) * self.subjective_scale
-        return int(agent_time)
+        sprite_time = self.subjective_sprite_anchor + (real_timestampus - self.subjective_real_anchor) * self.subjective_scale
+        return int(sprite_time)
 
     def add_offset_from_now(self, delta: Union[int, timedelta], time_type: Literal['world', 'subjective']) -> Self:
-        """从现在开始为agent世界时间或主观tick添加时间偏移
+        """从现在开始为sprite世界时间或主观tick添加时间偏移
 
         在world中，delta为微秒int，或使用timedelta实例
 
@@ -214,28 +214,28 @@ class AgentTimeSettings(BaseModel):
         new_time_settings = self.model_copy(deep=True)
         current_times = Times.from_time_settings(self)
         if time_type == 'world':
-            new_time_settings.world_agent_anchor = current_times.agent_world_timestampus + delta
+            new_time_settings.world_sprite_anchor = current_times.sprite_world_timestampus + delta
             new_time_settings.world_real_anchor = current_times.real_world_timestampus
         elif time_type == 'subjective':
             if isinstance(delta, timedelta):
                 raise ValueError("类型为subjective时delta只能为int类型")
-            new_time_settings.subjective_agent_anchor = current_times.agent_subjective_tick + delta
+            new_time_settings.subjective_sprite_anchor = current_times.sprite_subjective_tick + delta
             new_time_settings.subjective_real_anchor = current_times.real_world_timestampus
         else:
             raise ValueError(f'未知的时间类型{time_type}')
         return new_time_settings
 
     def set_scale_from_now(self, scale: Union[float, int], time_type: Literal['world', 'subjective']) -> Self:
-        """从现在开始为agent世界时间或主观tick设置时间膨胀"""
+        """从现在开始为sprite世界时间或主观tick设置时间膨胀"""
         new_time_settings = self.model_copy(deep=True)
         current_times = Times.from_time_settings(self)
         if time_type == 'world':
             new_time_settings.world_scale = scale
-            new_time_settings.world_agent_anchor = current_times.agent_world_timestampus
+            new_time_settings.world_sprite_anchor = current_times.sprite_world_timestampus
             new_time_settings.world_real_anchor = current_times.real_world_timestampus
         elif time_type == 'subjective':
             new_time_settings.subjective_scale = scale
-            new_time_settings.subjective_agent_anchor = current_times.agent_subjective_tick
+            new_time_settings.subjective_sprite_anchor = current_times.sprite_subjective_tick
             new_time_settings.subjective_real_anchor = current_times.real_world_timestampus
         else:
             raise ValueError(f'未知的时间类型{time_type}')
@@ -373,8 +373,8 @@ class Times(BaseModel):
     这是一个不可变的数据结构"""
     real_world_timestampus: TimestampUs
     real_world_time_zone: SerializableTimeZone
-    agent_time_settings: AgentTimeSettings
-    #agent_world_datetime: datetime = Field(default=None, validate_default=True)
+    sprite_time_settings: SpriteTimeSettings
+    #sprite_world_datetime: datetime = Field(default=None, validate_default=True)
 
     model_config = ConfigDict(frozen=True)
 
@@ -383,30 +383,30 @@ class Times(BaseModel):
     def real_world_datetime(self) -> datetime:
         return self.real_world_timestampus.to_datetime()
 
-    # @field_validator('agent_world_datetime', mode='before')
+    # @field_validator('sprite_world_datetime', mode='before')
     # @classmethod
-    # def validate_agent_world_datetime(cls, v: datetime, info: ValidationInfo) -> datetime:
+    # def validate_sprite_world_datetime(cls, v: datetime, info: ValidationInfo) -> datetime:
     #     if v is None:
-    #         v = real_world_to_agent_world(info.data['real_world_timestampus'], info.data['agent_time_settings'])
+    #         v = real_world_to_sprite_world(info.data['real_world_timestampus'], info.data['sprite_time_settings'])
     #     return v
 
     @computed_field
     @cached_property
-    def agent_world_datetime(self) -> datetime:
-        return self.agent_time_settings.to_world_datetime(self.real_world_timestampus)
+    def sprite_world_datetime(self) -> datetime:
+        return self.sprite_time_settings.to_world_datetime(self.real_world_timestampus)
 
     @computed_field
     @cached_property
-    def agent_world_timestampus(self) -> TimestampUs:
-        return TimestampUs(self.agent_world_datetime)
+    def sprite_world_timestampus(self) -> TimestampUs:
+        return TimestampUs(self.sprite_world_datetime)
 
     @computed_field
     @cached_property
-    def agent_subjective_tick(self) -> int:
-        return self.agent_time_settings.to_subjective_tick(self.real_world_timestampus)
+    def sprite_subjective_tick(self) -> int:
+        return self.sprite_time_settings.to_subjective_tick(self.real_world_timestampus)
 
     @classmethod
-    def from_time_settings(cls, settings: AgentTimeSettings, real_time: Optional[Union[datetime, TimestampUs, Self]] = None) -> Self:
+    def from_time_settings(cls, settings: SpriteTimeSettings, real_time: Optional[Union[datetime, TimestampUs, Self]] = None) -> Self:
         """旨在需要两个以上的时间种类时方便地完成各类型时间的转换
 
         通过提供现实时间datetime、TimestampUs或Times（或留空取当前时间，本地时区）快速获取其他种类时间
@@ -428,5 +428,5 @@ class Times(BaseModel):
         return cls(
             real_world_timestampus=real_world_timestampus,
             real_world_time_zone=real_world_time_zone,
-            agent_time_settings=settings
+            sprite_time_settings=settings
         )

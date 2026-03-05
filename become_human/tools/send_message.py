@@ -4,16 +4,17 @@ from langchain.tools import tool, ToolRuntime
 from langgraph.types import Command
 
 from become_human.times import Times
-from become_human.message import BH_MESSAGE_METADATA_KEY, BHMessageMetadata
+from become_human.message import SpritesMsgMeta, DEFAULT_TOOL_MSG_TYPE
 from become_human.store.manager import store_manager
-from become_human.types.main import MainContext, MainState
+from become_human.types.manager import CallSpriteRequest
+
 
 SEND_MESSAGE = "send_message"
 SEND_MESSAGE_CONTENT = "content"
 SEND_MESSAGE_TOOL_CONTENT = "消息发送成功。"
 
-@tool(SEND_MESSAGE, response_format='content_and_artifact', description=f"""「即时工具」发送一条消息，这是你唯一可以与用户交流的方式。
-除非特别要求，不要使用如星号**加粗**、1. 或 - 这样的前缀等 Markdown 语法（因为没有人会那样说话）。
+@tool(SEND_MESSAGE, response_format='content_and_artifact', description=f"""「纯执行工具」发送一条消息，这是你唯一可以与用户交流的方式。
+除非特别要求，不要使用如星号**加粗**、1. 或 - 这样的前缀等 Markdown 语法（因为没有正常人会那样说话）。
 可以通过多次调用该工具的方式来分割内容，模拟真实的对话，如（示例为伪代码）：
 {SEND_MESSAGE}("你好！")
 {SEND_MESSAGE}("我是你的专属助手！")
@@ -29,17 +30,15 @@ SEND_MESSAGE_TOOL_CONTENT = "消息发送成功。"
 - 用户不希望你说话，而你也接受此提议。""")
 async def send_message(
     content: Annotated[str, '要发送的内容'],
-    runtime: ToolRuntime[MainContext, MainState]
+    runtime: ToolRuntime[CallSpriteRequest]
 ) -> Command:
     content = SEND_MESSAGE_TOOL_CONTENT
-    agent_id = runtime.context.agent_id
-    time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
+    sprite_id = runtime.context.sprite_id
+    time_settings = store_manager.get_settings(sprite_id).time_settings
     times = Times.from_time_settings(time_settings)
-    artifact = {
-        BH_MESSAGE_METADATA_KEY: BHMessageMetadata(
-            creation_times=times,
-            message_type="bh:tool",
-            is_streaming_tool=True
-        ).model_dump()
-    }
+    artifact = SpritesMsgMeta(
+        creation_times=times,
+        message_type=DEFAULT_TOOL_MSG_TYPE,
+        is_action_only_tool=True
+    )
     return content, artifact

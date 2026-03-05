@@ -1,6 +1,4 @@
 from typing import Sequence, Dict, Any, Union, Callable, Optional, Literal
-from datetime import datetime, timedelta
-import random
 import asyncio
 from loguru import logger
 
@@ -8,7 +6,6 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.runtime import Runtime
 #from langgraph.graph.message import add_messages
 
-from langchain.tools import BaseTool
 from langchain_core.messages import (
     BaseMessage,
     ToolMessage,
@@ -18,13 +15,12 @@ from langchain_core.messages import (
     AnyMessage,
     RemoveMessage
 )
-from langchain_core.messages.utils import trim_messages, count_tokens_approximately
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from trustcall import create_extractor
+#from trustcall import create_extractor
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -32,20 +28,19 @@ import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from become_human.graphs.base import BaseGraph
-from become_human.message import add_messages, get_all_retrieved_memory_ids, BHMessageMetadata, BHMessageMetadataWithTimesNotRequired, BH_MESSAGE_METADATA_KEY
-from become_human.types.main import MainState, MainContext, StateEntry, InterruptData
-from become_human.memory import get_activated_memory_types, memory_manager, format_retrieved_memory_groups
-from become_human.recycling import recycle_memories
-from become_human.times import format_time, format_duration, Times, TimestampUs
-from become_human.message import format_messages_for_ai, extract_text_parts, construct_system_message
+from become_human.message import add_messages, SpritesMsgMeta, SpritesMsgMetaOptionalTimes
+from become_human.types.main import MainState, StateEntry, InterruptData
+from become_human.types.manager import CallSpriteRequest
+from become_human.times import Times
+from become_human.message import construct_system_message, DEFAULT_AI_MSG_TYPE, DEFAULT_TOOL_MSG_TYPE
 from become_human.store.manager import store_manager
-from become_human.tool import AgentTool
+from become_human.tool import SpriteTool
 from become_human.tools import CORE_TOOLS
 from become_human.tools.send_message import SEND_MESSAGE_TOOL_CONTENT, SEND_MESSAGE, SEND_MESSAGE_CONTENT
 from become_human.tools.record_thoughts import RECORD_THOUGHTS
-from become_human.tools.retrieve_memories import RETRIEVE_MEMORIES
-from become_human.plugin import Plugin
-from become_human.config import get_agent_enabled_plugin_names
+from become_human.plugin import *
+from become_human.plugin import ChangeableField
+from become_human.config import get_sprite_enabled_plugin_names
 
 
 
@@ -60,50 +55,58 @@ class MainGraph(BaseGraph):
 
     llm: BaseChatModel
     llm_for_structured_output: BaseChatModel
-    plugin_tools: dict[str, list[AgentTool]]
+    plugins_with_name: dict[str, BasePlugin]
+    plugin_tools: dict[str, list[SpriteTool]]
     streaming_tools: StreamingTools
-    agent_run_ids: dict[str, str] # 所有agent的当前运行id，这个字典实际是由agent_manager管理的，不代表图的状态
-    agent_interrupt_datas: dict[str, InterruptData] # 所有agent被打断后留下的'chunk'与'called_tool_messages'
-    agent_messages_to_update: dict[str, list[BaseMessage]] # 所有agent的待更新（进state）消息
+    sprite_run_ids: dict[str, str] # 所有sprite的当前运行id，这个字典实际是由sprite_manager管理的，不代表图的状态
+    sprite_last_run_ids: dict[str, str]
+    sprite_run_events: dict[str, asyncio.Event]
+    sprite_interrupt_datas: dict[str, InterruptData] # 所有sprite被打断后留下的'chunk'与'called_tool_messages'
+    sprite_messages_to_update: dict[str, list[BaseMessage]] # 所有sprite的待更新（进state）消息
+    sprite_interruptable: dict[str, asyncio.Event] # 所有sprite是否可被打断
+    sprite_merging: dict[str, list[asyncio.Event, str]] # 所有（call_）sprite是否正在被合并，以及正在合并的run_id
 
     def __init__(
         self,
         llm: BaseChatModel,
-        plugins_with_name: Optional[dict[str, Plugin]] = None,
+        plugins_with_name: Optional[dict[str, BasePlugin]] = None,
         llm_for_structured_output: Optional[BaseChatModel] = None
     ):
         super().__init__()
         self.llm = llm
-        plugins_with_name = plugins_with_name or {}
-        tools_plugins = [(name, plugin) for name, plugin in plugins_with_name.items() if hasattr(plugin, 'tools')]
-        self.plugin_tools = {name: [t if isinstance(t, AgentTool) else AgentTool(t) for t in plugin.tools] for name, plugin in tools_plugins}
+        self.plugins_with_name = plugins_with_name or {}
+        tools_plugins = [(name, plugin) for name, plugin in self.plugins_with_name.items() if hasattr(plugin, 'tools')]
+        self.plugin_tools = {name: [t if isinstance(t, SpriteTool) else SpriteTool(t) for t in plugin.tools] for name, plugin in tools_plugins}
 
         if llm_for_structured_output is None:
             self.llm_for_structured_output = self.llm
         self.streaming_tools = StreamingTools()
-        self.agent_run_ids = {}
-        self.agent_interrupt_datas = {}
-        self.agent_messages_to_update = {}
+        self.sprite_run_ids = {}
+        self.sprite_last_run_ids = {}
+        self.sprite_run_events = {}
+        self.sprite_interrupt_datas = {}
+        self.sprite_messages_to_update = {}
+        self.sprite_interruptable = {}
+        self.sprite_merging = {}
 
-        graph_builder = StateGraph(MainState, context_schema=MainContext)
+        graph_builder = StateGraph(MainState, context_schema=CallSpriteRequest)
 
         graph_builder.add_node("begin", self.begin)
-        graph_builder.add_node("prepare_to_generate", self.prepare_to_generate)
+        graph_builder.add_node("before_chatbot", self.before_chatbot)
+
         graph_builder.add_node("chatbot", self.chatbot)
         graph_builder.add_node("final", self.final)
-        graph_builder.add_node("recycle_messages", self.recycle_messages)
-        graph_builder.add_node("prepare_to_recycle", self.prepare_to_recycle)
 
-        agent_tools = [tool for tools in self.plugin_tools.values() for tool in tools]
-        tool_node = ToolNode(tools=[t.tool for t in CORE_TOOLS + agent_tools], messages_key="tool_messages", handle_tool_errors=True)
+        sprite_tools = [tool for tools in self.plugin_tools.values() for tool in tools]
+        tool_node = ToolNode(tools=[t.tool for t in CORE_TOOLS + sprite_tools], messages_key="tool_messages", handle_tool_errors=True)
         graph_builder.add_node("tools", tool_node)
 
         graph_builder.add_node("tool_node_post_process", self.tool_node_post_process)
 
         graph_builder.add_edge(START, "begin")
+        graph_builder.add_edge("begin", "before_chatbot")
+        graph_builder.add_edge("before_chatbot", "chatbot")
         graph_builder.add_edge("tools", "tool_node_post_process")
-        graph_builder.add_edge("prepare_to_recycle", "recycle_messages")
-        graph_builder.add_edge("recycle_messages", "final")
         graph_builder.add_edge("final", END)
         self.graph_builder = graph_builder
 
@@ -111,7 +114,7 @@ class MainGraph(BaseGraph):
     async def create(
         cls,
         llm: BaseChatModel,
-        plugins_with_name: Optional[dict[str, Plugin]] = None,
+        plugins_with_name: Optional[dict[str, BasePlugin]] = None,
         llm_for_structured_output: Optional[BaseChatModel] = None
     ):
         instance = cls(llm, plugins_with_name, llm_for_structured_output)
@@ -120,323 +123,146 @@ class MainGraph(BaseGraph):
         return instance
 
 
-    async def final(self, state: MainState, runtime: Runtime[MainContext]):
-        agent_run_id = runtime.context.agent_run_id
-        agent_id = runtime.context.agent_id
-        messages_to_update, new_messages_to_update = self._pop_messages_to_update(agent_id, agent_run_id, state.messages, state.new_messages)
-        if messages_to_update:
-            return {"messages": messages_to_update, "new_messages": new_messages_to_update}
-        else:
-            return
+    async def final(self, state: MainState, runtime: Runtime[CallSpriteRequest]):
+        sprite_run_id = runtime.context.sprite_run_id
+        sprite_id = runtime.context.sprite_id
+        if self.is_current_run(sprite_id, sprite_run_id):
+            new_state = {"new_messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)]}
+            messages_to_update, new_messages_to_update = self._pop_messages_to_update(sprite_id, sprite_run_id, state.messages, state.new_messages)
+            if messages_to_update:
+                new_state["messages"] = messages_to_update
+                new_state["last_new_messages"] = state.new_messages + new_messages_to_update
+            else:
+                new_state["last_new_messages"] = state.new_messages
+            return new_state
 
 
-    async def begin(self, state: MainState, runtime: Runtime[MainContext]) -> Command[Literal["prepare_to_generate", "final"]]:
-        agent_id = runtime.context.agent_id
-        store_settings = await store_manager.get_settings(agent_id)
-        main_config = store_settings.main
-        time_settings = main_config.time_settings
-        current_times = Times.from_time_settings(time_settings)
+    async def begin(self, state: MainState, runtime: Runtime[CallSpriteRequest]):
+        sprite_id = runtime.context.sprite_id
 
         new_state = {
-            "generated": False,
-            "new_messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)],
+            "input_messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)],
             "recycle_messages": [],
             "overflow_messages": [],
-            "react_retry_count": 0
+            "react_retry_count": 0,
+            "cancelled_by_plugin": None
         }
-        new_state["messages"] = []
-
-        # active_time_seconds不需要在意睡觉的问题
-        if not state.active_time_seconds:
-            active_time_range = main_config.active_time_range
-            active_time_seconds = current_times.agent_world_timestampus + random.uniform(active_time_range[0], active_time_range[1]) * 1_000_000
-            new_state["active_time_seconds"] = active_time_seconds
-        else:
-            active_time_seconds = state.active_time_seconds
-
-        is_self_call = runtime.context.call_type == "self"
-        # 如果所有的call都结束了，这时只可能是由用户发送消息导致触发，读取config增加一个新的self_call
-        #if not state.self_call_time_secondses and not is_self_call and current_time_seconds >= active_time_seconds and not state.wakeup_call_time_seconds:
-        # 第二种逻辑，只要在活跃时间之外发送消息，都会生成wakeup_call_time_seconds，增加self_call的机会
-        if (
-            runtime.context.call_type == 'human' and
-            current_times.agent_world_timestampus >= active_time_seconds
-        ):
-            new_wakeup_call_time_seconds = await generate_new_wakeup_call_timeseconds(agent_id, current_times.agent_world_datetime)
-            if (
-                not state.wakeup_call_time_seconds or
-                state.wakeup_call_time_seconds > new_wakeup_call_time_seconds
-            ):
-                wakeup_call_time_seconds = new_wakeup_call_time_seconds
-                new_state["wakeup_call_time_seconds"] = wakeup_call_time_seconds
-            else:
-                wakeup_call_time_seconds = state.wakeup_call_time_seconds
-        else:
-            wakeup_call_time_seconds = state.wakeup_call_time_seconds
-
-        # 获取在外的更新消息
-        messages = []
-        agent_run_id = runtime.context.agent_run_id
-        update_messages = self._pop_messages_to_update(agent_id, agent_run_id)[0]
-        if update_messages:
-            # 添加至messages
-            messages.extend(update_messages)
-            # 可能的对输入消息的更新（一般没有）
-            input_message_ids = [message.id for message in state.input_messages if message.id]
-            update_input_messages = [message for message in update_messages if message.id in input_message_ids]
-            if update_input_messages:
-                new_state["input_messages"] = update_input_messages
-
-        # 处理中断数据，首先尝试获取，若有进行下一步操作
-        interrupt_data = self.agent_interrupt_datas.pop(agent_id, {})
-        if chunk := interrupt_data.get('chunk'):
-            # 将被中断的chunk加入messages（add_messages会自动处理）
-            messages.append(chunk)
-            called_tool_messages = interrupt_data["called_tool_messages"]
-            called_tool_messages_with_id = {tool_message.tool_call_id: tool_message for tool_message in called_tool_messages}
-            called_tool_message_ids = called_tool_messages_with_id.keys()
-            # 用可获取到的最晚的tool_message的创建时间作为新的工具消息的创建时间，chunk的创建时间则作为兜底
-            if called_tool_messages:
-                last_tool_message_metadata = BHMessageMetadata.parse(called_tool_messages[-1])
-                last_creation_times = last_tool_message_metadata.creation_times
-            else:
-                #last_creation_times = interrupt_data.get('last_chunk_times', current_times)
-                last_creation_times = interrupt_data['last_chunk_times']
-            # 对于chunk中出现的每个tool_call进行检查
-            for tool_call in chunk.tool_calls:
-                tool_call_id = tool_call.get('id')
-                if tool_call_id:
-                    # 如果called_tool_messages中已存在工具消息，则直接添加
-                    if tool_call_id in called_tool_message_ids:
-                        messages.append(called_tool_messages_with_id[tool_call_id])
-                    # 如果是send_message，被打断前的消息是依然存在的
-                    elif tool_call["name"] == SEND_MESSAGE:
-                        messages.append(ToolMessage(
-                            content=f'{SEND_MESSAGE_TOOL_CONTENT}（尽管当前调用被打断，被打断前的消息也已经发送成功）',
-                            name=SEND_MESSAGE,
-                            tool_call_id=tool_call_id,
-                            additional_kwargs={
-                                BH_MESSAGE_METADATA_KEY: BHMessageMetadata(
-                                    creation_times=last_creation_times,
-                                    message_type='bh:tool',
-                                    is_streaming_tool=True
-                                ).model_dump()
-                            }
-                        ))
-                    # 对于其他tool_call，则直接添加取消执行消息
-                    else:
-                        messages.append(ToolMessage(
-                            content='因当前调用被打断，此工具取消执行。',
-                            name=tool_call["name"],
-                            tool_call_id=tool_call_id,
-                            additional_kwargs={
-                                BH_MESSAGE_METADATA_KEY: BHMessageMetadata(
-                                    creation_times=last_creation_times,
-                                    message_type='bh:tool'
-                                ).model_dump()
-                            }
-                        ))
-                del self.agent_interrupt_datas[agent_id]
-            else:
-                del self.agent_interrupt_datas[agent_id]
-            messages.append(construct_system_message(
-                content=f'''由于在你刚才输出时出现了“双重短信”（Double-texting，一般是由于用户在你输出期间又发送了一条或多条新的消息）的情况，你刚才的输出已被终止并截断，包括工具调用。
-也因此你可能会发现自己刚才的输出并不完整且部分工具调用没有正确执行，这是正常现象。请根据接下来的新的消息重新考虑要输出的内容，或是否要重新调用刚才未完成的工具执行。
-注意，工具`{SEND_MESSAGE}`是一个例外：由于它是实时流式输出的，不用等到工具调用的参数全部输出才执行，所以就算被“双发”截断了工具调用，用户也能看到已经输出的部分。这就相当于是你说话被打断了。''',
-                times=current_times
-            ))
-
-        messages.extend(state.input_messages)
-        new_state["messages"].extend(messages)
 
 
-        can_self_call = False
-        # 检查是否可以自我调用，是否超时。如果不自我调用则清理可能过时的时间
-        if is_self_call:
-            if wakeup_call_time_seconds and current_times.agent_world_timestampus >= wakeup_call_time_seconds and current_times.agent_world_timestampus < (wakeup_call_time_seconds + 3600):
-                can_self_call = True
-            else:
-                for seconds in state.self_call_time_secondses:
-                    # 如果因某些原因如服务关闭导致离原定时间太远，则忽略这些self_call
-                    if current_times.agent_world_timestampus >= seconds and current_times.agent_world_timestampus < (seconds + 3600) * 1_000_000:
-                        can_self_call = True
-                        break
-            if not can_self_call:
-                new_state["self_call_time_secondses"] = [s for s in state.self_call_time_secondses if current_times.agent_world_timestampus < s]
-                if wakeup_call_time_seconds and current_times.agent_world_timestampus >= wakeup_call_time_seconds:
-                    new_state["wakeup_call_time_seconds"] = TimestampUs(0)
+        # 处理中断数据
+        interrupt_data = self.sprite_interrupt_datas.pop(sprite_id, {})
+        interrupt_messages = self._process_interrupt_data(sprite_id, interrupt_data)
+
+        new_state["messages"] = interrupt_messages + state.input_messages
+        current_message_ids = [m.id for m in state.messages if m.id]
+        new_state["new_messages"] = interrupt_messages + [m for m in state.input_messages if m.id not in current_message_ids]
 
 
-        # 要么自我调用，要么在活跃状态时被用户调用
-        if (
-            can_self_call or
-            (runtime.context.call_type == 'human' and (current_times.agent_world_timestampus < active_time_seconds or main_config.always_active)) or
-            runtime.context.call_type == 'system'
-        ):
-            return Command(update=new_state, goto='prepare_to_generate')
-        else:
-            return Command(update=new_state, goto='final')
+        return new_state
 
 
-    async def prepare_to_generate(self, state: MainState, runtime: Runtime[MainContext]) -> Command[Literal["chatbot", "final"]]:
+    async def before_chatbot(self, state: MainState, runtime: Runtime[CallSpriteRequest]) -> Command[Literal['chatbot', 'final']]:
+        # 插件钩子
+        sprite_id = runtime.context.sprite_id
+        sprite_run_id = runtime.context.sprite_run_id
 
-        new_state = {}
-        new_state["generated"] = True
-        new_state["input_messages"] = RemoveMessage(id=REMOVE_ALL_MESSAGES)
-        input_messages = state.input_messages
+        # 从这里开始到模型输出完毕，都是可中断的
+        self.set_is_interruptable(sprite_id)
 
-
-        agent_id = runtime.context.agent_id
-        store_settings = await store_manager.get_settings(agent_id)
-        main_config = store_settings.main
-        new_messages = []
-
-        current_times = Times.from_time_settings(main_config.time_settings)
-        formated_agent_world_time = format_time(current_times.agent_world_datetime)
-
-
-        # 自我调用
-        if runtime.context.call_type == 'self':
-
-            self_call_type = runtime.context.self_call_type
-            # 只是用来处理提示词
-            is_active = current_times.agent_world_timestampus < state.active_time_seconds or main_config.always_active
-
-            if self_call_type == 'active':
-                next_active_self_call_time_secondses_and_notes = [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds > current_times.agent_world_timestampus]
-                new_state["active_self_call_time_secondses_and_notes"] = next_active_self_call_time_secondses_and_notes
-                active_self_call_note = '\n'.join([f'[{format_time(s, main_config.time_settings.time_zone)}] {n}' for s, n in [(seconds, note) for seconds, note in state.active_self_call_time_secondses_and_notes if seconds <= current_times.agent_world_timestampus]])
-
-            # 有新的消息
-            if input_messages:
-                new_state["last_chat_time_seconds"] = current_times.agent_world_timestampus
-                new_state["self_call_time_secondses"] = await generate_new_self_call_timesecondses(agent_id, current_time=current_times.agent_world_timestampus)
-                new_state["wakeup_call_time_seconds"] = TimestampUs(0)
-                new_state["active_time_seconds"] = current_times.agent_world_timestampus + random.uniform(main_config.active_time_range[0], main_config.active_time_range[1]) * 1_000_000
-                if self_call_type == 'active':
-                    input_content3 = f'请检查你之前留下的笔记内容并考虑要如何行动，同时需注意上下文中还存在新的可能需要回应的用户消息。'
+        enabled_plugin_names = get_sprite_enabled_plugin_names(sprite_id)
+        for plugin_name, plugin in self.plugins_with_name.items():
+            if plugin_name in enabled_plugin_names:
+                if self.is_current_run(sprite_id, sprite_run_id):
+                    info = BeforeCallModelInfo()
                 else:
-                    input_content3 = f'''检查到当前有新的消息，请结合上下文、时间以及你的角色设定考虑要如何回复，或在某些特殊情况下保持沉默不理会用户。只需控制`{SEND_MESSAGE}`工具的使用与否即可实现。
-{'注意，休眠模式只有在用户发送消息后才会被解除或重新计时。由于用户发送了新的消息，这次唤醒会使你重新回到正常的活跃状态。' if not is_active else ''}'''
+                    info = BeforeCallModelInfo(interrupted=True)
+                try:
+                    await plugin.before_call_model(runtime.context, info)
+                except Exception:
+                    logger.exception(f"plugin {plugin.name} before_call_model failed")
 
-            # 没有新的消息
-            else:
-                next_self_call_time_secondses = [s for s in state.self_call_time_secondses if s > current_times.agent_world_timestampus]
-                new_state["self_call_time_secondses"] = next_self_call_time_secondses
-                temporary_active_time_seconds = current_times.agent_world_timestampus + random.uniform(main_config.temporary_active_time_range[0], main_config.temporary_active_time_range[1]) * 1_000_000
-                if temporary_active_time_seconds > state.active_time_seconds:
-                    new_state["active_time_seconds"] = temporary_active_time_seconds
-                if self_call_type == 'active':
-                    input_content3 = '请检查你之前留下的笔记内容并考虑要如何行动。'
-                else:
-                    if next_self_call_time_secondses:
-                        parsed_next_self_call_time_secondses = f'系统接下来为你随机安排的唤醒时间（一般间隔会越来越长）{'分别' if len(next_self_call_time_secondses) > 1 else ''}为：' + '、'.join([f'{format_duration(s - current_times.agent_world_timestampus)}后（{format_time(s, main_config.time_settings.time_zone)}）' for s in next_self_call_time_secondses])
-                    else:
-                        parsed_next_self_call_time_secondses = '唤醒次数已耗尽，这是你的最后一次唤醒。接下来你将不再被唤醒，直到用户发送新的消息的一段时间后。'
-                    input_content3 = f'''{'检查到当前没有新的消息，' if not is_active else ''}请结合上下文、时间以及你的角色设定考虑是否要尝试主动给用户发送消息，或保持沉默继续等待用户的新消息。只需控制`{SEND_MESSAGE}`工具的使用与否即可实现。
-{'注意，休眠模式只有在用户发送消息后才会被解除。由于当前没有用户发送新的消息，接下来不论你是否发送消息，你都只会短暂地回到活跃状态，之后继续保持休眠状态等待下一次唤醒（如果在短暂的活跃状态期间依然没有收到新的消息）。' if not is_active else ''}
-{parsed_next_self_call_time_secondses}
-以上的唤醒时间仅供你自己作为接下来行动的参考，不要将其暴露给用户。'''
-
-            past_seconds = current_times.agent_world_timestampus - state.last_chat_time_seconds
-            if self_call_type == 'active':
-                input_content2 = f'距离上一次与用户交互过去了{format_duration(past_seconds)}。现在将你唤醒是由于你之前主动设置的自我唤醒时间到了，同时以下还有你为了提醒自己留下的笔记内容：\n\n{active_self_call_note}\n\n{input_content3}'
-            else:
-                if is_active:
-                    input_content2 = f'距离上一次与用户交互过去了{format_duration(past_seconds)}。虽然目前还没有收到用户的新消息，但你触发了一次随机的自我唤醒（这是为了给你主动向用户对话的可能）。{input_content3}'
-                else:
-                    input_content2 = f'''由于自上次与用户交互以来（{format_duration(past_seconds)}前），在一定时间内没有用户发送新的消息，你自动进入了休眠状态（在休眠状态下你会以随机的时间间隔检查是否有新的消息并短暂地回到活跃状态，而不是当有新消息时立即响应。这主要是为了模拟在停止聊天的一段时间之后，人们可能不会一直盯着最新消息而是会去做别的事，然后时不时回来检查新消息的情景）。
-现在将你唤醒，检查是否有新的消息...
-{input_content3}'''
-
-            input_content = f'当前时间是 {formated_agent_world_time}，{input_content2}'
-
-            new_messages.append(construct_system_message(
-                content=input_content,
-                times=current_times
-            ))
-
-
-        # 直接响应
+        if not self.is_current_run(sprite_id, sprite_run_id):
+            for plugin_name, plugin in self.plugins_with_name.items():
+                if plugin_name in enabled_plugin_names:
+                    try:
+                        await plugin.after_call_model(
+                            runtime.context,
+                            AfterCallModelInfo(interrupted=True)
+                        )
+                    except Exception:
+                        logger.exception(f"plugin {plugin.name} after_call_model failed")
+            return Command(goto='final')
         else:
-            new_state["last_chat_time_seconds"] = current_times.agent_world_timestampus
-            new_state["self_call_time_secondses"] = await generate_new_self_call_timesecondses(agent_id, current_time=current_times.agent_world_datetime)
-            new_state["wakeup_call_time_seconds"] = TimestampUs(0)
-            active_time_range = store_settings.main.active_time_range
-            new_state["active_time_seconds"] = current_times.agent_world_timestampus + random.uniform(active_time_range[0], active_time_range[1]) * 1_000_000
-
-
-        # passive_retrieval，只会跟在另一条humanmessage的后面，所以可以随时清理
-        if input_messages:
-            search_string = "\n\n".join(["\n".join(extract_text_parts(message.content)) for message in input_messages])
-            message_ids = [m.id for m in state.messages if m.id]
-            retrieved_memory_ids = get_all_retrieved_memory_ids(state.messages)
-            exclude_memory_ids = list(set(message_ids + retrieved_memory_ids))
-            passive_retrieve_groups = await memory_manager.retrieve_memories(
-                agent_id=agent_id,
-                retrieval_config=store_settings.retrieval.passive_retrieval_config,
-                search_string=search_string,
-                exclude_memory_ids=exclude_memory_ids
+            update_messages, update_new_messages = self._pop_messages_to_update(
+                sprite_id,
+                sprite_run_id,
+                state.messages,
+                state.new_messages
             )
-            passive_retrieve_content = format_retrieved_memory_groups(
-                passive_retrieve_groups,
-                main_config.time_settings.time_zone
+            return Command(
+                update={
+                    #"core_prompts": core_prompts,
+                    #"secondary_prompts": secondary_prompts,
+                    "messages": update_messages,
+                    "new_messages": update_new_messages
+                },
+                goto='chatbot'
             )
-            new_messages.append(construct_system_message(
-                content=f'以下是根据用户输入自动从你的记忆（数据库）中检索到的内容，可能会出现无关信息（但视情况依然可作为谈资），如果需要进一步检索请调用工具`{RETRIEVE_MEMORIES}`：\n\n\n{passive_retrieve_content}',
-                times=current_times,
-                message_type="bh:passive_retrieval",
-                extra_kwargs={
-                    BH_MESSAGE_METADATA_KEY: BHMessageMetadataWithTimesNotRequired(
-                        retrieved_memory_ids=[group.source_memory.doc.id for group in passive_retrieve_groups]
-                    )
-                }
-            ))
 
 
-        new_state["messages"] = new_messages
-        new_state["new_messages"] = input_messages + new_messages
 
+    async def chatbot(self, state: MainState, runtime: Runtime[CallSpriteRequest]) -> Command[Literal['final', 'tools']]:
+        sprite_id = runtime.context.sprite_id
+        store_settings = store_manager.get_settings(sprite_id)
 
-        agent_run_id = runtime.context.agent_run_id
-        if self.agent_run_ids.get(agent_id) and self.agent_run_ids.get(agent_id) == agent_run_id:
-            update_messages, update_new_messages = self._pop_messages_to_update(agent_id, agent_run_id, state.messages, state.new_messages)
-            if update_messages:
-                new_state["messages"] = update_messages + new_messages
-                new_state["new_messages"] = input_messages + update_new_messages + new_messages
-            return Command(update=new_state, goto="chatbot")
-        else:
-            return Command(goto="final")
-
-
-    async def chatbot(self, state: MainState, runtime: Runtime[MainContext]) -> Command[Literal['tools', 'final', 'chatbot', 'prepare_to_recycle']]:
-        agent_id = runtime.context.agent_id
-        store_settings = await store_manager.get_settings(agent_id)
+        enabled_plugin_names = get_sprite_enabled_plugin_names(sprite_id)
 
         # TODO: 可以有配置或者环境变量控制
         max_retries = 5
         if state.react_retry_count > max_retries:
-            break_times = Times.from_time_settings(store_settings.main.time_settings)
+            break_times = Times.from_time_settings(store_settings.time_settings)
             break_message = construct_system_message(
                 content=f'由于在当前这一轮对话中，你因工具调用失败或没有调用`{RECORD_THOUGHTS}`工具而被系统返回错误超过{str(max_retries)}次，系统认定你为没有能力处理当前的对话，为防止无限循环所以强行break掉了本轮对话。',
                 times=break_times,
             )
-            break_state = {"messages": [break_message], "new_messages": [break_message]}
-            return Command(update=break_state, goto="prepare_to_recycle")
+            break_state = {
+                "messages": [break_message],
+                "new_messages": [break_message],
+                "cancelled_by_plugin": "record_thoughts"
+            }
+            return Command(update=break_state, goto="final")
 
-        enabled_plugin_names = get_agent_enabled_plugin_names(agent_id)
         enabled_plugin_tools = [tools for name, tools in self.plugin_tools.items() if name in enabled_plugin_names]
         enabled_plugin_tools = [tool for tools in enabled_plugin_tools for tool in tools]
-        tool_schemas = [tool.get_agent_tool_schema(agent_id) for tool in CORE_TOOLS + enabled_plugin_tools]
+        tool_schemas = [tool.get_schema(sprite_id) for tool in CORE_TOOLS + enabled_plugin_tools]
+        tool_schemas = [schema for schema in tool_schemas if schema]
         llm_with_tools = self.llm.bind_tools(tool_schemas, tool_choice=RECORD_THOUGHTS, parallel_tool_calls=True)
+
+        core_prompts: list[PluginPrompt] = []
+        secondary_prompts: list[PluginPrompt] = []
+        for plugin_name, plugin in self.plugins_with_name.items():
+            if plugin_name in enabled_plugin_names and hasattr(plugin, 'prompts'):
+                if plugin.prompts.core:
+                    core_prompts.append(plugin.prompts.core)
+                if plugin.prompts.secondary:
+                    secondary_prompts.append(plugin.prompts.secondary)
+        if core_prompts:
+            core_prompt = '\n' + '\n\n'.join(f'## {p.title}\n\n{p.content}' for p in core_prompts) + '\n\n'
+        else:
+            core_prompt = ''
+        if secondary_prompts:
+            secondary_prompt = '\n' + '\n\n'.join(f'## {p.title}\n\n{p.content}' for p in secondary_prompts) + '\n\n'
+        else:
+            secondary_prompt = ''
+
         unicode_prompt = '- 不要使用 Unicode 编码，所有工具均支持中文及其他语言直接输入，使用 Unicode 编码会导致输出速度下降。'
         thought_prompt = '- 也因此，在`content`也就是正常的输出内容中，你可以自由地进行推理（思维链），制定计划，评估工具调用结果等。又或者如果你有什么想记下来给未来的自己看的，也可以放在这里。但请记住，就如刚才所说，除你自己之外没人看得到这些内容。'
-        parsed_character_settings = store_settings.main.format_character_settings()
-        role_prompt = f'## 基本信息：\n{parsed_character_settings if parsed_character_settings.strip() else '无'}\n\n## 详细设定：\n{store_settings.main.role_prompt}'
+        parsed_character_settings = store_settings.format_character_settings()
+        role_prompt = f'## 基本信息：\n{parsed_character_settings if parsed_character_settings.strip() else '无'}\n\n## 详细设定：\n{store_settings.role_prompt}'
         role_prompt_with_state = f'''{role_prompt}
 
 ### 当前状态：
-{parse_agent_state(state.agent_state)}'''
+{parse_agent_state(state.sprite_state)}'''
         system_prompt = f'''你是一个具有长期记忆和并行工具调用能力的专注于角色扮演的AI agent，能够很好地适应各种角色。
 
 接下来将向你详细讲解如何更好地配合你的角色扮演特化的 agent 架构来实现这个目标：
@@ -444,13 +270,13 @@ class MainGraph(BaseGraph):
 # 基本工具调用规则
 
 你基于一个ReAct agent架构，具备多轮的并行工具调用能力（可一次性调用多个工具），但在一些地方又与传统ReAct agent架构存在差异：
-- 对于一般的未做特别说明的工具而言（如`{RETRIEVE_MEMORIES}`），因为需要返回其执行结果，所以其行为会与传统ReAct循环一致：调用这些工具后，系统会再次唤醒你并传递工具执行结果，以便你继续处理。
-- 而有些工具会被标注为「即时工具」（如`{RECORD_THOUGHTS}`、`{SEND_MESSAGE}`），这些工具执行后的返回执行结果一般来说并不重要。所以如果你只调用了「即时工具」，没有调用其他一般工具，系统就不会再次唤醒你（除非工具执行出错或遇到其他特殊情况）。
-    - 这样的设计在大部分情况下会很方便，但请注意，如果你只打算调用「即时工具」，并且想把它们拆开分为多轮调用，这是**行不通**的，你必须利用你的并行工具调用能力一次性将它们全部调用完才能正确生效。
-    - 其实很容易理解，因为当你第一轮工具调用结束后，系统如果检测到工具调用中只存在「即时工具」，那么就不会再次唤醒你。所以如果你本来是打算等到工具返回结果后再调用剩下的工具，很显然就没有机会了。
+- 对于一般的未做特别说明的工具而言（如`web_search`），因为需要返回其执行结果，所以其行为会与传统ReAct循环一致：调用这些工具后，系统会再次唤醒你并传递工具执行结果，以便你继续处理。
+- 而有些工具会被标注为「纯执行工具」（Action-Only Tool，如`{RECORD_THOUGHTS}`、`{SEND_MESSAGE}`），这些工具执行后的返回执行结果一般来说并不重要。所以如果你只调用了「纯执行工具」，没有调用其他一般工具，系统就不会再次唤醒你（除非工具执行出错或遇到其他特殊情况）。
+    - 这样的设计在大部分情况下会很方便，但请注意，如果你只打算调用「纯执行工具」，并且想把它们拆开分为多轮调用，这是**行不通**的，你必须利用你的并行工具调用能力一次性将它们全部调用完才能正确生效。
+    - 其实很容易理解，因为当你第一轮工具调用结束后，系统如果检测到工具调用中只存在「纯执行工具」，那么就不会再次唤醒你。所以如果你本来是打算等到工具返回结果后再调用剩下的工具，很显然就没有机会了。
     - 举例来说，你可以：
         - `{RECORD_THOUGHTS}` + `{SEND_MESSAGE}` 同时调用。
-        - `{RECORD_THOUGHTS}` + `{RETRIEVE_MEMORIES}` 同时调用并等待 `{RETRIEVE_MEMORIES}` 返回结果后再次调用 `{RECORD_THOUGHTS}` + `{SEND_MESSAGE}`。
+        - `{RECORD_THOUGHTS}` + `web_search` 同时调用并等待 `web_search` 返回结果后再次调用 `{RECORD_THOUGHTS}` + `{SEND_MESSAGE}`。
 
 错误处理：
 - 当工具执行时发生错误，系统会记录错误信息并返回给你，请根据错误信息尝试修复错误（可能是因为你给工具的输入参数有错误）。
@@ -488,31 +314,9 @@ class MainGraph(BaseGraph):
 
 尽管心理活动不会被用户看见，但依然要求你输出心理活动的意义是使你更沉浸角色，以及方便以后回顾时更好地理解当时的行为逻辑。
 
-（`{RECORD_THOUGHTS}`是一个「即时工具」，在刚才的基本规则中提到，如果只调用了「即时工具」则系统不会再次唤醒你，这意味着每次都调用`{RECORD_THOUGHTS}`并不会导致陷入无限的ReAct循环。）
-
+（`{RECORD_THOUGHTS}`是一个「纯执行工具」，在刚才的基本规则中提到，如果只调用了「纯执行工具」则系统不会再次唤醒你，这意味着每次都调用`{RECORD_THOUGHTS}`并不会导致陷入无限的ReAct循环。）
+{core_prompt}
 # 其他注意事项
-
-## 记忆系统
-
-- **记忆存储**：
-    - 记忆是自动存储的（无需你主动存储），并且遵循“用进废退”原则。经常被检索的记忆会被强化，而很少被检索的记忆会被逐渐遗忘。
-- **被动检索（潜意识）**：
-    - 每次你被调用时，系统会自动使用用户输入的消息检索相关记忆。这条消息是自动生成的，可以参考它来提供更准确的回答。
-    - 但请注意：被动检索可能不够精确，比如当用户提到模糊的时间点如“上周”时，被动检索因无法以准确时间点进行检索很有可能获取不到多少有用的信息，请注意甄别。
-- **主动检索**：
-    - 如果你需要更精确的记忆，请调用`{RETRIEVE_MEMORIES}`工具。该工具允许你主动检索记忆，你可以使用更合适的查询语句来获取更好的结果。
-- **检索结果**
-    - 检索结果会以多个记忆组（memory_group）的形式返回给你，一个记忆组中必有一个「目标记忆」以及零或若干个「相邻记忆」：
-        -「目标记忆」指被检索语句检索到的记忆，这条记忆才是与检索语句相关的，在同一个记忆组内只会存在一个。
-        -「相邻记忆」（若有）则是指与记忆组内唯一的「目标记忆」在创建时间上相邻的一些记忆，虽与检索语句没有关联，但与「源记忆」结合在一起可能会得到相关联的其他信息，或还原当时情景。
-    - 检索中得分越高越与检索语句相关的记忆组（以「目标记忆」为准）越靠后。得分（score）是一个0~1的值。
-    - 在这些记忆中还可能会出现「模糊的记忆」，其中的`*`星号意味着暂时没想起来的细节，这是由于该记忆检索时的得分过低，如因检索语句不够相关，或记忆本身不够新鲜。假如再次检索这些记忆，由于记忆的新鲜度提升了，所以`*`星号应当会减少。
-
-请充分利用被动检索和主动检索工具提供的记忆来提供更优质的回答。
-
-但请注意，你检索到的记忆也可能会有问题，如：不相关、过时、又或者是你真正想要的记忆没有被检索到，也有可能是因为它已经被遗忘了。
-
-所以，一定要注意甄别记忆的内容，当意识到检索到的记忆有以上不靠谱的情况时，你可以选择再次尝试检索，又或者放弃检索，使用“我不知道”“我忘记了”“我不确定”等表达作解释，避免胡编乱造。
 
 ## 时间感知
 
@@ -522,13 +326,7 @@ class MainGraph(BaseGraph):
 - 长时间未互动可体现时光痕迹（"好久不见"等）。
 
 还有其他一些系统消息也会附带类似的时间信息，需要注意的是这类由系统提供的时间信息都是基于你自己的时区计算的，而非用户，所以会存在小概率用户与你不在同一个时区的可能。
-
-## 自我唤醒（self_call）
-
-作为一个由AI大模型驱动的agent，一般来说只有当用户主动向你发送消息时你才会被唤醒。但在这个角色扮演特化agent程序的设计中，你被赋予了两种自我唤醒的能力，这使得你也能够在一定程度上掌握主动权：
-- 被动自我唤醒：在用户没有发送消息的时候，系统会在随机时间唤醒你，此时你可以依情况尝试主动与用户互动，或者什么都不做。总之被动唤醒是系统自动执行的不需要你太在意。
-- 主动自我唤醒：你可以通过调用`add_schedule`工具来主动设置一次自我唤醒（定时计划），这样就相当于是一个定时器或者说是闹钟，可使你在指定时间能够被系统唤醒并做一些事情。
-
+{secondary_prompt}
 # 角色设定
 
 最后是你所需要扮演的角色的角色设定，请在理解了刚才讲述的所有内容后根据角色设定与提供给你的上下文认真决定你所扮演的角色的每一次思考的内容与要执行的动作，同时注意不能向用户暴露以上系统设定（除非角色设定里另有规定）：
@@ -562,347 +360,478 @@ class MainGraph(BaseGraph):
             MessagesPlaceholder('msgs')
         ])
         response = await llm_with_tools.ainvoke(await use_system_prompt_template.ainvoke({"msgs": state.messages}))
-        current_times = Times.from_time_settings(store_settings.main.time_settings)
-        response.additional_kwargs[BH_MESSAGE_METADATA_KEY] = BHMessageMetadata(
+        current_times = Times.from_time_settings(store_settings.time_settings)
+        SpritesMsgMeta(
             creation_times=current_times,
-            message_type='bh:ai'
-        ).model_dump()
-        new_state = {"messages": [response], "new_messages": [response]}
+            message_type=DEFAULT_AI_MSG_TYPE
+        ).set_to(response)
 
-        agent_run_id = runtime.context.agent_run_id
-        if self.agent_run_ids.get(agent_id) and self.agent_run_ids.get(agent_id) == agent_run_id:
-            if not isinstance(response, AIMessage):
-                raise ValueError("WTF the response is not an AIMessage???")
-            update_messages, update_new_messages = self._pop_messages_to_update(agent_id, agent_run_id, state.messages, state.new_messages)
-            if update_messages:
-                new_state["messages"] = update_messages + [response]
-                new_state["new_messages"] = update_new_messages + [response]
-            if hasattr(response, "tool_calls") and len(response.tool_calls) > 0:
-                new_state["tool_messages"] = [RemoveMessage(id=REMOVE_ALL_MESSAGES), response]
-                return Command(update=new_state, goto="tools")
-            else:
-                not_recorded_thoughts_error_message = construct_system_message(
-                    content=f"未检测到你有调用任何工具！如果你确实不想进行任何动作，也至少应调用`{RECORD_THOUGHTS}`工具！这个动作是**必须**的，请将其补上！",
-                    times=current_times,
-                    message_type="bh:react_error",
-                )
-                new_state["messages"].append(not_recorded_thoughts_error_message)
-                new_state["new_messages"].append(not_recorded_thoughts_error_message)
-                new_state["react_retry_count"] = state.react_retry_count + 1
-                return Command(update=new_state, goto="chatbot")
+
+        enabled_plugin_names = get_sprite_enabled_plugin_names(sprite_id)
+
+        sprite_run_id = runtime.context.sprite_run_id
+        if self.is_current_run(sprite_id, sprite_run_id):
+            # 如果没被打断，设置为不可打断
+            self.set_is_not_interruptable(sprite_id)
+
+            after_call_model_info = AfterCallModelInfo(
+                response_ctrl=ChangeableField(current=response)
+            )
+            for plugin_name, plugin in self.plugins_with_name.items():
+                if plugin_name in enabled_plugin_names:
+                    control = None
+                    try:
+                        control = await plugin.after_call_model(
+                            runtime.context,
+                            after_call_model_info
+                        )
+                    except Exception:
+                        logger.exception(f"plugin {plugin.name} after_call_model failed")
+                    if control:
+                        after_call_model_info = after_call_model_info._update_from_control(control, plugin_name)
+
+            response = after_call_model_info.response_ctrl.current
+            new_state = {
+                "messages": [response],
+                "new_messages": [response],
+                "tool_messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), response]
+            }
+
+            # 应该不能pop
+            # update_messages, update_new_messages = self._pop_messages_to_update(
+            #     sprite_id,
+            #     sprite_run_id,
+            #     state.messages,
+            #     state.new_messages,
+            # )
+            # new_state["messages"].extend(update_messages)
+            # new_state["new_messages"].extend(update_new_messages)
+
+            return Command(update=new_state, goto="tools")
         else:
+            for plugin_name, plugin in self.plugins_with_name.items():
+                if plugin_name in enabled_plugin_names:
+                    try:
+                        await plugin.after_call_model(
+                            runtime.context,
+                            AfterCallModelInfo(interrupted=True)
+                        )
+                    except Exception:
+                        logger.exception(f"plugin {plugin.name} after_call_model failed")
             return Command(goto="final")
 
 
-    async def tool_node_post_process(self, state: MainState, runtime: Runtime[MainContext]) -> Command[Literal['chatbot', 'prepare_to_recycle']]:
+
+    async def tool_node_post_process(self, state: MainState, runtime: Runtime[CallSpriteRequest]) -> Command[Literal['before_chatbot', 'final']]:
         #tool_messages = []
         #for message in reversed(state.messages):
         #    if isinstance(message, ToolMessage):
         #        tool_messages.append(message)
         #    else:
         #        break
-        agent_id = runtime.context.agent_id
+        sprite_id = runtime.context.sprite_id
+        sprite_run_id = runtime.context.sprite_run_id
         # 第一条是AIMessage，剔除掉
         tool_messages = state.tool_messages[1:]
-        settings = await store_manager.get_settings(agent_id)
-        current_times = Times.from_time_settings(settings.main.time_settings)
+        settings = store_manager.get_settings(sprite_id)
+        current_times = Times.from_time_settings(settings.time_settings)
+        default_meta = SpritesMsgMetaOptionalTimes(
+            creation_times=current_times,
+            message_type=DEFAULT_TOOL_MSG_TYPE
+        )
         for message in tool_messages:
-            # 如果没有metadata，则补上
-            if not message.additional_kwargs.get(BH_MESSAGE_METADATA_KEY):
-                if isinstance(message.artifact, dict) and BH_MESSAGE_METADATA_KEY in message.artifact.keys():
-                    metadata_in_artifact = BHMessageMetadataWithTimesNotRequired.parse(message.artifact)
-                    if metadata_in_artifact.creation_times is None:
-                        metadata_in_artifact.creation_times = current_times
-                    message.additional_kwargs[BH_MESSAGE_METADATA_KEY] = metadata_in_artifact.model_dump()
-                    del message.artifact[BH_MESSAGE_METADATA_KEY]
-                else:
-                    message.additional_kwargs[BH_MESSAGE_METADATA_KEY] = BHMessageMetadata(
-                        creation_times=current_times,
-                        message_type='bh:tool'
-                    ).model_dump()
-            elif isinstance(message.artifact, dict) and BH_MESSAGE_METADATA_KEY in message.artifact.keys():
-                logger.warning(f"{BH_MESSAGE_METADATA_KEY} 已经存在于消息 {message.id} 的 additional_kwargs 中，不需要 artifact 中也存在 {BH_MESSAGE_METADATA_KEY}，现在将其清理")
-                del message.artifact[BH_MESSAGE_METADATA_KEY]
-        agent_run_id = runtime.context.agent_run_id
-        update_messages, update_new_messages = self._pop_messages_to_update(agent_id, agent_run_id, state.messages, state.new_messages)
-        if update_messages:
-            new_state = {"new_messages": update_new_messages + tool_messages, "messages": update_messages + tool_messages}
-        else:
-            new_state = {"new_messages": tool_messages, "messages": tool_messages}
+            # 如果没有metadata，则补上，同时包含了对artifact中所有meta的解析和移动
+            default_meta.fill_to(message)
+
+        new_state = {}
 
         direct_exit = True
         recorded_thoughts = False
         for message in tool_messages:
-            if not BHMessageMetadata.parse(message).is_streaming_tool:
+            if not SpritesMsgMeta.parse(message).is_action_only_tool:
                 direct_exit = False
             if message.name == RECORD_THOUGHTS:
                 recorded_thoughts = True
             if not direct_exit and recorded_thoughts:
                 break
 
+        break_loop = False
+        # TODO: 可以有配置或者环境变量控制
+        max_retries = 5
         if not recorded_thoughts:
+            react_retry_count = state.react_retry_count + 1
+            new_state["react_retry_count"] = react_retry_count
+
+            if react_retry_count > max_retries:
+                break_loop = True
+
+
+        # 如果正在merging，则等待
+        await self.wait_for_call_sprite_merging(sprite_id)
+
+
+        # 在此时就pop，并检查是否有新的HumanMessage，若有则继续循环
+        update_messages, update_new_messages = self._pop_messages_to_update(
+            sprite_id,
+            sprite_run_id,
+            state.messages,
+            state.new_messages
+        )
+        merged_message = None
+        for m in update_new_messages:
+            if isinstance(m, HumanMessage):
+                direct_exit = False
+                merged_message = construct_system_message(
+                    content='由于在你刚才输出的途中出现了新的消息，所以不论如何你都会继续ReAct循环以处理新的消息。',
+                    times=current_times,
+                )
+                break
+
+
+        enabled_plugin_names = get_sprite_enabled_plugin_names(sprite_id)
+        after_call_tools_info = AfterCallToolsInfo(
+            exit_loop_ctrl=ChangeableField(current=(direct_exit and recorded_thoughts) or break_loop),
+            tool_responses_ctrl=ChangeableField(current=tool_messages),
+        )
+        for plugin_name, plugin in self.plugins_with_name.items():
+            if plugin_name in enabled_plugin_names:
+                control = None
+                try:
+                    control = await plugin.after_call_tools(
+                        runtime.context,
+                        after_call_tools_info,
+                    )
+                except Exception:
+                    logger.exception(f"plugin {plugin.name} after_call_tools failed")
+                if control:
+                    after_call_tools_info = after_call_tools_info._update_from_control(control, plugin_name)
+
+        tool_messages = after_call_tools_info.tool_responses_ctrl.current
+        new_state["new_messages"] = tool_messages + update_new_messages
+        new_state["messages"] = tool_messages + update_messages
+        if merged_message:
+            new_state["messages"].append(merged_message)
+            new_state["new_messages"].append(merged_message)
+
+
+        # 如果没record就再添加一条消息
+        if break_loop:
+            break_message = construct_system_message(
+                content=f'由于在当前这一轮对话中，你因工具调用失败或没有调用`{RECORD_THOUGHTS}`工具而被系统返回错误超过{str(max_retries)}次，系统认定你为没有能力处理当前的对话，为防止无限循环所以强行break掉了本轮对话。',
+                times=current_times,
+            )
+            new_state["messages"].append(break_message)
+            new_state["new_messages"].append(break_message)
+        elif not recorded_thoughts:
             not_recorded_thoughts_error_message = construct_system_message(
                 content=f"未检测到你有调用`{RECORD_THOUGHTS}`工具，这个操作是**必须**的，请将其补上！",
                 times=current_times,
-                message_type='bh:react_error'
             )
             new_state["messages"].append(not_recorded_thoughts_error_message)
             new_state["new_messages"].append(not_recorded_thoughts_error_message)
-            new_state["react_retry_count"] = state.react_retry_count + 1
 
-        if direct_exit and recorded_thoughts:
-            return Command(update=new_state, goto="prepare_to_recycle")
+
+        # 考虑是否应该再pop一次，应该不需要
+        # update_messages, update_new_messages = self._pop_messages_to_update(sprite_id, sprite_run_id, state.messages, state.new_messages)
+        # if update_messages:
+        #     new_state["messages"].extend(update_messages)
+        #     new_state["new_messages"].extend(update_new_messages)
+
+
+        if after_call_tools_info.exit_loop_ctrl.current:
+            if self.is_call_sprite_merging(sprite_id):
+                await self.wait_for_call_sprite_merging(sprite_id)
+                update_messages, update_new_messages = self._pop_messages_to_update(sprite_id, sprite_run_id, state.messages, state.new_messages)
+                if update_messages:
+                    new_state["messages"].extend(update_messages)
+                    new_state["new_messages"].extend(update_new_messages)
+                    merged_message = construct_system_message(
+                        content='由于在你刚才输出的途中出现了新的消息，所以不论如何你都会继续ReAct循环以处理新的消息。',
+                        times=current_times,
+                    )
+                    new_state["messages"].append(merged_message)
+                    new_state["new_messages"].append(merged_message)
+                    return Command(update=new_state, goto='before_chatbot')
+                else:
+                    logger.warning("merge了却没有新的消息？")
+            if after_call_tools_info.exit_loop_ctrl.changes:
+                new_state["cancelled_by_plugin"] = after_call_tools_info.exit_loop_ctrl.changes[-1].plugin_name
+            self.set_is_interruptable(sprite_id)
+            return Command(update=new_state, goto="final")
         else:
-            return Command(update=new_state, goto='chatbot')
-
-    async def prepare_to_recycle(self, state: MainState, runtime: Runtime[MainContext]):
-        agent_id = runtime.context.agent_id
-        new_state = {}
-        messages = state.messages
-        settings = await store_manager.get_settings(agent_id)
-        memory_types = get_activated_memory_types()
-
-        # 没回收的滚去回收
-        recycle_messages = []
-        if 'original' in memory_types:
-            for message in messages:
-                metadata = BHMessageMetadata.parse(message)
-                if not metadata.recycled:
-                    metadata.recycled = True
-                    message.additional_kwargs[BH_MESSAGE_METADATA_KEY] = metadata.model_dump()
-                    recycle_messages.append(message)
-
-        # 如果消息超过阈值，进行trim
-        trigger_threshold = settings.recycling.recycling_trigger_threshold
-        if count_tokens_approximately(messages) >= trigger_threshold:
-            max_tokens = settings.recycling.recycling_target_size
-            new_messages = trim_messages(
-                messages=messages,
-                max_tokens=max_tokens,
-                token_counter=count_tokens_approximately,
-                strategy='last',
-                start_on=HumanMessage,
-                #allow_partial=True,
-                #text_splitter=RecursiveCharacterTextSplitter(chunk_size=max_tokens, chunk_overlap=0)
-            )
-            if not new_messages:
-                logger.warning("Trim messages failed on overflowing.")
-                new_messages = []
-            excess_count = len(messages) - len(new_messages)
-            old_messages = messages[:excess_count]
-            # 如果第一条消息为extracted，说明在non active时已经被提取过了，尝试只从后向前删除掉extracted的消息而不删除其他消息
-            if old_messages and BHMessageMetadata.parse(old_messages[0]).extracted:
-                extracted_messages = []
-                for m in old_messages:
-                    if BHMessageMetadata.parse(m).extracted:
-                        extracted_messages.append(m)
-                    else:
-                        break
-                # 如果长度相等，说明所有消息都被trim掉了，无视
-                if len(extracted_messages) < len(messages):
-                    # 保证下一条消息是HumanMessage
-                    idx = len(extracted_messages)
-                    while idx > 0 and not isinstance(messages[idx], HumanMessage):
-                        idx -= 1
-                    extracted_messages = extracted_messages[:idx]
-                    # 如果剩余的token少于阈值，那么就视为成功，修改变量，否则保持trim后的原始结果
-                    if count_tokens_approximately(messages[len(extracted_messages):]) < trigger_threshold:
-                        # 目前就这样，直接把extracted的消息送去overflow，因为在recycle episodic时会过滤掉extracted的消息
-                        old_messages = extracted_messages
-                        new_messages = messages[len(extracted_messages):]
-            remove_messages = [RemoveMessage(id=message.id) for message in old_messages]
-            if 'episodic' in memory_types:
-                new_state["overflow_messages"] = old_messages
-            new_state["messages"] = recycle_messages + remove_messages
-            new_state["new_messages"] = remove_messages
-            new_state["tool_messages"] = remove_messages
-        else:
-            new_state["messages"] = recycle_messages
-        new_state["recycle_messages"] = recycle_messages
-        return new_state
-
-    async def recycle_messages(self, state: MainState, runtime: Runtime[MainContext]):
-        agent_id = runtime.context.agent_id
-        if state.recycle_messages:
-            recycles = [recycle_memories('original', agent_id, state.recycle_messages)]
-            if state.overflow_messages:
-                recycles.append(recycle_memories('episodic', agent_id, state.overflow_messages, self.llm_for_structured_output))
-            await asyncio.gather(*recycles)
-
-        agent_run_id = runtime.context.agent_run_id
-        update_messages, update_new_messages = self._pop_messages_to_update(agent_id, agent_run_id, state.messages, state.new_messages)
-        if update_messages:
-            return {"messages": update_messages, "new_messages": update_new_messages}
-        return
+            return Command(update=new_state, goto='before_chatbot')
 
 
 
-    async def update_agent_state(self, state: MainState):
-        prompt = f'''请根据新的消息内容来更新当前agent的状态。
-新的消息内容：
+#     async def update_agent_state(self, state: MainState):
+#         prompt = f'''请根据新的消息内容来更新当前agent的状态。
+# 新的消息内容：
 
 
-{format_messages_for_ai(state.new_messages)}
+# {format_messages_for_ai(state.new_messages)}
 
 
 
-当前agent的状态：
+# 当前agent的状态：
 
-{parse_agent_state(state.agent_state)}'''
-        extractor = create_extractor(
-            self.llm_for_structured_output,
-            tools=[StateEntry],
-            tool_choice=["any"],
-            enable_inserts=True,
-            enable_updates=True,
-            enable_deletes=True
-        )
-        extractor_result = await extractor.ainvoke(
-            {
-                "messages": [
-                    HumanMessage(content=prompt)
-                ],
-                "existing": [(str(i), "StateEntry", s.model_dump()) for i, s in enumerate(state.agent_state)]
-            }
-        )
-        return {"agent_state": extractor_result["responses"]}
+# {parse_agent_state(state.agent_state)}'''
+#         extractor = create_extractor(
+#             self.llm_for_structured_output,
+#             tools=[StateEntry],
+#             tool_choice=["any"],
+#             enable_inserts=True,
+#             enable_updates=True,
+#             enable_deletes=True
+#         )
+#         extractor_result = await extractor.ainvoke(
+#             {
+#                 "messages": [
+#                     HumanMessage(content=prompt)
+#                 ],
+#                 "existing": [(str(i), "StateEntry", s.model_dump()) for i, s in enumerate(state.agent_state)]
+#             }
+#         )
+#         return {"agent_state": extractor_result["responses"]}
 
 
-    async def update_messages(self, agent_id: str, messages: list[BaseMessage]) -> None:
+    async def update_messages(
+        self,
+        sprite_id: str,
+        messages: list[BaseMessage],
+        skip_hooks: bool = False,
+    ) -> None:
         """外部更新`messages`的唯一方式，避免了在图运行时无法修改messages的问题"""
-        if not agent_id or not messages:
+        if not sprite_id:
             return
-        config = {"configurable": {"thread_id": agent_id}}
+        config = {"configurable": {"thread_id": sprite_id}}
         state = await self.graph.aget_state(config)
+        time_settings = store_manager.get_settings(sprite_id).time_settings
+        current_times = Times.from_time_settings(time_settings)
+        default_meta = SpritesMsgMetaOptionalTimes(
+            creation_times=current_times
+        )
+        for message in messages:
+            default_meta.fill_to(message)
+
+        if not skip_hooks:
+            info = OnUpdateMessagesInfo(
+                messages_ctrl=ChangeableField(current=messages)
+            )
+            for plugin_name, plugin in self.plugins_with_name.items():
+                control = None
+                try:
+                    control = await plugin.on_update_messages(sprite_id, info)
+                except Exception:
+                    logger.exception(f"plugin {plugin.name} on_update_messages failed")
+                if control:
+                    info = info._update_from_control(control, plugin_name)
+            messages = info.messages_ctrl.current
+
+        if not messages:
+            return
+
         while state.next and state.next[0] == 'final':
             await asyncio.sleep(0.1)
             state = await self.graph.aget_state(config)
-        if state.next:
-            if self.agent_messages_to_update.get(agent_id):
-                self.agent_messages_to_update[agent_id].extend(messages)
-            else:
-                self.agent_messages_to_update[agent_id] = messages
+        # 如果图在运行交给图来更新，又或者只是出于不可打断状态，这特指从on_call_sprite开始到实际调用图的这一间隙
+        if state.next or not self.is_interruptable(sprite_id):
+            self.sprite_messages_to_update.setdefault(sprite_id, []).extend(messages)
         else:
-            input_messages: list[AnyMessage] = state.values.get("input_messages", [])
-            if input_messages:
-                input_message_ids = [message.id for message in input_messages if message.id]
-                update_input_messages = [message for message in messages if message.id in input_message_ids]
-                await self.graph.aupdate_state(config, {"messages": messages, "input_messages": update_input_messages}, 'final')
-            else:
-                await self.graph.aupdate_state(config, {"messages": messages}, 'final')
+            current_input_message_ids = [m.id for m in state.values.get("input_messages", []) if m.id]
+            updated_input_messages = [m for m in messages if m.id in current_input_message_ids]
+            current_message_ids = [m.id for m in state.values.get("messages", []) if m.id] + current_input_message_ids
+            new_messages = [m for m in messages if m.id not in current_message_ids]
+            await self.graph.aupdate_state(config, {
+                "messages": messages,
+                "new_messages": new_messages,
+                "input_messages": updated_input_messages
+            }, as_node='final')
 
-    async def get_messages(self, agent_id: str) -> list[BaseMessage]:
+    async def get_messages(self, sprite_id: str) -> list[AnyMessage]:
         """外部获取`messages`的唯一方式，返回会包括使用`update_messages`但还没来得及更新的消息"""
-        state = await self.graph.aget_state({"configurable": {"thread_id": agent_id}})
+        state = await self.graph.aget_state({"configurable": {"thread_id": sprite_id}})
         messages: list[AnyMessage] = state.values.get("messages", [])
-        if not messages:
-            return []
-        update_messages = self.agent_messages_to_update.get(agent_id, [])
+        interrupt_messages = self._process_interrupt_data(sprite_id, self.sprite_interrupt_datas.get(sprite_id, {}))
+        input_messages: list[AnyMessage] = state.values.get("input_messages", [])
+        update_messages = self.sprite_messages_to_update.get(sprite_id, [])
+        if interrupt_messages:
+            messages = add_messages(messages, interrupt_messages)
+        if input_messages:
+            messages = add_messages(messages, input_messages)
         if update_messages:
             messages = add_messages(messages, update_messages)
         return messages
 
-    def _pop_messages_to_update(self, agent_id: str, agent_run_id: str, current_messages: Optional[list[AnyMessage]] = None, current_new_messages: list[AnyMessage] = []) -> tuple[list[BaseMessage], list[BaseMessage]]:
-        """仅限图节点使用。用于在图运行时获取`agent_messages_to_update`中可能存在的消息
+    def _pop_messages_to_update(
+        self,
+        sprite_id: str,
+        sprite_run_id: str,
+        current_messages: Optional[list[AnyMessage]] = None,
+        current_new_messages: Optional[list[AnyMessage]] = None
+    ) -> tuple[list[BaseMessage], list[BaseMessage]]:
+        """仅限图节点使用。用于在图运行时获取`sprite_messages_to_update`中可能存在的消息
 
         返回一个元组，第一个元素是需要更新至`messages`的消息列表，第二个元素是需要更新至`new_messages`的消息列表
 
         如果未提供`current_messages`和`current_new_messages`参数，则第二个元素返回空列表"""
-        # 首先验证agent运行ID是否能对应上，对不上意味着已开启新的运行，取消pop
-        if self.agent_run_ids.get(agent_id) and self.agent_run_ids.get(agent_id) == agent_run_id:
-            update_messages = self.agent_messages_to_update.pop(agent_id, [])
+        # 首先验证sprite运行ID是否能对应上，对不上意味着已开启新的运行，取消pop
+        if self.is_current_run(sprite_id, sprite_run_id):
+            update_messages = self.sprite_messages_to_update.pop(sprite_id, [])
             update_new_messages: list[BaseMessage] = []
             # 如果提供了current_messages和current_new_messages
-            if update_messages and current_messages is not None:
+            if update_messages and current_messages is not None and current_new_messages is not None:
                 current_message_ids = [m.id for m in current_messages if m.id]
                 current_new_message_ids = [m.id for m in current_new_messages if m.id]
-                # 要么是新消息，要么是在现有的messages和new_messages中都存在的消息，才会添加至update_new_messages
                 for m in update_messages:
-                    if m.id in current_message_ids:
-                        if m.id in current_new_message_ids:
-                            update_new_messages.append(m)
-                    else:
+                    if (
+                        # 如果已经在new_messages里了，允许更新
+                        m.id in current_new_message_ids or
+                        # 如果不在messages里，说明确实是新消息
+                        m.id not in current_message_ids
+                        # 否则，这就只是在更新旧消息，而非新增消息
+                    ):
                         update_new_messages.append(m)
             return update_messages, update_new_messages
         return [], []
 
-    def is_agent_running(self, agent_id: str) -> bool:
-        return bool(self.agent_run_ids.get(agent_id))
+
+    async def wait_until_interruptable(self, sprite_id: str) -> None:
+        """等待直到sprite可被打断"""
+        if self.sprite_interruptable.get(sprite_id) is not None:
+            await self.sprite_interruptable[sprite_id].wait()
+
+    def is_interruptable(self, sprite_id: str) -> bool:
+        """检查sprite是否可被打断"""
+        if self.sprite_interruptable.get(sprite_id) is not None:
+            return self.sprite_interruptable[sprite_id].is_set()
+        return True
+
+    def set_is_interruptable(self, sprite_id: str) -> None:
+        """设置sprite可被打断"""
+        self.sprite_interruptable.setdefault(sprite_id, asyncio.Event()).set()
+
+    def set_is_not_interruptable(self, sprite_id: str) -> None:
+        """清除sprite可被打断状态"""
+        self.sprite_interruptable.setdefault(sprite_id, asyncio.Event()).clear()
+
+
+    @staticmethod
+    def _process_interrupt_data(sprite_id: str, interrupt_data: InterruptData, current_times: Optional[Times] = None) -> list[BaseMessage]:
+        """处理中断数据，将其转换为图运行时需要的格式"""
+        interrupt_messages = []
+        if chunk := interrupt_data.get('chunk'):
+            # 将被中断的chunk加入messages（add_messages会自动处理）
+            interrupt_messages.append(chunk)
+            called_tool_messages = interrupt_data["called_tool_messages"]
+            called_tool_messages_with_id = {tool_message.tool_call_id: tool_message for tool_message in called_tool_messages}
+            called_tool_message_ids = called_tool_messages_with_id.keys()
+            # 用可获取到的最晚的tool_message的创建时间作为新的工具消息的创建时间，chunk的创建时间则作为兜底
+            if called_tool_messages:
+                last_tool_message_metadata = SpritesMsgMeta.parse(called_tool_messages[-1])
+                last_creation_times = last_tool_message_metadata.creation_times
+            else:
+                #last_creation_times = interrupt_data.get('last_chunk_times', current_times)
+                last_creation_times = interrupt_data['last_chunk_times']
+            # 对于chunk中出现的每个tool_call进行检查
+            for tool_call in chunk.tool_calls:
+                tool_call_id = tool_call.get('id')
+                if tool_call_id:
+                    # 如果called_tool_messages中已存在工具消息，则直接添加
+                    if tool_call_id in called_tool_message_ids:
+                        interrupt_messages.append(called_tool_messages_with_id[tool_call_id])
+                    # 如果是send_message，被打断前的消息是依然存在的
+                    elif tool_call["name"] == SEND_MESSAGE:
+                        interrupt_messages.append(SpritesMsgMeta(
+                            creation_times=last_creation_times,
+                            message_type=DEFAULT_TOOL_MSG_TYPE,
+                            is_action_only_tool=True
+                        ).set_to(ToolMessage(
+                            content=f'{SEND_MESSAGE_TOOL_CONTENT}（尽管当前调用被打断，被打断前的消息也已经发送成功）',
+                            name=SEND_MESSAGE,
+                            tool_call_id=tool_call_id,
+                        )))
+                    # 对于其他tool_call，则直接添加取消执行消息
+                    else:
+                        interrupt_messages.append(SpritesMsgMeta(
+                            creation_times=last_creation_times,
+                            message_type=DEFAULT_TOOL_MSG_TYPE
+                        ).set_to(ToolMessage(
+                            content='因当前调用被打断，此工具取消执行。',
+                            name=tool_call["name"],
+                            tool_call_id=tool_call_id,
+                        )))
+
+            if current_times is None:
+                time_settings = store_manager.get_settings(sprite_id).time_settings
+                current_times = Times.from_time_settings(time_settings)
+            interrupt_messages.append(construct_system_message(
+                content=f'''由于在你刚才输出时出现了“双重短信”（Double-texting，一般是由于用户在你输出期间又发送了一条或多条新的消息）的情况，你刚才的输出已被终止并截断，包括工具调用。
+也因此你可能会发现自己刚才的输出并不完整且部分工具调用没有正确执行，这是正常现象。请根据接下来的新的消息重新考虑要输出的内容，或是否要重新调用刚才未完成的工具执行。
+注意，工具`{SEND_MESSAGE}`是一个例外：由于它是实时流式输出的，不用等到工具调用的参数全部输出才执行，所以就算被“双发”截断了工具调用，用户也能看到已经输出的部分。这就相当于是你说话被打断了。''',
+                times=current_times
+            ))
+
+        return interrupt_messages
+
+
+    def is_sprite_running(self, sprite_id: str) -> bool:
+        return bool(self.sprite_run_ids.get(sprite_id))
+
+    def get_current_run_id(self, sprite_id: str) -> Optional[str]:
+        return self.sprite_run_ids.get(sprite_id)
+
+    def is_current_run(self, sprite_id: str, sprite_run_id: str) -> bool:
+        return self.sprite_run_ids.get(sprite_id) == sprite_run_id
+
+    def set_current_run(self, sprite_id: str, sprite_run_id: str) -> None:
+        if last_run_id := self.sprite_run_ids.get(sprite_id):
+            self.sprite_last_run_ids[sprite_id] = last_run_id
+        self.sprite_run_ids[sprite_id] = sprite_run_id
+        if sprite_id not in self.sprite_run_events:
+            self.sprite_run_events[sprite_id] = asyncio.Event()
+        else:
+            self.sprite_run_events[sprite_id].clear()
+
+    def clear_current_run(self, sprite_id: str) -> None:
+        run_id = self.sprite_run_ids.pop(sprite_id, None)
+        if run_id:
+            self.sprite_last_run_ids[sprite_id] = run_id
+        if sprite_id in self.sprite_run_events:
+            self.sprite_run_events[sprite_id].set()
+
+    async def wait_for_sprite_run(self, sprite_id: str) -> asyncio.Task:
+        if sprite_id in self.sprite_run_events:
+            await self.sprite_run_events[sprite_id].wait()
+
+
+    def set_call_sprite_merging(self, sprite_id: str, sprite_run_id: str) -> None:
+        if sprite_id in self.sprite_merging:
+            self.sprite_merging[sprite_id][1] = sprite_run_id
+            self.sprite_merging[sprite_id][0].clear()
+        else:
+            self.sprite_merging[sprite_id] = [asyncio.Event(), sprite_run_id]
+
+    def set_call_sprite_merging_done(self, sprite_id: str, sprite_run_id: str) -> None:
+        if self.sprite_merging.get(sprite_id) and self.sprite_merging[sprite_id][1] == sprite_run_id:
+            self.sprite_merging[sprite_id][0].set()
+
+    def is_call_sprite_merging(self, sprite_id: str) -> bool:
+        if self.sprite_merging.get(sprite_id):
+            return not self.sprite_merging[sprite_id][0].is_set()
+        else:
+            return False
+
+    async def wait_for_call_sprite_merging(self, sprite_id: str) -> None:
+        if sprite_id in self.sprite_merging:
+            await self.sprite_merging[sprite_id][0].wait()
+
+    def get_merging_call_sprite_run_id(self, sprite_id: str) -> Optional[str]:
+        if sprite_id in self.sprite_merging:
+            return self.sprite_merging[sprite_id][1]
+        else:
+            return None
 
 
 
 def parse_agent_state(agent_state: list[StateEntry]) -> str:
     return '- ' + '\n- '.join([string for string in agent_state])
-
-
-async def generate_new_self_call_timesecondses(agent_id: str, current_time: datetime, is_wakeup: bool = False) -> list[TimestampUs]:
-    def is_sleep_time(seconds: float) -> bool:
-        if no_sleep_time:
-            return False
-        result = False
-        if sleep_time_start > sleep_time_end:
-            if seconds >= sleep_time_start or seconds < sleep_time_end:
-                result = True
-        else:
-            if seconds >= sleep_time_start and seconds < sleep_time_end:
-                result = True
-        return result
-
-    store_settings = await store_manager.get_settings(agent_id)
-    main_config = store_settings.main
-    if is_wakeup:
-        if main_config.always_active or not main_config.wakeup_time_range:
-            return []
-        else:
-            time_ranges = [main_config.wakeup_time_range]
-    else:
-        time_ranges = main_config.self_call_time_ranges
-    if not time_ranges:
-        return []
-    if not main_config.sleep_time_range:
-        sleep_time_start = 0.0
-        sleep_time_end = 0.0
-        no_sleep_time = True
-    else:
-        sleep_time_start = main_config.sleep_time_range[0]
-        sleep_time_end = main_config.sleep_time_range[1]
-        no_sleep_time = False
-
-    if sleep_time_start > sleep_time_end:
-        sleep_time_total = 86400 - sleep_time_start + sleep_time_end
-    else:
-        sleep_time_total = sleep_time_end - sleep_time_start
-
-    _delta = timedelta(hours=current_time.hour, minutes=current_time.minute, seconds=current_time.second, microseconds=current_time.microsecond)
-    current_date = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
-    self_call_time_secondses = []
-    # 首先看时间本身有没有在睡眠时间段，如果有则先跳过
-    if is_sleep_time(_delta.seconds):
-        if sleep_time_start > sleep_time_end:
-            _delta += timedelta(seconds=sleep_time_end + 86400 - _delta.seconds)
-        else:
-            _delta += timedelta(seconds=sleep_time_end - _delta.seconds)
-
-    for time_range in time_ranges:
-        random_seconds = random.uniform(time_range[0], time_range[1])
-        random_timedelta = timedelta(seconds=random_seconds)
-
-        # new_seconds是最终要添加的秒数
-        new_seconds = random_seconds
-        new_seconds += int(random_timedelta.seconds / (86400 - sleep_time_total)) * sleep_time_total
-        # new_timedelta只是用来检查是否在睡眠时间段
-        new_timedelta = timedelta(seconds=new_seconds) + _delta
-        while is_sleep_time(new_timedelta.seconds):
-            new_seconds += sleep_time_total
-            new_timedelta += timedelta(seconds=sleep_time_total)
-
-        _delta += timedelta(seconds=new_seconds)
-        self_call_time_secondses.append(TimestampUs(current_date + _delta))
-    return self_call_time_secondses
-
-async def generate_new_wakeup_call_timeseconds(agent_id: str, current_time: datetime) -> TimestampUs:
-    result = await generate_new_self_call_timesecondses(agent_id, current_time, is_wakeup=True)
-    if result:
-        return result[0]
-    else:
-        return TimestampUs(0)

@@ -1,6 +1,8 @@
 import json
-from typing import Union, Optional, Any
+from typing import Union, Optional, Any, Callable
 from typing_inspect import get_args, get_origin
+from copy import deepcopy
+from inspect import signature, Parameter
 from pydantic import BaseModel
 
 def is_valid_json(json_string: str) -> bool:
@@ -115,3 +117,88 @@ def get_readable_type_name(tp) -> str:
 
     else:
         return getattr(tp, '__name__', str(tp))
+
+def deep_dict_update(base: dict, new: dict, max_depth: int = -1) -> None:
+    """
+    就地深度更新字典，支持自定义递归层数
+    
+    Args:
+        base: 目标字典（将被原地修改）
+        new: 源字典（新数据）
+        max_depth: 最大递归层数
+                 0 = 仅顶层（等同于 dict.update）
+                 -1 = 无限递归（完全深度合并）
+                 N = 最多递归 N 层
+        copy: 是否对base进行深拷贝（默认False）
+        exclude_none: 是否排除new中的所有None值（默认False）
+    
+    Returns:
+        更新后的 base 字典
+    
+    示例:
+        >>> t = {"a": {"b": 1, "c": 2}}
+        >>> deep_update_dict(t, {"a": {"b": 9, "d": 3}}, max_depth=-1)
+        {'a': {'b': 9, 'c': 2, 'd': 3}}  # b 更新, c 保留, d 新增
+    """
+    def _update(t: dict, s: dict, current_depth: int):
+        for key, value in s.items():
+            if isinstance(value, dict):
+                if isinstance(t.get(key), dict) and (max_depth <= -1 or current_depth < max_depth):
+                    # 递归合并嵌套字典
+                    t[key] = _update(t.get(key, {}), value, current_depth + 1)
+                else:
+                    # 原value不是dic或超过最大递归深度，直接赋值
+                    t[key] = value.copy()
+            else:
+                # 直接赋值（替换或新增）
+                t[key] = value
+        return t
+    _update(base, new, 0)
+    return None
+
+def deep_dict_merge(base: dict, new: dict, max_depth: int = -1) -> dict:
+    """
+    深度合并字典，支持自定义递归层数
+
+    与`deep_dict_update`的区别就只是该函数会深拷贝base并返回其副本
+
+    Args:
+        base: 目标字典（将被深拷贝并返回合并后的副本）
+        new: 源字典（新数据）
+        max_depth: 最大递归层数
+                 0 = 仅顶层（等同于 dict.update）
+                 -1 = 无限递归（完全深度合并）
+                 N = 最多递归 N 层
+
+    Returns:
+        合并后的 base 字典
+
+    示例:
+        >>> t = {"a": {"b": 1, "c": 2}}
+        >>> deep_dict_merge(t, {"a": {"b": 9, "d": 3}}, max_depth=-1)
+        {'a': {'b': 9, 'c': 2, 'd': 3}}  # b 合并, c 保留, d 新增
+    """
+    result = deepcopy(base)
+    deep_dict_update(result, new, max_depth)
+    return result
+
+def exclude_none_in_dict(d: dict) -> None:
+    """排除字典中所有值为None的项，就地修改"""
+    for k in list(d.keys()):
+        if d[k] is None:
+            del d[k]
+
+def filter_kwargs(kwargs: dict[str, Any], handler: Callable) -> dict[str, Any]:
+    """过滤kwargs，只保留handler函数的参数
+
+    返回一个新的dict"""
+    # 获取函数签名，过滤参数
+    sig = signature(handler)
+    filtered_kwargs = {}
+    for param_name, param in sig.parameters.items():
+        # 如果存在**kwargs，意味着不需要过滤，直接返回
+        if param.kind == Parameter.VAR_KEYWORD:
+            return kwargs.copy()
+        elif param_name in kwargs:
+            filtered_kwargs[param_name] = kwargs[param_name]
+    return filtered_kwargs

@@ -4,31 +4,35 @@ from datetime import datetime
 from langchain.tools import ToolRuntime, tool
 
 from become_human.times import Times, format_time, format_duration, TimestampUs
-from become_human.message import BHMessageMetadata, BH_MESSAGE_METADATA_KEY
+from become_human.message import DictMsgMeta
 from become_human.scheduler import Schedule, get_schedules
 from become_human.store.manager import store_manager
-from become_human.types.main import MainContext
-from become_human.plugin import Plugin
-from become_human.manager import agent_manager
+from become_human.types.manager import CallSpriteRequest
+from become_human.plugin import BasePlugin
+from become_human.manager import sprite_manager
 
-async def agent_schedule_job(schedule: Schedule, agent_id: str, title: str, description: str) -> None:
+async def sprite_schedule_job(schedule: Schedule, sprite_id: str, title: str, description: str) -> None:
     """
-    agent提醒事项任务。
+    sprite提醒事项任务。
 
-    :param agent_id: 智能体的唯一标识符。
+    :param sprite_id: 智能体的唯一标识符。
     :param title: 提醒事项的标题，用于标识提醒事项。
     :param description: 提醒事项的详细说明，描述提醒事项的具体内容。
     """
-    time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
+    time_settings = store_manager.get_settings(sprite_id).time_settings
     current_times = Times.from_time_settings(time_settings)
 
-    time_diff = current_times.agent_world_timestampus - schedule.trigger_time
+    time_diff = current_times.sprite_world_timestampus - schedule.trigger_time
 
-    await agent_manager.call_agent_for_system(
-        agent_id=agent_id,
-        content=f'''当前时间是{format_time(current_times.agent_world_datetime)}。现在将你唤醒是由于你之前主动设置的一个提醒事项到时间了{f'（但由于系统原因，有一些超出原定时间，具体为{format_duration(time_diff)}）' if time_diff > 300 else ''}，以下是提醒事项的相关信息，包括你为此提醒事项留下的详细说明，请根据此说明考虑现在应如何行动：
+    await sprite_manager.call_sprite_for_system(
+        sprite_id=sprite_id,
+        content=f'''当前时间是{format_time(current_times.sprite_world_datetime)}。现在将你唤醒是由于你之前主动设置的一个提醒事项到时间了{f'（但由于系统原因，有一些超出原定时间，具体为{format_duration(time_diff)}）' if time_diff > 300 else ''}，以下是提醒事项的相关信息，包括你为此提醒事项留下的详细说明，请根据此说明考虑现在应如何行动：
 提醒事项标题：{title}\n提醒事项说明：{description}\n{schedule.format_schedule(prefix='提醒事项', include_id=True, include_type=False)}''',
-        times=current_times
+        times=current_times,
+        is_self_call=True,
+        bh_memory={
+            'passive_retrieval': description
+        }
     )
 
 add_reminder_schema = {
@@ -146,9 +150,9 @@ add_reminder_schema = {
     "title": "add_reminder"
 }
 
-@tool(args_schema=add_reminder_schema, response_format="content_and_artifact")
+@tool(args_schema=add_reminder_schema)
 async def add_reminder(
-    runtime: ToolRuntime[MainContext],
+    runtime: ToolRuntime[CallSpriteRequest],
     title: str,
     description: str,
     max_triggers: int,
@@ -159,7 +163,7 @@ async def add_reminder(
     monthdays: set[int] = set(),
     every_month: bool = False,
     months: set[int] = set(),
-) -> tuple[str, dict[str, Any]]:
+) -> str:
     """为自己创建一个一次性或可重复触发的提醒事项，系统将在指定时间唤醒你自己。
 
 详细说明：
@@ -187,8 +191,8 @@ async def add_reminder(
     # max_triggers没有默认值也是因为AI可能漏掉这个参数（它会以为自己写了，但实际上没有）。
     elif max_triggers != 1:
         raise ValueError("只指定了start_time则视为一次性提醒事项，此时max_triggers参数必须为1！")
-    agent_id = runtime.context.agent_id
-    time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
+    sprite_id = runtime.context.sprite_id
+    time_settings = store_manager.get_settings(sprite_id).time_settings
     if start_time:
         try:
             start_time = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
@@ -204,21 +208,22 @@ async def add_reminder(
         time_of_day_seconds = None
     content = f"添加“{title}”提醒事项成功。"
     schedule = Schedule(
-        agent_id=agent_id,
-        job=agent_schedule_job,
+        sprite_id=sprite_id,
+        schedule_provider='reminder',
+        job=sprite_schedule_job,
         job_kwargs={
-            'agent_id': agent_id,
+            'sprite_id': sprite_id,
             'title': title,
             'description': description,
         },
-        schedule_type='agent_reminder:reminder',
+        schedule_type='reminder',
         scheduled_time_of_day=time_of_day_seconds,
         scheduled_every_day=every_day,
         scheduled_weekdays=weekdays,
         scheduled_monthdays=monthdays,
         scheduled_every_month=every_month,
         scheduled_months=months,
-        time_reference='agent_world',
+        time_reference='sprite_world',
         max_triggers=max_triggers,
         trigger_time=next_run_timestampus,
     )
@@ -228,46 +233,39 @@ async def add_reminder(
         if calc_result is None:
             raise ValueError("非every_month且没有设置months意为提醒事项只在当月生效，而计算得出该提醒事项的下次触发时间却并非当月，此提醒事项无效！")
     await schedule.add_to_db()
-    artifact = {
-        BH_MESSAGE_METADATA_KEY: BHMessageMetadata(
-            creation_times=times,
-            message_type="bh:tool"
-        ).model_dump()
-    }
-    return content, artifact
+    return content
 
 @tool(response_format="content_and_artifact")
 async def list_reminders(
-    runtime: ToolRuntime[MainContext],
-) -> tuple[str, dict[str, Any]]:
+    runtime: ToolRuntime[CallSpriteRequest],
+) -> tuple[str, DictMsgMeta]:
     """列出所有已设置的提醒事项。"""
-    agent_id = runtime.context.agent_id
+    sprite_id = runtime.context.sprite_id
     schedules = await get_schedules([
-        Schedule.Condition(key='agent_id', value=agent_id),
-        Schedule.Condition(key='schedule_type', value='agent_reminder:reminder')
+        Schedule.Condition(key='sprite_id', value=sprite_id),
+        Schedule.Condition(key='schedule_provider', value='reminder'),
+        Schedule.Condition(key='schedule_type', value='reminder')
     ])
-    time_settings = (await store_manager.get_settings(agent_id)).main.time_settings
+    time_settings = store_manager.get_settings(sprite_id).time_settings
     content = f"以下是所有你已设置且还在生效的提醒事项：\n\n{'\n\n'.join(
         [f'''提醒事项标题：{schedule.job_kwargs['title']}
 {schedule.format_schedule(time_settings.time_zone, prefix='提醒事项', include_id=True, include_type=False)}''' for schedule in schedules]
     )}"
-    times = Times.from_time_settings(time_settings)
-    artifact = {
-        BH_MESSAGE_METADATA_KEY: BHMessageMetadata(
-            creation_times=times,
-            message_type="bh:tool",
-            do_not_store=True,
-        ).model_dump()
-    }
+    artifact = DictMsgMeta(
+        KEY='memory',
+        value={
+            'do_not_store': True
+        }
+    )
     return content, artifact
 
-@tool(response_format="content_and_artifact")
+@tool
 async def delete_reminder(
-    runtime: ToolRuntime[MainContext],
+    runtime: ToolRuntime[CallSpriteRequest],
     reminder_id: Annotated[str, "要删除的提醒事项的ID"],
-) -> tuple[str, dict[str, Any]]:
+) -> str:
     """删除一个已设置的提醒事项。"""
-    agent_id = runtime.context.agent_id
+    sprite_id = runtime.context.sprite_id
     try:
         schedule = await get_schedules([
             Schedule.Condition(
@@ -275,28 +273,25 @@ async def delete_reminder(
                 value=reminder_id
             ),
             Schedule.Condition(
+                key='schedule_provider',
+                value='reminder'
+            ),
+            Schedule.Condition(
                 key='schedule_type',
-                value='agent_reminder:reminder'
+                value='reminder'
             )
         ])
         schedule = schedule[0]
     except ValueError:
         raise ValueError(f"不存在 ID 为 {reminder_id} 的提醒事项！")
-    if schedule.agent_id != agent_id:
+    if schedule.sprite_id != sprite_id:
         raise ValueError("该提醒事项不是由你设置的，不能删除！")
     await schedule.delete_from_db()
     content = f"删除提醒事项“{schedule.job_kwargs['title']}”成功。"
-    times = Times.from_time_settings((await store_manager.get_settings(agent_id)).main.time_settings)
-    artifact = {
-        BH_MESSAGE_METADATA_KEY: BHMessageMetadata(
-            creation_times=times,
-            message_type="bh:tool"
-        ).model_dump()
-    }
-    return content, artifact
+    return content
 
-class AgentReminderPlugin(Plugin):
-    name = 'agent_reminder'
+class ReminderPlugin(BasePlugin):
+    name = 'reminder'
     tools = [
         add_reminder,
         list_reminders,

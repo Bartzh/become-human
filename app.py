@@ -23,9 +23,9 @@ from webpush import WebPush, WebPushSubscription
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from become_human.plugins import AgentReminderPlugin, AgentTimeIncrementerPlugin
-from become_human import agent_manager
-from become_human.message import extract_text_parts, BHMessageMetadata
+from become_human.plugins import *
+from become_human import sprite_manager
+from become_human.message import SpritesMsgMeta, convert_to_content_blocks, DEFAULT_AI_MSG_TYPE, DEFAULT_USER_MSG_TYPE
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 
 #from fastapi.middleware.cors import CORSMiddleware
@@ -46,18 +46,15 @@ logger.add(
 async def lifespan(app: FastAPI):
     # 初始化数据库
     await init_db()
-    await agent_manager.init_manager(plugins=[
-        AgentReminderPlugin,
-        AgentTimeIncrementerPlugin,
+    await sprite_manager.init_manager(plugins=[
+        PresencePlugin,
+        MemoryPlugin,
+        InstructionPlugin,
+        ReminderPlugin,
+        TimeIncrementerPlugin,
     ])
-    event_listener_task = asyncio.create_task(event_listener(agent_manager.event_queue))
     yield
-    event_listener_task.cancel()
-    try:
-        await event_listener_task
-    except asyncio.CancelledError:
-        pass
-    await agent_manager.close_manager()
+    await sprite_manager.close_manager()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -112,10 +109,10 @@ DEFAULT_USERS = {
     "default_user": {
         "password": "donotchangeifyouwantme",
         "is_admin": True,
-        "accessible_agents": [
-            "default_agent_1",
-            "default_agent_2",
-            "default_agent_3"
+        "accessible_sprites": [
+            "default_sprite_1",
+            "default_sprite_2",
+            "default_sprite_3"
         ]
     }
 }
@@ -143,38 +140,38 @@ private_key = os.getenv("APP_PRIVATE_KEY", "become-human")
 
 user_queues: dict[str, asyncio.Queue] = {}
 
-async def event_listener(queue: asyncio.Queue):
-    while True:
-        event = await queue.get()
-        for user_id in user_queues.keys():
-            if event["agent_id"] in users_db[user_id]['accessible_agents']:
-                await user_queues[user_id].put(event)
+@sprite_manager.on_sprite_output
+async def put_event(**kwargs):
+    for user_id in user_queues.keys():
+        if kwargs['sprite_id'] in users_db[user_id]['accessible_sprites']:
+            await user_queues[user_id].put(kwargs)
 
 
-@app.get("/api/get_accessible_agents")
-async def get_accessible_agents(token: str = Depends(oauth2_scheme)):
+
+@app.get("/api/get_accessible_sprites")
+async def get_accessible_sprites(token: str = Depends(oauth2_scheme)):
     payload = verify_token(token)
     user_id = payload["sub"]
-    return {'accessible_agents': users_db[user_id]['accessible_agents']}
+    return {'accessible_sprites': users_db[user_id]['accessible_sprites']}
 
 
 @app.post("/api/init")
 async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
     payload = verify_token(token)
     api_input = await request.json()
-    agent_id = api_input.get("agent_id")
+    sprite_id = api_input.get("sprite_id")
     user_id = payload['sub']
-    await verify_agent_accessible(user_id, agent_id)
+    await verify_sprite_accessible(user_id, sprite_id)
     user_queues[user_id] = asyncio.Queue()
-    await agent_manager.init_agent(agent_id)
-    main_messages = await agent_manager.main_graph.get_messages(agent_id)
+    await sprite_manager.init_sprite(sprite_id)
+    main_messages = await sprite_manager.main_graph.get_messages(sprite_id)
     human_message_pattern = re.compile(r'^\[.*?\]\n.*?: ')
     messages = []
     for message in main_messages:
-        bh_metadata = BHMessageMetadata.parse(message)
+        metadata = SpritesMsgMeta.parse(message)
         if (
-            bh_metadata.message_type != 'bh:user' and
-            bh_metadata.message_type != 'bh:ai'
+            metadata.message_type != DEFAULT_USER_MSG_TYPE and
+            metadata.message_type != DEFAULT_AI_MSG_TYPE
         ):
             continue
         elif isinstance(message, AIMessage):
@@ -207,22 +204,22 @@ async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
 async def input_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
     payload = verify_token(token)
     user_input: dict = await request.json()
-    message = user_input.get("message")
-    extracted_message = extract_text_parts(message)
+    message = user_input.get("message", '')
+    extracted_message = convert_to_content_blocks(message)
     if not extracted_message:
         raise HTTPException(status_code=400, detail="message is required")
     user_id = payload['sub']
-    agent_id = user_input.get("agent_id")
-    await verify_agent_accessible(user_id, agent_id)
+    sprite_id = user_input.get("sprite_id")
+    await verify_sprite_accessible(user_id, sprite_id)
 
     is_admin = users_db[user_id].get('is_admin')
 
-    asyncio.create_task(agent_manager.call_agent_for_user_with_command(
+    sprite_manager.call_sprite_for_user_with_command_nowait(
         user_input=extracted_message,
-        agent_id=agent_id,
+        sprite_id=sprite_id,
         is_admin=is_admin,
         user_name=user_input.get("user_name")
-    ))
+    )
 
     return Response()
 
@@ -305,15 +302,15 @@ def verify_token(token: str):
         raise HTTPException(status_code=400, detail="User not found")
     return payload
 
-async def verify_agent_accessible(user_id: Optional[str] = None, agent_id: Optional[str] = None):
+async def verify_sprite_accessible(user_id: Optional[str] = None, sprite_id: Optional[str] = None):
     if not user_id:
         raise HTTPException(status_code=400, detail="User id is required")
-    if not agent_id:
-        raise HTTPException(status_code=400, detail="agent id is required")
+    if not sprite_id:
+        raise HTTPException(status_code=400, detail="sprite id is required")
     if user_id not in users_db.keys():
         raise HTTPException(status_code=400, detail="User not found")
-    if agent_id not in users_db[user_id]['accessible_agents']:
-        raise HTTPException(status_code=400, detail="agent is not accessible")
+    if sprite_id not in users_db[user_id]['accessible_sprites']:
+        raise HTTPException(status_code=400, detail="sprite is not accessible")
 
 
 @app.post("/api/login")
@@ -404,10 +401,10 @@ async def subscribe_user(subscription: WebPushSubscription, token: str = Depends
     # global subscriptions
     payload = verify_token(token)
     user_id = payload['sub']
-    
+
     # 保存订阅到数据库
     await save_subscription(user_id, subscription)
-    
+
     return Response()
 
 

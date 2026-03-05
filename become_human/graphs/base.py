@@ -6,11 +6,10 @@ from aiosqlite import Connection
 from pydantic import BaseModel
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph, StateGraph
 from langgraph.channels.binop import _get_overwrite, _strip_extras
 
-from become_human.tool import AgentTool
+from become_human.tool import SpriteTool
 
 class BaseGraph:
 
@@ -19,7 +18,7 @@ class BaseGraph:
     conn: Connection
 
     llm: BaseChatModel
-    tools: list[AgentTool]
+    tools: list[SpriteTool]
 
     def __init__(self):
         pass
