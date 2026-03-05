@@ -19,19 +19,19 @@ from become_human.event import event_bus
 
 class PresenceConfig(StoreModel):
     _namespace = 'presence_config'
-    _readable_name = '在线状态配置'
+    _title = '在线状态配置'
 
-    user_message_types: tuple[str, ...] = StoreField(default=(DEFAULT_USER_MSG_TYPE,), readable_name='用户消息类型', description="哪些消息类型被认为是用户消息，从而触发相关操作")
-    always_available: bool = StoreField(default=False, readable_name="保持可用", description="是否一直处于可用状态，也即不存在sprite因不活跃而away的情况。若是，则available_duration_range将仅用作回收消息等功能，且passive_call依然有效，只有wakeup_call会失效")
-    available_duration_range: tuple[float, float] = StoreField(default=(1800.0, 7200.0), readable_name='在线时长随机范围', description="在线时长随机范围（最小值和最大值），在这之后进入休眠状态")
-    temporary_available_duration_range: tuple[float, float] = StoreField(default=(180.0, 1800.0), readable_name='临时在线时长随机范围', description="在无新消息时self_call后sprite获得的临时在线时长的随机范围（最小值和最大值），单位为秒。")
+    user_message_types: tuple[str, ...] = StoreField(default=(DEFAULT_USER_MSG_TYPE,), title='用户消息类型', description="哪些消息类型被认为是用户消息，从而触发相关操作")
+    always_available: bool = StoreField(default=False, title="保持可用", description="是否一直处于可用状态，也即不存在sprite因不活跃而away的情况。若是，则available_duration_range将仅用作回收消息等功能，且passive_call依然有效，只有wakeup_call会失效")
+    available_duration_range: tuple[float, float] = StoreField(default=(1800.0, 7200.0), title='在线时长随机范围', description="在线时长随机范围（最小值和最大值），在这之后进入休眠状态")
+    temporary_available_duration_range: tuple[float, float] = StoreField(default=(180.0, 1800.0), title='临时在线时长随机范围', description="在无新消息时self_call后sprite获得的临时在线时长的随机范围（最小值和最大值），单位为秒。")
     passive_call_intervals: Union[tuple[tuple[float, float]], tuple[()]] = StoreField(default=(
         (1800.0, 32400.0),
         (16200.0, 97200.0),
         (97200.0, 388800.0)
-    ), readable_name='被动自我调用时间间隔随机范围', description="在离线状态时sprite被动自我调用的时间间隔的随机范围（最小值和最大值），单位为秒，睡觉期间不算时间")
-    wakeup_call_interval: Union[tuple[float, float], tuple[()]] = StoreField(default=(1.0, 10800.0), readable_name='唤醒调用时间间隔随机范围', description="在进入离线状态后，通过发送用户消息唤醒sprite需要的时间随机范围（最小值和最大值），单位为秒")
-    sleep_time_range: Union[tuple[float, float], tuple[()]] = StoreField(default=(79200.0, 18000.0), readable_name='睡眠时间段', description="sprite进入睡眠的时间段，单位为秒。目前的作用是self_call的时间生成会跳过这个时间段。")
+    ), title='被动自我调用时间间隔随机范围', description="在离线状态时sprite被动自我调用的时间间隔的随机范围（最小值和最大值），单位为秒，睡觉期间不算时间")
+    wakeup_call_interval: Union[tuple[float, float], tuple[()]] = StoreField(default=(1.0, 10800.0), title='唤醒调用时间间隔随机范围', description="在进入离线状态后，通过发送用户消息唤醒sprite需要的时间随机范围（最小值和最大值），单位为秒")
+    sleep_time_range: Union[tuple[float, float], tuple[()]] = StoreField(default=(79200.0, 18000.0), title='睡眠时间段', description="sprite进入睡眠的时间段，单位为秒。目前的作用是self_call的时间生成会跳过这个时间段。")
 
 class PresenceState(StrEnum):
     AVAILABLE = 'available'
@@ -51,7 +51,7 @@ class PresenceState(StrEnum):
 
 class PresenceData(StoreModel):
     _namespace = 'presence_data'
-    _readable_name = '在线状态数据'
+    _title = '在线状态数据'
     presence_state: PresenceState = StoreField(default=PresenceState.AVAILABLE, description="当前状态，available, away, sleeping, offline")
     set_away_schedule_id: str = StoreField(default='', description="设置为离线状态的计划ID")
     wakeup_call_schedule_id: str = StoreField(default='', description="唤醒调用计划ID")

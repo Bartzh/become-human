@@ -11,16 +11,16 @@ from become_human.manager import sprite_manager
 
 class InstructionConfig(StoreModel):
     _namespace = 'instruction_config'
-    _readable_name = '引导提示词配置'
+    _title = '引导提示词配置'
 
-    instruction_prompt: str = StoreField(default="打个招呼吧。", readable_name="引导提示词", description="作为sprite的第一条用户消息出现，对sprite进行引导。")
-    initial_ai_messages: list[InitalAIMessage] = StoreField(default_factory=list, readable_name="初始AI消息（随机列表）", description="初始AI消息，作为instruction_prompt的回复，不是必须的。会在列表中随机选择一条")
-    react_instruction: bool = StoreField(default=False, readable_name="反应引导", description="是否以instruction_prompt调用sprite，这会覆盖initial_ai_messages。")
+    instruction_prompt: str = StoreField(default="打个招呼吧。", title="引导提示词", description="作为sprite的第一条用户消息出现，对sprite进行引导。")
+    initial_ai_messages: list[InitalAIMessage] = StoreField(default_factory=list, title="初始AI消息（随机列表）", description="初始AI消息，作为instruction_prompt的回复，不是必须的。会在列表中随机选择一条")
+    react_instruction: bool = StoreField(default=False, title="反应引导", description="是否以instruction_prompt调用sprite，这会覆盖initial_ai_messages。")
 
 class InstructionData(StoreModel):
     _namespace = 'instruction_data'
-    _readable_name = '引导提示词数据'
-    is_first_time: bool = StoreField(default=True, readable_name="是否首次运行", description="是否首次运行，首次运行时会添加引导消息。")
+    _title = '引导提示词数据'
+    is_first_time: bool = StoreField(default=True, title="是否首次运行", description="是否首次运行，首次运行时会添加引导消息。")
 
 class InstructionPlugin(BasePlugin):
     name = "instruction"

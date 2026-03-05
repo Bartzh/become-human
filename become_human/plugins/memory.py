@@ -1513,14 +1513,14 @@ PLUGIN_NAME = "bh_memory"
 
 class MemoryConfig(StoreModel):
     _namespace = PLUGIN_NAME + '_config'
-    _readable_name = "memory设置"
-    memory_base_ttl: int = StoreField(default=259200_000_000, readable_name='记忆稳定时长基值', description="记忆初始化时ttl的初始值")
-    memory_max_words: int = StoreField(default=300, readable_name='记忆最大Tokens数', description="单条记忆最大单词数，决定记忆难度，最大难度0.8")
-    recycling_trigger_threshold: int = StoreField(default=24000, readable_name='溢出回收阈值', description="触发溢出回收的阈值，单位为Token")
-    recycling_target_size: int = StoreField(default=18000, readable_name='溢出回收目标大小', description="溢出回收后目标大小，单位为Token")
-    cleanup_on_unavailable: bool = StoreField(default=False, readable_name='不可用时回收时清理', description="是否在不可用自动回收的同时清理回收的消息")
-    cleanup_target_size: int = StoreField(default=2000, readable_name='非活跃清理目标大小', description="非活跃清理后目标大小，单位为Token")
-    passive_retrieval_ttl: int = StoreField(default=3600_000_000, readable_name='被动检索存活时长', description="被动检索消息的存活时长，按sprite主观ticks计算，单位为秒，到点后会被自动清理，设为0则不清理")
+    _title = "memory设置"
+    memory_base_ttl: int = StoreField(default=259200_000_000, title='记忆稳定时长基值', description="记忆初始化时ttl的初始值")
+    memory_max_words: int = StoreField(default=300, title='记忆最大Tokens数', description="单条记忆最大单词数，决定记忆难度，最大难度0.8")
+    recycling_trigger_threshold: int = StoreField(default=24000, title='溢出回收阈值', description="触发溢出回收的阈值，单位为Token")
+    recycling_target_size: int = StoreField(default=18000, title='溢出回收目标大小', description="溢出回收后目标大小，单位为Token")
+    cleanup_on_unavailable: bool = StoreField(default=False, title='不可用时回收时清理', description="是否在不可用自动回收的同时清理回收的消息")
+    cleanup_target_size: int = StoreField(default=2000, title='非活跃清理目标大小', description="非活跃清理后目标大小，单位为Token")
+    passive_retrieval_ttl: int = StoreField(default=3600_000_000, title='被动检索存活时长', description="被动检索消息的存活时长，按sprite主观ticks计算，单位为秒，到点后会被自动清理，设为0则不清理")
     passive_retrieval_config: MemoryRetrievalConfig = StoreField(default_factory=lambda: MemoryRetrievalConfig(
         k=8,
         fetch_k=150,
@@ -1533,15 +1533,15 @@ class MemoryConfig(StoreModel):
         retrievability_weight=0.45,
         diversity_weight=0.2,
         strength=0.4
-    ), readable_name="被动检索配置")
-    active_retrieval_config: MemoryRetrievalConfig = StoreField(default_factory=MemoryRetrievalConfig, readable_name="主动检索配置")
-    summary_time_granularities: tuple[str] = StoreField(default=('year', 'month', 'week', 'day'), readable_name='总结时间粒度')
+    ), title="被动检索配置")
+    active_retrieval_config: MemoryRetrievalConfig = StoreField(default_factory=MemoryRetrievalConfig, title="主动检索配置")
+    summary_time_granularities: tuple[str] = StoreField(default=('year', 'month', 'week', 'day'), title='总结时间粒度')
 
 class MemoryData(StoreModel):
     _namespace = PLUGIN_NAME + '_data'
-    _readable_name = "memory数据"
-    last_added_memory_ids: dict[str, str] = StoreField(default_factory=dict, readable_name='上次添加的记忆id')
-    last_summarized_times: dict[str, int] = StoreField(default_factory=dict, readable_name='上次总结过的时间')
+    _title = "memory数据"
+    last_added_memory_ids: dict[str, str] = StoreField(default_factory=dict, title='上次添加的记忆id')
+    last_summarized_times: dict[str, int] = StoreField(default_factory=dict, title='上次总结过的时间')
     # {'year': 2023, 'month': 12, 'week': 52, 'day': 31, 'hour': 23, 'minute': 59, 'second': 59}
 
 

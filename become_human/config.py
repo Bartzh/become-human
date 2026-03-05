@@ -141,7 +141,7 @@ def _add_field_comments(doc: TOMLDocument, model: Type[Union[StoreModel, BaseMod
         for key, hint_type in hints.items():
             if isinstance(hint_type, type) and issubclass(hint_type, (StoreModel, BaseModel)):
                 if issubclass(hint_type, StoreModel):
-                    desc = hint_type._readable_name if hint_type._readable_name else ''
+                    desc = hint_type._title if hint_type._title else ''
                     if desc and hint_type._description:
                         desc += ': ' + hint_type._description
                     else:
@@ -149,8 +149,8 @@ def _add_field_comments(doc: TOMLDocument, model: Type[Union[StoreModel, BaseMod
                 else:
                     field = model.__dict__.get(key)
                     if field is not None and isinstance(field, StoreField):
-                        desc = field.readable_name if field.readable_name else ''
-                        if field.readable_name and field.description:
+                        desc = field.title if field.title else ''
+                        if field.title and field.description:
                             desc += '：' + field.description
                         else:
                             desc += field.description if field.description else ''
@@ -167,8 +167,8 @@ def _add_field_comments(doc: TOMLDocument, model: Type[Union[StoreModel, BaseMod
                 if field is not None and isinstance(field, StoreField):
                     doc.add(nl())
                     desc = f'<{get_readable_type_name(hint_type)}> '
-                    desc += field.readable_name if field.readable_name else ''
-                    if field.readable_name and field.description:
+                    desc += field.title if field.title else ''
+                    if field.title and field.description:
                         desc += '：' + field.description
                     else:
                         desc += field.description if field.description else ''
@@ -210,7 +210,7 @@ def _add_config_comments(doc: TOMLDocument, plugin_configs: dict[str, type[Store
     doc.add(nl())
 
     # 添加字段描述
-    desc = BuiltinSettings._readable_name if BuiltinSettings._readable_name else ''
+    desc = BuiltinSettings._title if BuiltinSettings._title else ''
     if desc and BuiltinSettings._description:
         desc += ': ' + BuiltinSettings._description
     else:
@@ -221,7 +221,7 @@ def _add_config_comments(doc: TOMLDocument, plugin_configs: dict[str, type[Store
     for store_name, store_model in plugin_configs.items():
         doc.add(nl())
         doc.add(nl())
-        desc = store_model._readable_name if store_model._readable_name else ''
+        desc = store_model._title if store_model._title else ''
         if desc and store_model._description:
             desc += ': ' + store_model._description
         else:
@@ -306,7 +306,7 @@ async def load_config(plugins_with_name: dict[str, BasePlugin], sprite_ids: Opti
                         validated_value = dump_basemodels(validated_value)
                     put_ops.append(PutOp(namespace=namespace, key=key, value={'value': validated_value}))
             else:
-                logger.warning(f"Unknown key {key} in config file with model {model._readable_name or model.__name__}, it will be ignored")
+                logger.warning(f"Unknown key {key} in config file with model {model._title or model.__name__}, it will be ignored")
         return put_ops
 
     # 不论如何都会加载全局配置
@@ -345,7 +345,7 @@ async def load_config(plugins_with_name: dict[str, BasePlugin], sprite_ids: Opti
                                 logger.warning(f"Invalid value for {key} in global config file: {e}")
                                 continue
                     else:
-                        logger.warning(f"Unknown key {key} in global config file with model {model._readable_name or model.__name__}, it will be ignored")
+                        logger.warning(f"Unknown key {key} in global config file with model {model._title or model.__name__}, it will be ignored")
 
             for key, value in load(f).unwrap().items():
                 if key == 'settings':

@@ -5,7 +5,7 @@ from become_human.store.states import BuiltinStates
 
 class BuiltinStore(StoreModel):
     _namespace = ('builtin',)
-    _readable_name = "builtin存储模型"
+    _title = "builtin存储模型"
     settings: BuiltinSettings
     states: BuiltinStates
 

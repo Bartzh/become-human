@@ -16,11 +16,11 @@ class Person(BaseModel):
 
 class BuiltinSettings(StoreModel):
     _namespace = ('settings',)
-    _readable_name = "builtin设置"
-    role_prompt: str = StoreField(default="你是一个对陌生人也抱有基本尊重的普通人。你与他人是通过一个无聊天记录（阅后即焚）的即时通讯软件远程交流的。", readable_name="角色提示词")
-    role_description: str = StoreField(default="应该是一个有用的助手吧。", readable_name="展示用角色描述", description="直接向用户显示的一段文本，描述这个角色")
-    time_settings: SpriteTimeSettings = StoreField(default_factory=SpriteTimeSettings, readable_name="时间设置")
-    character_settings: Person = StoreField(default_factory=Person, readable_name="角色设定")
+    _title = "builtin设置"
+    role_prompt: str = StoreField(default="你是一个对陌生人也抱有基本尊重的普通人。你与他人是通过一个无聊天记录（阅后即焚）的即时通讯软件远程交流的。", title="角色提示词")
+    role_description: str = StoreField(default="应该是一个有用的助手吧。", title="展示用角色描述", description="直接向用户显示的一段文本，描述这个角色")
+    time_settings: SpriteTimeSettings = StoreField(default_factory=SpriteTimeSettings, title="时间设置")
+    character_settings: Person = StoreField(default_factory=Person, title="角色设定")
 
     def format_character_settings(self, indent: int = 4, prefix: str = '- ',) -> str:
         def _format_character_setting(model: Type[BaseModel], source: dict) -> dict:

@@ -4,7 +4,7 @@ import inspect
 import importlib
 import aiosqlite
 from pydantic import BaseModel, Field, field_validator, computed_field, model_validator, ValidationInfo
-from typing import Any, Union, Optional, Self, Literal, Callable, Sequence
+from typing import Any, Union, Optional, Self, Literal, Callable, Sequence, Iterable
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import random
@@ -602,13 +602,23 @@ class Schedule(BaseModel):
         op: Literal['=', '!=', '<', '<=', '>', '>=', 'IN', 'NOT IN', 'IS', 'IS NOT', 'LIKE', 'NOT LIKE'] = Field(default='=')
         value: Any
 
+        @field_validator('value', mode='after')
+        @classmethod
+        def validate_value(cls, v: Any, info: ValidationInfo) -> Any:
+            if info.data['op'] in ['IN', 'NOT IN']:
+                if not isinstance(v, Sequence):
+                    raise ValueError(f"op为{info.data['op']}时，value必须为序列类型")
+                if not v:
+                    raise ValueError(f"op为{info.data['op']}时，value不能为空")
+            return v
+
 
 async def init_schedules_db():
     """初始化数据库和表"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS schedules (
-                sprite_id TEXT,
+                sprite_id TEXT NOT NULL DEFAULT '',
                 schedule_id TEXT PRIMARY KEY,
                 schedule_provider TEXT NOT NULL DEFAULT '',
                 schedule_type TEXT NOT NULL DEFAULT '',
@@ -664,8 +674,12 @@ async def get_schedules(
 
     if where:
         for cond in where:
-            conds.append(f"{cond.key} {cond.op} ?")
-            params.append(cond.value)
+            if cond.op in ['IN', 'NOT IN']:
+                conds.append(f"{cond.key} {cond.op} ({', '.join(['?'] * len(cond.value))})")
+                params.extend(cond.value)
+            else:
+                conds.append(f"{cond.key} {cond.op} ?")
+                params.append(cond.value)
 
     if conds:
         where_clause = f" WHERE {" AND ".join(conds)}"
@@ -763,7 +777,7 @@ async def delete_schedules(schedules: list[Union[Schedule, str]]) -> None:
 
 
 ticking = False
-async def tick_schedules(real_world_time: Optional[Union[datetime, TimestampUs]] = None) -> None:
+async def tick_schedules(sprite_ids: Optional[Iterable[str]] = None, real_world_time: Optional[Union[datetime, TimestampUs]] = None) -> None:
     global ticking
     if ticking:
         logger.warning("tick schedules 已在运行，将跳过")
@@ -800,16 +814,23 @@ async def tick_schedules(real_world_time: Optional[Union[datetime, TimestampUs]]
             if should_execute:
                 schedules_to_execute.append(schedule)
 
-        real_world_schedules = await get_schedules(where=[
+
+        real_world_where = [
             Schedule.Condition(key='time_reference', value='real_world'),
             Schedule.Condition(key='trigger_time', op='<=', value=TimestampUs(current_datetime)),
-        ])
+        ]
+        if sprite_ids is not None:
+            real_world_where.insert(0, Schedule.Condition(key='sprite_id', op='IN', value=[''] + list(sprite_ids)))
+        real_world_schedules = await get_schedules(where=real_world_where)
         for schedule in real_world_schedules:
             tick_schedule(schedule, current_datetime)
 
-        sprite_schedules = await get_schedules(where=[
+        sprite_where = [
             Schedule.Condition(key='time_reference', op='!=', value='real_world'),
-        ])
+        ]
+        if sprite_ids is not None:
+            sprite_where.insert(0, Schedule.Condition(key='sprite_id', op='IN', value=[''] + list(sprite_ids)))
+        sprite_schedules = await get_schedules(where=sprite_where)
         for schedule in sprite_schedules:
             if not schedule.sprite_id:
                 logger.error(f"schedule {schedule.schedule_id} 在time_reference为{schedule.time_reference}的情况下意外的没有指定sprite_id，将移除")
@@ -829,10 +850,19 @@ async def tick_schedules(real_world_time: Optional[Union[datetime, TimestampUs]]
 
         schedules_to_execute.sort(key=lambda x: x.trigger_time)
         for schedule in schedules_to_execute:
-            await schedule.do_job()
-            logger.debug(f"schedule {schedule.schedule_id} 执行完成")
+            # 可能在中途发生改变，这里再进行一次判断
+            if sprite_ids is not None and schedule.sprite_id not in sprite_ids:
+                continue
+            try:
+                await schedule.do_job()
+                logger.debug(f"schedule {schedule.schedule_id} 执行完成")
+            except Exception:
+                logger.exception(f"schedule {schedule.schedule_id} 执行失败")
 
         logger.debug("所有schedule tick完成")
+
+    except Exception:
+        logger.exception("tick schedules 运行时发生异常")
 
     finally:
         ticking = False

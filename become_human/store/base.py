@@ -206,7 +206,7 @@ class UnsetType:
 Unset = UnsetType()
 
 class StoreField(BaseModel):
-    readable_name: Optional[str] = Field(default=None)
+    title: Optional[str] = Field(default=None)
     description: Optional[str] = Field(default=None)
     default: Union[Any, UnsetType] = Field(default=Unset)
     default_factory: Optional[Callable[[], Any]] = Field(default=None)
@@ -285,7 +285,7 @@ class StoreField(BaseModel):
         return self.get_default_value(), False
 
 class StoreItem(BaseModel):
-    readable_name: Optional[Union[str, UnsetType]] = Field(default=Unset, exclude_if=Unset.is_unset)
+    title: Optional[Union[str, UnsetType]] = Field(default=Unset, exclude_if=Unset.is_unset)
     description: Optional[Union[str, UnsetType]] = Field(default=Unset, exclude_if=Unset.is_unset)
     value: Union[Any, UnsetType] = Field(default=Unset, exclude_if=Unset.is_unset)
 
@@ -313,7 +313,7 @@ class StoreModel:
 
     _sprite_id: str
     _namespace: tuple[str, ...]
-    _readable_name: Optional[str] = None
+    _title: Optional[str] = None
     _description: Optional[str] = None
     _cache: dict[str, StoreItem]
     _frozen: bool
@@ -380,7 +380,7 @@ class StoreModel:
                     else:
                         value = Unset
                 cached[item.key] = StoreItem(
-                    readable_name=item.value.get('readable_name', Unset),
+                    title=item.value.get('title', Unset),
                     description=item.value.get('description', Unset),
                     value=value
                 )
@@ -489,14 +489,14 @@ class StoreModel:
         else:
             raise AttributeError(f"'{cls.__name__}' 不存在 '{field_name}' 或其不是 StoreField。")
 
-    def get_field_readable_name(self, field_name: str) -> str | None:
-        """获取字段的可读名称字符串。注意，这是一个实例方法，当字段里无可读名称时，会尝试从数据库中获取。需要类方法请调用get_field(field_name).readable_name。"""
+    def get_field_title(self, field_name: str) -> str | None:
+        """获取字段的可读名称字符串。注意，这是一个实例方法，当字段里无可读名称时，会尝试从数据库中获取。需要类方法请调用get_field(field_name).title。"""
         meta = self.__class__.get_field(field_name)
-        readable_name = meta.readable_name if meta else None
-        if readable_name is None:
+        title = meta.title if meta else None
+        if title is None:
             item = self._cache.get(field_name)
-            readable_name = item.readable_name if item else None
-        return readable_name
+            title = item.title if item else None
+        return title
 
     def get_field_description(self, field_name: str) -> str | None:
         """获取字段的描述字符串。注意，这是一个实例方法，当字段里无描述时，会尝试从数据库中获取。需要类方法请调用get_field(field_name).description。"""
@@ -522,7 +522,7 @@ class StoreModel:
         if not self._frozen:
             result['_sprite_id'] = self._sprite_id
         result['_namespace'] = self._namespace
-        result['_readable_name'] = self._readable_name
+        result['_title'] = self._title
         result['_description'] = self._description
         return deepcopy(result)
 
@@ -562,13 +562,13 @@ class StoreModel:
                         field_kwargs['default_factory'] = field_def.default_factory
                     if field_def.description:
                         field_kwargs['description'] = field_def.description
-                    if field_def.readable_name:
-                        field_kwargs['title'] = field_def.readable_name
+                    if field_def.title:
+                        field_kwargs['title'] = field_def.title
                     fields[field_name] = (field_type, Field(**field_kwargs))
                 elif isinstance(field_type, type) and issubclass(field_type, StoreModel):
                     field_kwargs = {'default_factory': field_type}
-                    if field_type._readable_name:
-                        field_kwargs['title'] = field_type._readable_name
+                    if field_type._title:
+                        field_kwargs['title'] = field_type._title
                     if field_type._description:
                         field_kwargs['description'] = field_type._description
                     fields[field_name] = (field_type.get_pydantic_model(), Field(**field_kwargs))

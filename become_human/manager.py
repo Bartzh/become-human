@@ -242,7 +242,7 @@ class SpriteManager:
         """trigger所有sprite，如果上一次trigger_sprites正在运行则跳过"""
         if self.on_trigger_sprites_finished.is_set():
             self.on_trigger_sprites_finished.clear()
-            await tick_schedules()
+            await tick_schedules(self.activated_sprite_id_datas.keys())
             # 这里暂时看起来有些奇怪，之后会考虑把trigger_sprite放到tick_schedules中
             tasks = [self.trigger_sprite(sprite_id) for sprite_id in self.activated_sprite_id_datas.keys()]
             await asyncio.gather(*tasks)
@@ -320,6 +320,8 @@ class SpriteManager:
         if self.activated_sprite_id_datas.get(sprite_id):
             await self.activated_sprite_id_datas[sprite_id]['on_trigger_finished'].wait()
             del self.activated_sprite_id_datas[sprite_id]
+        # 干脆直接等所有都处理完，因为这才包含了schedules
+        await self.on_trigger_sprites_finished.wait()
         for plugin in self.get_plugins(sprite_id):
             # 如果插件在运行途中被禁用，则不会调用on_sprite_close，这可能存在问题
             try:

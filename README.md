@@ -269,7 +269,6 @@ flowchart TD
 
 TODO:
 - 元数据改名
-- readable_name改名
 - 测试
 - 记忆调参
 - 全天总结，按时间段的总结

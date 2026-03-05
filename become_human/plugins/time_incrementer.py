@@ -10,11 +10,11 @@ from become_human.manager import sprite_manager
 
 class TimeIncrementerStore(StoreModel):
     _namespace = 'time_incrementer_config'
-    _readable_name = '时间增量器配置'
+    _title = '时间增量器配置'
     _description = '用于在每次call_sprite之后根据配置的规则（加1或根据调用耗时，再乘上一个系数）跳过sprite的时间'
 
-    increase_by: Literal['one', 'elapsed'] = StoreField(default='one', readable_name='增量方式', description='加1或根据调用耗时')
-    multiplier: float = StoreField(default=1.0, readable_name='系数', description='increase_by将要乘以的系数')
+    increase_by: Literal['one', 'elapsed'] = StoreField(default='one', title='增量方式', description='加1或根据调用耗时')
+    multiplier: float = StoreField(default=1.0, title='系数', description='increase_by将要乘以的系数')
 
 class TimeIncrementerPlugin(BasePlugin):
     name = 'time_incrementer'
