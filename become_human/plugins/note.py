@@ -1,10 +1,11 @@
-from typing import Annotated, Optional
+from typing import Annotated, Optional, override
 from dataclasses import dataclass
 from langchain.tools import tool, ToolRuntime
 from become_human.store.base import StoreModel, StoreField
 from become_human.store.manager import store_manager
 from become_human.manager import CallSpriteRequest
 from become_human.plugin import *
+from become_human.config import get_sprite_enabled_plugin_names
 
 NAME = 'note'
 
@@ -84,3 +85,21 @@ class NotePlugin(BasePlugin):
     name = NAME
     data = NoteData
     tools = [list_notes, read_note, write_note, delete_note]
+
+    @override
+    async def before_call_model(self, request: CallSpriteRequest, info: BeforeCallModelInfo, /) -> None:
+        if 'bh_memory' in get_sprite_enabled_plugin_names(request.sprite_id):
+            self.prompts = PluginPrompts(
+                secondary=PluginPrompt(
+                    title="笔记系统",
+                    content='''俗话说好记性不如烂笔头，尽管你已经有了一个记忆系统，但笔记依然是很有用的东西。
+相比起记忆，笔记的优点是永久保存，可修改，不会遗忘。
+缺点是无法向量检索，只能先通过`list_notes`来查询所有笔记的标题，然后通过`read_note`来读取具体的笔记内容。
+所以，虽然它不会被遗忘，但也没有记忆那么灵活，如果滥用容易变得杂乱无章，你应该：
+- 用它来记录那些易于管理，会有明确的时机去修改或删除的内容（防止笔记越来越多越来越乱）
+- 用它来记录那些真正重要的，你无论如何都不想忘掉的东西
+- 在角色扮演中以上两点也许更容易理解，结合你的角色设定与当下场景思考：什么事是我想认真拿笔记下来的？什么事是我懒得用笔记只想在脑子里过一下的？'''
+                )
+            )
+        else:
+            self.prompts = PluginPrompts()
