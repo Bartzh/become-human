@@ -4,7 +4,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from dateutil.relativedelta import relativedelta
-from typing import Any, Iterator, Literal, Self, Union, Optional, override
+from typing import Any, Iterator, Literal, Self, Union, Optional, override, Annotated
 from pydantic import BaseModel, Field
 from uuid import uuid4
 import numpy as np
@@ -2147,12 +2147,12 @@ summary_memories_schema = {
 
 
 
-async def connect_last_memory(sprite_id: str, memory_type: AnyMemoryType, new_memory_ids: list[str]) -> Optional[str]:
+def connect_last_memory(sprite_id: str, memory_type: AnyMemoryType, new_memory_ids: list[str]) -> Optional[str]:
     data_store = store_manager.get_model(sprite_id, MemoryData)
     last_added_memory_ids = data_store.last_added_memory_ids
     if last_added_memory_ids.get(memory_type):
         last_id = last_added_memory_ids[memory_type]
-        await memory_manager.aupdate_metadatas(
+        memory_manager.update_metadatas(
             ids=[last_id],
             metadatas=[{'next_memory_id': new_memory_ids[0]}],
             memory_type=memory_type,
@@ -2179,7 +2179,7 @@ async def recycle_original_memories(sprite_id: str, input_messages: list[AnyMess
     if messages_len == 0:
         return
 
-    last_id = await connect_last_memory(sprite_id, 'original', message_ids)
+    last_id = connect_last_memory(sprite_id, 'original', message_ids)
 
     for i, message in enumerate(content_and_kwargs):
         stable_mult = random.expovariate(0.8) #TODO:这个值应该由文本的情感强烈程度来决定
@@ -2226,7 +2226,7 @@ async def recycle_episodic_memories(sprite_id: str, input_messages: list[AnyMess
             logger.warning(f"{sprite_id} 没有提取到任何 episodic memories")
             return
 
-        last_id = await connect_last_memory(sprite_id, 'episodic', episodic_memory_ids)
+        last_id = connect_last_memory(sprite_id, 'episodic', episodic_memory_ids)
 
         for i, episodic_memory in enumerate(episodic_memories):
             extracted_memories.append(InitialMemory(
@@ -2274,7 +2274,7 @@ async def recycle_reflective_memories(sprite_id: str, input_messages: list[AnyMe
     memories = []
 
     if reflective_memories_len > 0:
-        last_id = await connect_last_memory(sprite_id, 'reflective', ids)
+        last_id = connect_last_memory(sprite_id, 'reflective', ids)
         memories.extend([InitialMemory(
             content=memory,
             ttl=int(random.expovariate(0.4) * base_ttl),
@@ -2306,7 +2306,7 @@ async def recycle_reflective_memories(sprite_id: str, input_messages: list[AnyMe
             )]
         ).construct_messages(times_after))
         if 'original' in store_manager.get_model(sprite_id, MemoryConfig).memory_types:
-            last_id = await connect_last_memory(sprite_id, 'original', [process[1].id])
+            last_id = connect_last_memory(sprite_id, 'original', [process[1].id])
             memories.append(InitialMemory(
                 content=process[1].content,
                 ttl=int(random.expovariate(0.4) * base_ttl),
@@ -3086,6 +3086,31 @@ async def retrieve_memories_tool(
     )
     return content, artifact
 
+@tool('add_memory')
+async def add_memory_tool(
+    runtime: ToolRuntime[CallSpriteRequest],
+    content: Annotated[str, "记忆内容"],
+) -> str:
+    """主动添加一条记忆，将作为semantic类型的记忆被记住（一段时间）"""
+    if not content.strip():
+        return "记忆内容不能为空"
+    sprite_id = runtime.context.sprite_id
+    base_ttl = store_manager.get_model(sprite_id, MemoryConfig).memory_base_ttl
+    new = str(uuid4())
+    last = connect_last_memory(sprite_id, 'reflective', [new])
+    await memory_manager.add_memories([
+        InitialMemory(
+            content=content,
+            type='reflective',
+            creation_times=Times.from_time_settings(store_manager.get_settings(sprite_id).time_settings),
+            ttl=int(random.expovariate(0.4) * base_ttl),
+            id=new,
+            previous_memory_id=last
+        ),
+        sprite_id
+    ])
+    return "记忆添加成功"
+
 
 
 @event_bus.on('bh_presence:on_presence_changed')
@@ -3159,7 +3184,7 @@ class MemoryPlugin(BasePlugin):
     dependencies = [PluginDependency(name='bh_presence')]
     config = MemoryConfig
     data = MemoryData
-    tools = [SpriteTool(retrieve_memories_tool, hide_by_default=True)]
+    tools = [SpriteTool(retrieve_memories_tool, hide_by_default=True), add_memory_tool]
 
     @override
     async def on_sprite_init(self, sprite_id: str, /) -> None:
