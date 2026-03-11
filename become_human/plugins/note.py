@@ -20,7 +20,7 @@ class NoteData(StoreModel):
 
 
 @tool
-def list_notes(runtime: ToolRuntime[CallSpriteRequest]) -> str:
+async def list_notes(runtime: ToolRuntime[CallSpriteRequest]) -> str:
     """列出所有笔记（的标题）"""
     notes = store_manager.get_model(runtime.context.sprite_id, NoteData).notes
     if not notes:
@@ -28,7 +28,7 @@ def list_notes(runtime: ToolRuntime[CallSpriteRequest]) -> str:
     return "\n".join([f"{note_id}. {note.title}" for note_id, note in notes.items()])
 
 @tool
-def read_note(runtime: ToolRuntime[CallSpriteRequest], id: Annotated[int, "笔记ID"]) -> str:
+async def read_note(runtime: ToolRuntime[CallSpriteRequest], id: Annotated[int, "笔记ID"]) -> str:
     """读取指定笔记"""
     notes = store_manager.get_model(runtime.context.sprite_id, NoteData).notes
     if not notes:
@@ -39,7 +39,7 @@ def read_note(runtime: ToolRuntime[CallSpriteRequest], id: Annotated[int, "笔�
     return note.content
 
 @tool
-def write_note(
+async def write_note(
     runtime: ToolRuntime[CallSpriteRequest],
     title: Annotated[str, "笔记标题"],
     content: Annotated[str, "笔记内容"],
@@ -70,7 +70,7 @@ def write_note(
     return content
 
 @tool
-def delete_note(runtime: ToolRuntime[CallSpriteRequest], id: Annotated[int, "笔记ID"]) -> str:
+async def delete_note(runtime: ToolRuntime[CallSpriteRequest], id: Annotated[int, "笔记ID"]) -> str:
     """删除笔记"""
     data = store_manager.get_model(runtime.context.sprite_id, NoteData)
     if id not in data.notes:
