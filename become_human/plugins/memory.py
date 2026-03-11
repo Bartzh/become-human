@@ -3,6 +3,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
+from dateutil.relativedelta import relativedelta
 from typing import Any, Iterator, Literal, Self, Union, Optional, override
 from pydantic import BaseModel, Field
 from uuid import uuid4
@@ -50,7 +51,7 @@ from langchain.chat_models import BaseChatModel
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from become_human.times import format_time, Times, TimestampUs, AnyTz
+from become_human.times import format_time, Times, TimestampUs, AnyTz, get_week
 from become_human.store.base import StoreModel, StoreField
 from become_human.store.manager import store_manager
 from become_human.utils import parse_env_array, to_json_like_string
@@ -71,25 +72,13 @@ from become_human.message import (
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT, SEND_MESSAGE_TOOL_CONTENT
 from become_human.tools.record_thoughts import RECORD_THOUGHTS, RECORD_THOUGHTS_CONTENT, RECORD_THOUGHTS_TOOL_CONTENT
 from become_human.manager import sprite_manager
+from become_human.tool import SpriteTool
 
 from langchain_core.runnables.config import run_in_executor
 
 
-AnyMemoryType = Literal["original", "episodic", "reflective"]
-MEMORY_TYPES = ["original", "episodic", "reflective"]
-
-_cached_memory_types: list[AnyMemoryType] = []
-def get_activated_memory_types() -> list[AnyMemoryType]:
-    global _cached_memory_types
-    if _cached_memory_types:
-        return _cached_memory_types
-    memory_types = parse_env_array(os.getenv('MEMORY_TYPES'))
-    memory_types = [t.lower() for t in set(memory_types) if t.lower() in MEMORY_TYPES]
-    if not memory_types:
-        # 默认不再包含episodic
-        memory_types = ['original', 'reflective']
-    _cached_memory_types = memory_types # type: ignore
-    return _cached_memory_types
+AnyMemoryType = Literal["original", "reflective", "summary"]
+MEMORY_TYPES: list[AnyMemoryType] = ["original", "reflective", "summary"]
 
 
 @dataclass
@@ -285,6 +274,7 @@ class InitialMemory(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()), description="The id of the memory")
     previous_memory_id: Optional[str] = Field(default=None, description="The previous memory id")
     next_memory_id: Optional[str] = Field(default=None, description="The next memory id")
+    extra: Optional[dict] = Field(default=None, description="额外信息")
 
 class RetrievedMemory(BaseModel):
     doc: Document = Field(description="The memory document")
@@ -298,19 +288,31 @@ class RetrievedMemoryGroup(BaseModel):
 
 
 class MemoryRetrievalConfig(BaseModel):
-    k: int = Field(default=16, ge=0, description="检索返回的记忆数量")
-    fetch_k: int = Field(default=250, ge=0, description="从多少个结果中筛选出最终的结果")
-    stable_k: int = Field(default=10, ge=0, description="最终显示几个完整的记忆，剩下的记忆会被简略化")
-    depth: int = Field(default=2, ge=0, description="检索的记忆深度，会在0之间随机取值，指被检索记忆的相邻n个记忆也会被召回")
-    original_ratio: float = Field(default=2.0, description="检索结果中原始记忆出现的初始比例", ge=0.0)
-    episodic_ratio: float = Field(default=4.0, description="检索结果中情景记忆出现的初始比例", ge=0.0)
-    reflective_ratio: float = Field(default=5.0, description="检索结果中反思记忆出现的初始比例", ge=0.0)
-    search_method: Literal['similarity', 'mmr'] = Field(default='mmr', description="检索排序算法：[similarity, mmr]")
-    similarity_weight: float = Field(default=0.5, description="检索权重：相似性权重，范围[0,1]，总和需为1", ge=0.0, le=1.0)
-    retrievability_weight: float = Field(default=0.25, description="检索权重：可访问性权重，范围[0,1]，总和需为1", ge=0.0, le=1.0)
-    diversity_weight: float = Field(default=0.25, description="检索权重：多样性权重，范围[0,1]。只在检索方法为mmr时生效，总和需为1", ge=0.0, le=1.0)
-    strength: float = Field(default=1.0, description="检索强度，作为倍数将乘以被检索记忆的可检索性、稳定时长与难易度的提升幅度，范围[0,1]，作为主动检索时固定为1")
+    class Retrieval(BaseModel):
+        memory_type: AnyMemoryType = Field(description="要检索的记忆类型")
+        k: int = Field(gt=0, description="检索返回的记忆数量")
+        fetch_k: int = Field(default=100, gt=0, description="从多少个结果中筛选出最终的结果")
+        depth: int = Field(default=0, ge=0, description="检索的记忆深度，会在0之间随机取值，指被检索记忆的相邻n个记忆也会被召回")
+        retrieve_method: Literal['similarity', 'mmr'] = Field(default='mmr', description="检索排序算法：[similarity, mmr]")
+        similarity_weight: float = Field(default=0.35, description="检索权重：相似性权重，范围[0,1]，总和需为1", ge=0.0, le=1.0)
+        retrievability_weight: float = Field(default=0.35, description="检索权重：可访问性权重，范围[0,1]，总和需为1", ge=0.0, le=1.0)
+        diversity_weight: float = Field(default=0.3, description="检索权重：多样性权重，范围[0,1]。只在检索方法为mmr时生效，总和需为1", ge=0.0, le=1.0)
 
+    # k: int = Field(default=16, ge=0, description="检索返回的记忆数量")
+    # fetch_k: int = Field(default=250, ge=0, description="从多少个结果中筛选出最终的结果")
+    # depth: int = Field(default=2, ge=0, description="检索的记忆深度，会在0之间随机取值，指被检索记忆的相邻n个记忆也会被召回")
+    # original_ratio: float = Field(default=2.0, description="检索结果中原始记忆出现的初始比例", ge=0.0)
+    # reflective_ratio: float = Field(default=5.0, description="检索结果中反思记忆出现的初始比例", ge=0.0)
+    # summary_ratio: float = Field(default=1.0, description="检索结果中总结记忆出现的初始比例", ge=0.0)
+    # search_method: Literal['similarity', 'mmr'] = Field(default='mmr', description="检索排序算法：[similarity, mmr]")
+    # similarity_weight: float = Field(default=0.5, description="检索权重：相似性权重，范围[0,1]，总和需为1", ge=0.0, le=1.0)
+    # retrievability_weight: float = Field(default=0.25, description="检索权重：可访问性权重，范围[0,1]，总和需为1", ge=0.0, le=1.0)
+    # diversity_weight: float = Field(default=0.25, description="检索权重：多样性权重，范围[0,1]。只在检索方法为mmr时生效，总和需为1", ge=0.0, le=1.0)
+
+    retrievals: list[Retrieval] = Field(default_factory=list, description="要检索的记忆类型")
+    stable_k: int = Field(default=5, ge=0, description="最终显示几个完整的记忆，剩下的记忆会被简略化")
+    strength: float = Field(default=1.0, description="检索强度，作为倍数将乘以被检索记忆的可检索性、稳定时长与难易度的提升幅度，范围[0,1]，作为主动检索时固定为1")
+    weight: float = Field(default=1.0, ge=0, description="若有多个config，随机选中此config的概率权重（random.choices(configs, weights)）")
 
 
 class MemoryManager():
@@ -327,7 +329,7 @@ class MemoryManager():
     async def tick_all_memories(self, sprite_id: str) -> None:
         """更新所有记忆"""
         update_count = 0
-        for t in get_activated_memory_types():
+        for t in store_manager.get_model(sprite_id, MemoryConfig).memory_types:
             result = await self.aget(
                 sprite_id=sprite_id,
                 memory_type=t,
@@ -377,7 +379,8 @@ class MemoryManager():
             creation_times = memory.creation_times
             memory_of_day = calculate_memory_of_day(creation_times.sprite_world_datetime)
             ttl = int(memory.ttl * (1 - difficulty) * memory_of_day) # 稳定性，决定了可检索性的衰减速度
-            metadata = generate_time_metadatas(creation_times, 'creation')
+            metadata = memory.extra or {}
+            metadata.update(generate_time_metadatas(creation_times, 'creation'))
             metadata.update(generate_time_metadatas(creation_times, 'last_accessed'))
             metadata.update({
                 "ttl": ttl, # 稳定ticks
@@ -407,8 +410,8 @@ class MemoryManager():
     async def retrieve_memories(
         self,
         sprite_id: str,
-        retrieval_config: MemoryRetrievalConfig,
-        memory_type: Optional[AnyMemoryType] = None,
+        retrieval_configs: tuple[MemoryRetrievalConfig, ...],
+        #memory_type: Optional[AnyMemoryType] = None,
         search_string: Optional[str] = None,
         creation_time_range_start: Optional[Union[datetime, float]] = None,
         creation_time_range_end: Optional[Union[datetime, float]] = None,
@@ -421,24 +424,22 @@ class MemoryManager():
         if not search_string and not (creation_time_range_start or creation_time_range_end):
             raise ValueError("在search_string和creation_time_range中至少需要一个有效输入参数")
 
-        inputs = {t: {} for t in get_activated_memory_types()}
-        filters = []
+        if not retrieval_configs:
+            return []
 
-        total_ratio = 0.0
-        for key, value in inputs.items():
-            ratio = getattr(retrieval_config, key+'_ratio', 0.0)
-            if key == memory_type:
-                ratio *= (2.0 + max((retrieval_config.strength - 1.0), 0.0)) # 基于strength超过1的部分额外增加权重
-                if memory_type == "original":
-                    ratio *= 1.5 # 给original类型的记忆权重额外一些补偿，由于其比较少见且search_string可能不那么通用
-            total_ratio += ratio
-            value['ratio'] = ratio
-        if total_ratio == 0.0:
-            raise ValueError("所有检索类型的权重和为0，配置存在错误，请忽略并暂停使用此工具。")
-        for key, value in inputs.items():
-            value['proportion'] = value['ratio'] / total_ratio
-            value['k'] = int(retrieval_config.k * value['proportion'])
-            value['fetch_k'] = int(retrieval_config.fetch_k * value['proportion'])
+        if len(retrieval_configs) == 1:
+            retrieval_config = retrieval_configs[0]
+        else:
+            retrieval_config = random.choices(
+                retrieval_configs,
+                [c.weight for c in retrieval_configs]
+            )[0]
+
+        if not retrieval_config.retrievals:
+            return []
+
+
+        filters = []
 
         if creation_time_range_start:
             if isinstance(creation_time_range_start, datetime):
@@ -468,12 +469,12 @@ class MemoryManager():
             sprite_time_settings = store_manager.get_settings(sprite_id).time_settings
             current_times = Times.from_time_settings(sprite_time_settings)
 
-            for key, value in inputs.items():
+            for retrieval in retrieval_config.retrievals:
                 get_results = await self.aget(
                     sprite_id=sprite_id,
-                    memory_type=key,
+                    memory_type=retrieval.memory_type,
                     where=filters,
-                    limit=value["k"],
+                    limit=retrieval.k,
                 )
                 docs = get_result_to_docs(get_results)
                 ids = []
@@ -488,7 +489,7 @@ class MemoryManager():
                         strength=retrieval_config.strength
                     )
                     if patched_metadata.get("forgot"):
-                        ids_to_delete[key].add(doc.id)
+                        ids_to_delete[retrieval.memory_type].add(doc.id)
                     else:
                         ids.append(doc.id)
                         metadatas.append(patched_metadata)
@@ -507,7 +508,7 @@ class MemoryManager():
                                 score=doc.metadata["retrievability"],
                                 retrievability=doc.metadata["retrievability"]
                             ))
-                await self.aupdate_metadatas(ids, metadatas, key, sprite_id)
+                await self.aupdate_metadatas(ids, metadatas, retrieval.memory_type, sprite_id)
                 if first_memory:
                     retrievabilities_avg = sum(retrievabilities) / len(retrievabilities)
                     combined_memories_and_scores.append((RetrievedMemoryGroup(
@@ -528,32 +529,32 @@ class MemoryManager():
             current_times = Times.from_time_settings(sprite_time_settings)
 
             # 对每个输入类型执行向量搜索
-            for key, value in inputs.items():
-                if retrieval_config.search_method == "similarity":
+            for retrieval in retrieval_config.retrievals:
+                if retrieval.retrieve_method == "similarity":
                     docs_and_scores = await self.asimilarity_search_by_vector_with_score_and_retrievability(
                         embedding=search_embedding,
                         sprite_id=sprite_id,
-                        memory_type=key,
-                        k=value["k"],
-                        fetch_k=value["fetch_k"],
-                        similarity_weight=retrieval_config.similarity_weight,
-                        retrievability_weight=retrieval_config.retrievability_weight,
+                        memory_type=retrieval.memory_type,
+                        k=retrieval.k,
+                        fetch_k=retrieval.fetch_k,
+                        similarity_weight=retrieval.similarity_weight,
+                        retrievability_weight=retrieval.retrievability_weight,
                         filter=filters
                     )
-                elif retrieval_config.search_method == "mmr":
+                elif retrieval.retrieve_method == "mmr":
                     docs_and_scores = await self.amax_marginal_relevance_search_by_vector_with_retrievability(
                         embedding=search_embedding,
                         sprite_id=sprite_id,
-                        memory_type=key,
-                        k=value["k"],
-                        fetch_k=value["fetch_k"],
-                        similarity_weight=retrieval_config.similarity_weight,
-                        retrievability_weight=retrieval_config.retrievability_weight,
-                        diversity_weight=retrieval_config.diversity_weight,
+                        memory_type=retrieval.memory_type,
+                        k=retrieval.k,
+                        fetch_k=retrieval.fetch_k,
+                        similarity_weight=retrieval.similarity_weight,
+                        retrievability_weight=retrieval.retrievability_weight,
+                        diversity_weight=retrieval.diversity_weight,
                         filter=filters
                     )
                 else:
-                    raise ValueError("未知的检索方法: " + str(retrieval_config.search_method))
+                    raise ValueError("未知的检索方法: " + str(retrieval.retrieve_method))
 
                 ids = []
                 metadatas = []
@@ -567,7 +568,7 @@ class MemoryManager():
                         strength=strength
                     )
                     if patched_metadata.get("forgot"):
-                        ids_to_delete[key].add(doc.id)
+                        ids_to_delete[retrieval.memory_type].add(doc.id)
                     else:
                         # 加入待更新列表，若已存在则替换为新的metadata
                         if doc.id in ids:
@@ -579,7 +580,7 @@ class MemoryManager():
 
                         # 根据深度寻找源记忆相邻的n个记忆
                         # 超过1的strength会增加深度，并在0之间随机取值
-                        depth = random.randint(0, int(retrieval_config.depth * max(strength, 1.0)))
+                        depth = random.randint(0, int(retrieval.depth * max(strength, 1.0)))
                         source_retrievability = doc.metadata["retrievability"]
                         source_memory = RetrievedMemory(
                             doc=doc,
@@ -625,7 +626,7 @@ class MemoryManager():
                                         strength=strength * weight
                                     )
                                     if patched_metadata.get("forgot"):
-                                        ids_to_delete[key].add(get_result["ids"][0])
+                                        ids_to_delete[retrieval.memory_type].add(get_result["ids"][0])
                                         current_docs_and_weights[direction] = None
                                     else:
                                         related_doc = Document(
@@ -652,7 +653,7 @@ class MemoryManager():
                             source_memory=source_memory
                         ), score))
 
-                await self.aupdate_metadatas(ids, metadatas, key, sprite_id)
+                await self.aupdate_metadatas(ids, metadatas, retrieval.memory_type, sprite_id)
                 combined_memories_and_scores.extend(memories_list)
 
 
@@ -683,9 +684,9 @@ class MemoryManager():
                 if index < retrieval_config.stable_k and score < 0.35:
                     # 计算要替换的字符比例，score从0.35到0对应替换比例从0到1
                     replacement_ratio = min(1 - (score / 0.35), 0.8)  # 0.35->0, 0->1
-                # 对于非stable的记忆，超过15个字符后长度越长，被消掉的字符的比例会越高
-                elif index >= retrieval_config.stable_k and content_length > 15:
-                    length_scale = min((content_length - 15) / 35, 1.0)
+                # 对于非stable的记忆，超过25个字符后长度越长，被消掉的字符的比例会越高
+                elif index >= retrieval_config.stable_k and content_length > 25:
+                    length_scale = min((content_length - 25) / 55, 1.0)
                     replacement_ratio = length_scale * random.uniform(0.6, 0.9)
                 else:
                     continue
@@ -699,6 +700,7 @@ class MemoryManager():
                 # 随机选择要替换的字符位置
                 chars_to_replace = random.sample(range(content_length), num_chars_to_replace)
                 # 将选中的字符替换为星号
+                # TODO 改成省略号，而不是一堆*
                 for i in chars_to_replace:
                     content_list[i] = '*'
                 # 重新组合成字符串
@@ -1473,19 +1475,18 @@ def format_retrieved_memory_groups(groups: list[RetrievedMemoryGroup], time_zone
 
 
 def generate_time_metadatas(times: Times, prefix: str) -> dict:
-    def _generate_time_metadatas(timestampus: TimestampUs, datetime: datetime, time_type: str) -> dict:
-        datetime_isocalendar = datetime.isocalendar()
+    def _generate_time_metadatas(timestampus: TimestampUs, dt: datetime, time_type: str) -> dict:
         return {
             f"{prefix}_{time_type}_timestampus": timestampus,
-            f"{prefix}_{time_type}_datetime_iso": datetime.isoformat(),
-            f"{prefix}_{time_type}_datetime_year": datetime.year,
-            f"{prefix}_{time_type}_datetime_month": datetime.month,
-            f"{prefix}_{time_type}_datetime_week": datetime_isocalendar.week,
-            f"{prefix}_{time_type}_datetime_day": datetime.day,
-            f"{prefix}_{time_type}_datetime_hour": datetime.hour,
-            f"{prefix}_{time_type}_datetime_minute": datetime.minute,
-            f"{prefix}_{time_type}_datetime_second": datetime.second,
-            f"{prefix}_{time_type}_datetime_weekday": datetime_isocalendar.weekday,
+            f"{prefix}_{time_type}_datetime_iso": dt.isoformat(),
+            f"{prefix}_{time_type}_datetime_year": dt.year,
+            f"{prefix}_{time_type}_datetime_month": dt.month,
+            f"{prefix}_{time_type}_datetime_week": get_week(dt),
+            f"{prefix}_{time_type}_datetime_day": dt.day,
+            f"{prefix}_{time_type}_datetime_hour": dt.hour,
+            f"{prefix}_{time_type}_datetime_minute": dt.minute,
+            f"{prefix}_{time_type}_datetime_second": dt.second,
+            f"{prefix}_{time_type}_datetime_weekday": dt.weekday(),
         }
     result = {}
     for time_type in ['real_world', 'sprite_world']:
@@ -1514,34 +1515,95 @@ PLUGIN_NAME = "bh_memory"
 class MemoryConfig(StoreModel):
     _namespace = PLUGIN_NAME + '_config'
     _title = "memory设置"
+    memory_types: tuple[AnyMemoryType, ...] = StoreField(default=('original', 'reflective', 'summary'), title='启用的记忆类型')
     memory_base_ttl: int = StoreField(default=259200_000_000, title='记忆稳定时长基值', description="记忆初始化时ttl的初始值")
     memory_max_words: int = StoreField(default=300, title='记忆最大Tokens数', description="单条记忆最大单词数，决定记忆难度，最大难度0.8")
     recycling_trigger_threshold: int = StoreField(default=24000, title='溢出回收阈值', description="触发溢出回收的阈值，单位为Token")
     recycling_target_size: int = StoreField(default=18000, title='溢出回收目标大小', description="溢出回收后目标大小，单位为Token")
     cleanup_on_unavailable: bool = StoreField(default=False, title='不可用时回收时清理', description="是否在不可用自动回收的同时清理回收的消息")
     cleanup_target_size: int = StoreField(default=2000, title='非活跃清理目标大小', description="非活跃清理后目标大小，单位为Token")
+    summary_time_granularities: tuple[Literal['year', 'season', 'month', 'week', 'day'], ...] = StoreField(default=('year', 'season', 'month', 'week', 'day'), title='总结时间粒度')
     passive_retrieval_ttl: int = StoreField(default=3600_000_000, title='被动检索存活时长', description="被动检索消息的存活时长，按sprite主观ticks计算，单位为秒，到点后会被自动清理，设为0则不清理")
-    passive_retrieval_config: MemoryRetrievalConfig = StoreField(default_factory=lambda: MemoryRetrievalConfig(
-        k=8,
-        fetch_k=150,
-        stable_k=5,
-        depth=1,
-        original_ratio=2.5,
-        episodic_ratio=4.0,
-        reflective_ratio=4.5,
-        similarity_weight=0.35,
-        retrievability_weight=0.45,
-        diversity_weight=0.2,
+    passive_common_retrieval_configs: tuple[MemoryRetrievalConfig, ...] = StoreField(default_factory=lambda: (MemoryRetrievalConfig(
+        retrievals=[
+            MemoryRetrievalConfig.Retrieval(
+                memory_type='original',
+                k=1,
+                depth=1,
+                retrieve_method='similarity',
+                similarity_weight=0.4,
+                retrievability_weight=0.6,
+            ),
+            MemoryRetrievalConfig.Retrieval(
+                memory_type='reflective',
+                k=3,
+                depth=1,
+                similarity_weight=0.35,
+                retrievability_weight=0.45,
+                diversity_weight=0.2,
+            ),
+        ],
+        stable_k=2,
         strength=0.4
-    ), title="被动检索配置")
-    active_retrieval_config: MemoryRetrievalConfig = StoreField(default_factory=MemoryRetrievalConfig, title="主动检索配置")
-    summary_time_granularities: tuple[str] = StoreField(default=('year', 'month', 'week', 'day'), title='总结时间粒度')
+    ),), title="被动检索配置")
+    active_common_retrieval_configs: tuple[MemoryRetrievalConfig, ...] = StoreField(default_factory=lambda: (MemoryRetrievalConfig(
+        retrievals=[
+            MemoryRetrievalConfig.Retrieval(
+                memory_type='reflective',
+                k=6,
+                similarity_weight=0.5,
+                retrievability_weight=0.25,
+                diversity_weight=0.25,
+            ),
+            MemoryRetrievalConfig.Retrieval(
+                memory_type='summary',
+                k=1,
+                retrieve_method='similarity',
+                similarity_weight=0.5,
+                retrievability_weight=0.5
+            ),
+        ],
+        stable_k=6
+    ),), title="主动检索配置")
+    active_episodic_retrieval_configs: tuple[MemoryRetrievalConfig, ...] = StoreField(default_factory=lambda: (MemoryRetrievalConfig(
+        retrievals=[
+            MemoryRetrievalConfig.Retrieval(
+                memory_type='original',
+                k=4,
+                depth=3,
+                similarity_weight=0.5,
+                retrievability_weight=0.25,
+                diversity_weight=0.25,
+            ),
+            MemoryRetrievalConfig.Retrieval(
+                memory_type='summary',
+                k=1,
+                retrieve_method='similarity',
+                similarity_weight=0.8,
+                retrievability_weight=0.2,
+            ),
+        ],
+        stable_k=4
+    ),), title="主动情景记忆检索策略配置")
+    active_semantic_retrieval_configs: tuple[MemoryRetrievalConfig, ...] = StoreField(default_factory=lambda: (MemoryRetrievalConfig(
+        retrievals=[
+            MemoryRetrievalConfig.Retrieval(
+                memory_type='reflective',
+                k=8,
+                similarity_weight=0.6,
+                retrievability_weight=0.15,
+                diversity_weight=0.25,
+            ),
+        ],
+        stable_k=6
+    ),), title="主动语义记忆检索策略配置")
+
 
 class MemoryData(StoreModel):
     _namespace = PLUGIN_NAME + '_data'
     _title = "memory数据"
     last_added_memory_ids: dict[str, str] = StoreField(default_factory=dict, title='上次添加的记忆id')
-    last_summarized_times: dict[str, int] = StoreField(default_factory=dict, title='上次总结过的时间')
+    last_summarized_times: Optional[Times] = StoreField(default=None, title='上次总结过的时间')
     # {'year': 2023, 'month': 12, 'week': 52, 'day': 31, 'hour': 23, 'minute': 59, 'second': 59}
 
 
@@ -1711,6 +1773,21 @@ def format_messages_for_ai(
 
 rmprompt = '0. 这份记录实际上来自一个AI，但请把它当作人类来撰写你提取到的信息，不要暴露这个人是一个AI的事实'
 example_character = '你是一个关心他人、略带毒舌但内心柔软的职场年轻人，性别女性，25岁。'
+# 暂时没有使用
+example_summary_output = {
+    'year': '''{
+  "summary_content": "2024 年，我经历了工作上的项目起起落落，从春季的新产品发布到秋季的技术重构，见证了团队的成长。与阿哲的互动频繁，他多次做出无法兑现的承诺，但彼此间的默契加深。健康方面，开始注重规律作息，偶尔仍有熬夜赶工的情况。这一年中，逐渐学会平衡工作与生活，意识到在关心他人的同时也要照顾好自己。"
+}''',
+    'month': '''{
+  "summary_content": "本月工作节奏加快，临近年底各项目赶进度。与阿哲的互动频率增加，多次提醒其按时用餐。月中参加团建活动，团队成员得以放松。月底出现感冒症状，注意到换季时需关注身体状况。整体而言，本月工作忙碌但充实。"
+}''',
+    'week': '''{
+  "summary_content": "本周工作强度适中，周一至周三处理日常事务，周四至周五讨论下季度规划。阿哲三天未按时吃午饭，靠咖啡维持，我多次提醒并提供饮食支持。周末参加朋友生日聚会，获得短暂放松。本周整体平稳，与阿哲的互动成为重点。"
+}''',
+    'day': '''{
+  "summary_content": "今日工作忙碌，上午处理紧急需求，下午参加部门会议。阿哲未吃午饭，靠咖啡维持，我点粥送至其工位。阿哲收到粥后表现出惊喜和感激。晚上加班至八点，回家路上购买奶茶。今日情绪因阿哲的状况出现波动，后因帮助他人而感到满足。"
+}'''
+}
 example_history = f'''<me>
 <action name="{RECORD_THOUGHTS}" datetime="2025-09-30 15:06:58 Tuesday">
 <args>
@@ -1939,8 +2016,8 @@ extract_episodic_memories_schema = {
 - 例：原句"他昨天去了超市。" → "李四在2023-04-12去了超市。"
 2. 时间规范化：
 - 每条记忆中都需包含事件发生的时间信息
-- 使用%Y-%m-%d %H:%M:%S %A格式，如2025-11-30 09:30:00 Sunday
-- 尽可能精确到秒和周几，但原始记录中没有具体信息时也可以从后往前省略一些时间信息，或直接使用文字代替
+- 使用%Y-%m-%d %H:%M:%S Week%W %A格式，如2025-11-30 09:30:00 Week47 Sunday
+- 尽可能精确到秒、第几周和周几，但原始记录中没有具体信息时也可以从后往前省略一些时间信息，或直接使用文字代替
 - 例：原句"上周三早上" → "2024-03-20 早上 Wednesday"
 3. 使用尽可能简洁的SPO句式：
 - 主语(S)：专有名词或"我"
@@ -1989,8 +2066,8 @@ extract_reflective_memories_schema = {
 2. 时间规则：
 - 不要出现精确时间，但可在句子中体现“曾”、“经常”等时态
 - 如果确有必要，请遵守以下关于精确时间的规范：
-    - 使用%Y-%m-%d %H:%M:%S %A格式，如2025-11-30 09:30:00 Sunday
-    - 尽可能精确到秒和周几，但原始记录中没有具体信息时也可以从后往前省略一些时间信息，或直接使用文字代替
+    - 使用%Y-%m-%d %H:%M:%S Week%W %A格式，如2025-11-30 09:30:00 Week47 Sunday
+    - 尽可能精确到秒、周数和周几，但原始记录中没有具体信息时也可以省略一些时间信息，或直接使用文字代替
     - 例：原句"上周三早上" → "2024-03-20 早上 Wednesday"
 
 <example>
@@ -2040,6 +2117,32 @@ extract_reflective_memories_schema = {
         }
     },
     'required': ['reflection_process', 'reflective_memories']
+}
+
+summary_memories_schema = {
+    'title': 'summary_memories',
+    'type': 'object',
+    # 暂时不用示例
+    'description': f"""请使用这个工具来返回你对原始记忆的总结内容。总结需要以第一人称视角撰写，并满足以下规则：
+1. 叙述风格：
+- 客观陈述，不要艺术加工
+- 清晰简洁，突出重要事件和情绪波动
+- 保持第一人称视角，但避免主观评价和情感渲染
+- 客观记录你自己做过或想过的事实以及情感状态
+2. 内容优先级：
+- 优先记录对自己重要的事件
+- 优先记录给自己留下深刻印象的事件
+- 优先记录引起情绪波动的事件
+3. 代词规则：
+- 人名应在尽可能的情况下使用具体姓名，除非不知道
+- 唯一例外是，请保持使用"我"来指代你自己（为了保持第一人称视角）""",
+    'properties': {
+        'summary_content': {
+            'type': 'string',
+            'description': '对给定时间范围内所有原始记忆的综合总结内容。应该是一段客观、清晰的陈述文字，优先记录重要事件和情绪波动，涵盖工作、人际关系、个人成长、健康状况等方面。'
+        }
+    },
+    'required': ['summary_content']
 }
 
 
@@ -2202,7 +2305,7 @@ async def recycle_reflective_memories(sprite_id: str, input_messages: list[AnyMe
                 ]
             )]
         ).construct_messages(times_after))
-        if 'original' in get_activated_memory_types():
+        if 'original' in store_manager.get_model(sprite_id, MemoryConfig).memory_types:
             last_id = await connect_last_memory(sprite_id, 'original', [process[1].id])
             memories.append(InitialMemory(
                 content=process[1].content,
@@ -2227,86 +2330,288 @@ async def recycle_summary_memories(sprite_id: str, model: BaseChatModel) -> None
     """应在每次sleeping时调用"""
     # TODO
     # 首先，应检查需要总结哪些时间范围的记忆（年、月、周、日）
-    # 也许可以存四个变量，保存最后总结过的年、月、周、日，以此判断当前时间下需要进行总结的时间范围
-    # 然后get所有需要总结的（original）记忆，并给它们进行recall
-    # 最后，调用模型总结记忆
-    time_settings = store_manager.get_settings(sprite_id).time_settings
+    store_settings = store_manager.get_settings(sprite_id)
+    time_settings = store_settings.time_settings
     current_times = Times.from_time_settings(time_settings)
     current_datetime = current_times.sprite_world_datetime
     data_store = store_manager.get_model(sprite_id, MemoryData)
-    config_store = store_manager.get_model(sprite_id, MemoryConfig)
     last_summarized_times = data_store.last_summarized_times
-    if current_datetime.year != last_summarized_times.get('year'):
-        # 年发生变动，则任何粒度都要进行总结
-        exclude_granularities = []
+    if not last_summarized_times:
+        data_store.last_summarized_times = current_times
+        logger.info(f"{sprite_id} 没有上次总结时间，将设置当前时间为新的最后总结时间")
+        return
+    last_summarized_times = last_summarized_times.model_copy()
+    last_datetime = last_summarized_times.sprite_world_datetime
+
+    data_store.last_summarized_times = current_times
+
+    config_store = store_manager.get_model(sprite_id, MemoryConfig)
+    # datetime在进行比较时会将时间转换至UTC
+    if last_datetime > current_datetime:
+        logger.warning(f"{sprite_id} 上次总结时间晚于当前时间，可能进行了时空穿越回到了过去，将跳过总结并设置当前时间为新的最后总结时间")
+        return
+    elif last_datetime == current_datetime:
+        logger.warning(f"{sprite_id} 上次总结时间与当前时间相同，可能只是因为时区发生了改变，将跳过总结并设置当前时间为新的最后总结时间")
+        return
+
+    def get_season(month: int) -> int:
+        """根据月份返回季节 (1=春，2=夏，3=秋，4=冬)"""
+        if month in [3, 4, 5]:
+            return 1  # 春季
+        elif month in [6, 7, 8]:
+            return 2  # 夏季
+        elif month in [9, 10, 11]:
+            return 3  # 秋季
+        else:  # 12, 1, 2
+            return 4  # 冬季
+
+    def get_season_start_month(season: int) -> int:
+        """根据季节返回起始月份"""
+        season_start_map = {1: 3, 2: 6, 3: 9, 4: 12}
+        return season_start_map[season]
+
+    def get_season_start_datetime(dt: datetime) -> datetime:
+        """获取当前季节的起始时间"""
+        season = get_season(dt.month)
+        start_month = get_season_start_month(season)
+        # 如果当前月份小于起始月份，说明是上一年的季节（如 1-2 月属于冬季，起始是 12 月）
+        if dt.month < start_month:
+            return datetime(dt.year - 1, start_month, 1)
+        else:
+            return datetime(dt.year, start_month, 1)
+
+
+    exclude_granularities = []
+    if abs(current_datetime.year - last_datetime.year) >= 2:
+        # 年的差异大于等于2年，则任何粒度都要进行总结
+        pass
     else:
-        exclude_granularities = ['year']
-        if current_datetime.month == last_summarized_times.get('month'):
-            exclude_granularities.append('month')
-        if current_datetime.isocalendar().week == last_summarized_times.get('week'):
-            exclude_granularities.append('week')
         if (
-            current_datetime.day == last_summarized_times.get('day') and
-            'month' in exclude_granularities and
-            'week' in exclude_granularities
+            get_week(current_datetime) == get_week(last_datetime) or
+            (
+                get_week(current_datetime) == 0 and
+                get_week(last_datetime) == get_week(last_datetime.replace(month=12, day=31))
+            )
         ):
-            exclude_granularities.append('day')
+            exclude_granularities.append('week')
+        # 判断季节是否变化
+        if get_season(current_datetime.month) == get_season(last_datetime.month):
+            exclude_granularities.append('season')
+        if current_datetime.year != last_datetime.year:
+            # 年发生变动，则年月日都要进行总结
+            pass
+        else:
+            exclude_granularities.append('year')
+            if current_datetime.month == last_datetime.month:
+                exclude_granularities.append('month')
+            if (
+                current_datetime.day == last_datetime.day and
+                'month' in exclude_granularities
+            ):
+                exclude_granularities.append('day')
+
     time_granularities = [g for g in config_store.summary_time_granularities if g not in exclude_granularities]
     if not time_granularities:
         logger.info(f"{sprite_id} 不需要进行任何总结")
         return
+
+
+    def _clac_all_timestampus(dt: datetime) -> dict[str, TimestampUs]:
+        """计算所有时间粒度的时间戳"""
+        dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        return {
+            'year': TimestampUs(datetime(dt.year, 1, 1)),
+            'season': TimestampUs(get_season_start_datetime(dt)),
+            'month': TimestampUs(datetime(dt.year, dt.month, 1)),
+            'week': TimestampUs(dt - timedelta(days=dt.weekday())),
+            'day': TimestampUs(dt),
+        }
+
+    granularities_last = _clac_all_timestampus(last_datetime)
+    granularities_current = _clac_all_timestampus(current_datetime)
+
+
     base_ttl = config_store.memory_base_ttl
-    async def _extract(granularity: str) -> list[InitialMemory]:
-        get_result = await memory_manager.aget(
-            sprite_id=sprite_id,
-            memory_type="original",
-            where={
+    # 获取角色设定
+    parsed_character_settings = store_settings.format_character_settings()
+    role_prompt = f'基本信息：\n{parsed_character_settings if parsed_character_settings.strip() else '无'}\n\n详细设定：\n{store_settings.role_prompt}'
+
+    async def _extract(granularity: str) -> Optional[InitialMemory]:
+        # 然后get所有需要总结的（original）记忆，并给它们进行recall
+        last = granularities_last[granularity]
+        current = granularities_current[granularity]
+
+        if granularity == 'day':
+            creation_time_where = {
                 '$and': [
-                    {f'creation_sprite_world_datetime_{granularity}': {
-                        '$gte': getattr(current_datetime, granularity) - 1
+                    {'creation_sprite_world_timestampus': {
+                        '$gte': last
                     }},
-                    {f'creation_sprite_world_datetime_{granularity}': {
-                        '$lt': getattr(current_datetime, granularity)
+                    {'creation_sprite_world_timestampus': {
+                        '$lt': current
+                    }},
+                    {'retrievability': {
+                        '$gt': 0.15
                     }}
                 ]
             }
-        )
-        if not get_result['ids']:
-            return []
-        schema = {
-            'title': f'summary_the_{granularity}',
-            'description': f'{granularity} summary of the original memories',
-            'type': 'object',
-            'properties': {
-                'content': {
-                    'description': 'The summary content of the original memories',
-                    'type': 'string'
+            get_result1 = await memory_manager.aget(
+                sprite_id=sprite_id,
+                memory_type="original",
+                where=creation_time_where
+            )
+            get_result2 = await memory_manager.aget(
+                sprite_id=sprite_id,
+                memory_type="reflective",
+                where=creation_time_where
+            )
+            docs = get_result_to_docs(get_result1) + get_result_to_docs(get_result2)
+        else:
+            get_result = await memory_manager.aget(
+                sprite_id=sprite_id,
+                memory_type="summary",
+                where={
+                    '$and': [
+                        {'summary_time_granularity': granularity},
+                        {'summary_timestampus': {
+                            '$gte': last
+                        }},
+                        {'summary_timestampus': {
+                            '$lt': current
+                        }},
+                        {'retrievability': {
+                            '$gt': 0.15
+                        }}
+                    ]
                 }
-            },
-            'required': ['content']
+            )
+            docs = get_result_to_docs(get_result)
+        if not docs:
+            return None
+        remove_ids = {}
+        new_metas = {}
+        new_ids = {}
+        for doc in docs:
+            patch = recall_memory(doc.metadata, current_times, 0.7 if granularity != 'day' else 3.0) #TODO 配置
+            if not doc.id:
+                logger.warning(f"记忆 {doc} 意外的没有id")
+                continue
+            memory_type = doc.metadata['memory_type']
+            if patch.get('forgot'):
+                remove_ids.setdefault(memory_type, []).append(doc.id)
+            else:
+                new_metas.setdefault(memory_type, []).append(patch)
+                new_ids.setdefault(memory_type, []).append(doc.id)
+                doc.metadata.update(patch)
+        if remove_ids:
+            for memory_type, ids in remove_ids.items():
+                await memory_manager.adelete(sprite_id, memory_type, ids)
+        if new_metas and new_ids:
+            for memory_type, ids in new_ids.items():
+                await memory_manager.aupdate_metadatas(ids, new_metas[memory_type], memory_type, sprite_id=sprite_id)
+
+        docs.sort(key=lambda x: x.metadata['retrievability'], reverse=True)
+        total_chars = 0
+        # 保守估计token数
+        # TODO 配置选项，目前最大十万token
+        max_chars = int(100000 * 1.5)
+        include_idx = []
+        for i, doc in enumerate(docs):
+            total_chars += len(doc.page_content)
+            if total_chars > max_chars:
+                total_chars -= len(doc.page_content)
+                break
+            include_idx.append(i)
+        docs: list[Document] = [docs[i] for i in include_idx]
+        docs.sort(key=lambda x: x.metadata['creation_sprite_world_timestampus'])
+
+        # 计算输入记忆的总字数
+        # 根据输入字数确定总结长度
+        if total_chars < 2000:
+            summary_length = 500
+        else:
+            summary_length = 1000
+
+        # 不同时间粒度的内容提示方向
+        granularity_guidelines = {
+            'year': '这是年度总结，应关注这一年中经历的重要事件、生活变化、人际关系和成长历程，记录随着时间推移发生的各种故事和感受。',
+            'season': '这是季度总结，应关注这三个月内经历的重要事件、生活变化、人际关系和个人体验，记录随着时间推移发生的各种故事。',
+            'month': '这是月度总结，应关注这个月里发生的事情、人际关系和情绪波动。',
+            'week': '这是周度总结，应记录这周发生的具体事件、与人互动和情绪波动，记录一周的生活轨迹。',
+            'day': '这是日度总结，应记录今天的具体经历、与人对话、饮食起居、身体健康状况和情绪感受，记录一天的生活轨迹。'
         }
+
+        # 构建prompt
+        prompt = f"""请你根据你自己的角色设定，提要总结你自己在时间范围`{granularity}`内的经历，以下是该任务的详细说明：
+
+# 角色设定
+{role_prompt}
+
+# 要求
+
+## 时间范围说明
+{granularity_guidelines[granularity]}
+
+## 内容长度
+{summary_length}字左右的总结内容，保持客观陈述风格。
+{'''
+# 记忆格式说明
+可能出现为XML格式的记忆，包含me标签、action标签和others标签，记录了具体的行为动作。
+- <me>标签：记录自己的行为，包含时间和内容
+    - <action>标签：记录自己的行为的具体动作名称和内容
+- <others>标签：记录他人的行为，包含时间和内容
+''' if granularity == 'day' else ''}
+# 将要进行提要总结记忆内容
+以下是你自己在时间范围 “{granularity}” 内的记忆，按时间顺序排列：
+
+<memories>
+{'\n\n\n'.join([doc.page_content for doc in docs])}
+</memories>
+
+请你根据这些记忆，结合角色设定（persona），按照`summary_memories`要求的规则撰写{granularity}总结。优先记录对自己重要的事件、留下深刻印象的事件和引起情绪波动的事件。"""
+
+        # 最后，调用模型总结记忆
         llm_with_structured = create_agent(
             model,
-            response_format=ToolStrategy(schema)
+            response_format=ToolStrategy(summary_memories_schema)
         )
-        response = await llm_with_structured.ainvoke(
-            f"请总结以下记忆：{get_result['documents']}"
-        )
-        result = response['structured_response'].get('content')
+        response = await llm_with_structured.ainvoke({'messages': [HumanMessage(content=prompt)]})
+        result = response['structured_response'].get('summary_content')
         if not result:
-            return []
+            logger.error(f"{sprite_id} 总结记忆 {granularity} 时，模型返回空结果")
+            return None
+        ttl_mult_map = {
+            'year': 5,
+            'season': 3,
+            'month': 2,
+            'week': 1.5,
+            'day': 1,
+        }
         return InitialMemory(
-            content='时间xxx\n' + result,
-            ttl=int(random.expovariate(0.3) * base_ttl),
+            content=f'{format_time(
+                last,
+                last_summarized_times.sprite_time_settings.time_zone
+            )} ~ {format_time(
+                current,
+                last_summarized_times.sprite_time_settings.time_zone
+            )}\n' + result,
+            ttl=int(random.expovariate(0.3) * base_ttl * ttl_mult_map[granularity]),
             type=f"summary",
             creation_times=Times.from_time_settings(store_manager.get_settings(sprite_id).time_settings),
+            extra={
+                'summary_time_granularity': granularity,
+                'summary_timestampus': last,
+                'summary_date_iso': last.to_datetime().date().isoformat(),
+            },
+            # 暂时不考虑连接
             # id=None,
             # previous_memory_id=None,
             # next_memory_id=None
         )
+
     tasks = [_extract(g) for g in time_granularities]
     memories = await asyncio.gather(*tasks)
-    memories = [m for ms in memories for m in ms]
+    memories = [m for m in memories if m is not None]
     await memory_manager.add_memories(memories, sprite_id)
 
 
@@ -2319,6 +2624,8 @@ async def recycle_memories(memory_type: AnyMemoryType, sprite_id: str, input_mes
         return await recycle_episodic_memories(sprite_id, input_messages, model)
     elif memory_type == "reflective":
         return await recycle_reflective_memories(sprite_id, input_messages, model)
+    elif memory_type == "summary":
+        return await recycle_summary_memories(sprite_id, model)
     else:
         raise ValueError(f"Unknown memory type: {memory_type}")
 
@@ -2405,7 +2712,7 @@ async def clean_passive_retrieval_messages_job(sprite_id: str) -> None:
 async def update_memories_job(sprite_id: str, ttl_range: list[dict[str, int]]) -> None:
     """更新记忆job"""
     update_count = 0
-    for t in get_activated_memory_types():
+    for t in store_manager.get_model(sprite_id, MemoryConfig).memory_types:
         where = validated_where({'$and': [{'ttl': item} for item in ttl_range]})
         result = await memory_manager.aget(
             sprite_id=sprite_id,
@@ -2501,11 +2808,11 @@ RM_MEMORY_TYPE_PROMPTS = {
     "original": '''## 对于original类型的记忆
 original类型的记忆是直接按对话轮次原文存储的，对于其内容来说没有任何规律，但同时也会保留其固定格式，其中包含：
 - 发起动作的人名，或“我”。
-- 时间信息，以完整的[%Y-%m-%d %H:%M:%S %A]格式，如[2025-11-30 09:30:00 Sunday]。
+- 时间信息，以完整的[%Y-%m-%d %H:%M:%S Week%W %A]格式，如[2025-11-30 09:30:00 Week47 Sunday]。
 - 你自己在当时完整的内心想法。
 - 你执行过的工具调用中包含的工具名称和参数，以及工具的返回结果。
 这也意味着original类型记忆可能在大多数情况下不是特别适用，因为其一般包含大量无用信息，不如其他记忆类型精炼。
-不过如果对于episodic类型记忆（若有）提供的信息不够满意，想回忆更完整细节，这也是唯一的方式。
+不过如果对于summary类型记忆（若有）提供的信息不够满意，想回忆更完整细节，这也是唯一的方式。
 可以通过以上固定格式中包含的信息来检索，或直接搜索具体内容。
 在面对下列示例问题时，适合选择着重检索original类型记忆：
 - 想要根据现有信息知道回忆起张三当时具体说了什么（由于是向量检索所以时间只需尽可能精确）：
@@ -2519,55 +2826,76 @@ original类型的记忆是直接按对话轮次原文存储的，对于其内容
     "memory_type": "original"
   }''',
     "episodic": '''## 对于episodic类型的记忆
-episodic类型的记忆是对于在你的上下文中发生的所有独立的小的事件的一句话总结陈述，所有记忆均为仅表达一个事实的原子级信息。在想要知晓你的过往发生过什么时，这会很有用。但请注意，episodic类型记忆中一般不会包含你自己的内心想法。
-episodic类型的记忆还有两个特点，一是几乎所有记忆都会包含“我”关键字，因为显而易见的原因：episodic类型记忆记录的就是“我”（也就是你）的经历。
-二是episodic类型的所有记忆里都会包含尽可能准确到秒和周几的绝对时间信息，具体为%Y-%m-%d %H:%M:%S %A格式，如2025-11-30 09:30:00 Sunday。
-这意味着对于episodic类型的记忆来说，你可以在search_string中也像这样直接描述时间，来找到指定时间可能存在的记忆。
+episodic类型的记忆尽可能包含了在你的上下文中发生的所有事件（的细节）。
+episodic类型的所有记忆里都会包含尽可能准确到秒、第几周和星期几的绝对时间信息，具体为%Y-%m-%d %H:%M:%S Week%W %A格式，如2025-11-30 09:30:00 Week47 Sunday。
+这意味着对于episodic类型的记忆来说，你可以在search_string中也像这样直接描述时间（因为是向量检索，不必完全精确），来找到指定时间可能发生的事情（如果还记得的话）。
 在面对以下示例问题时，适合选择着重检索episodic类型记忆：
 - 想知道，今年情人节我跟谁聊天了：
   {
     "search_string": "2025-02-14我和谁聊天了？",
     "memory_type": "episodic"
-  }
-- 想知道，我在今年十一月都做了什么：
-  {
-    "search_string": "我在2025-11都做了些什么？",
-    "memory_type": "episodic"
   }''',
-    "reflective": '''## 对于reflective类型的记忆
-reflective类型的记忆是从过往经历（包括你自己的内心想法）中思考并得出的结论或猜测，形成的原子级语义信息。
-如果你想知道什么是什么，什么怎么样诸如此类的信息，而非发生过什么，选择reflective。
-若配合使用creation_time_range，则意为：查询某段时间所产生的（某某相关的）感悟。
-在面对以下示例问题时，适合选择着重检索reflective类型记忆：
-- 想知道，张三毕业于哪所大学：
-  {
-    "search_string": "张三曾毕业于哪所大学？",
-    "memory_type": "reflective"
-  }
+    "semantic": '''## 对于semantic类型的记忆
+semantic类型的记忆是从过往经历（包括可能的心理活动）中思考并得出的结论或猜测，形成的原子级语义信息。
+如果你想知道什么是什么，什么怎么样诸如此类的信息，而非发生过什么，选择semantic。
+在面对以下示例问题时，适合指定检索semantic类型记忆：
 - 想知道，李四喜欢吃什么：
   {
     "search_string": "李四喜欢吃什么？",
-    "memory_type": "reflective"
-  }
-- 想知道，阿哲的工作状况：
+    "memory_type": "semantic"
+  }''',
+    "summary": '''## 对于summary类型的记忆
+summary类型的记忆是对过往经历的按时间范围区分的总结陈述，时间范围包含年、季、月、周、日四种。
+在想要获取某时间范围内的更整体的信息总结时，这会很有用。
+需注意，在指定检索summary类型记忆时，并不是在进行向量检索，而是根据你在search_string中提供的时间信息直接进行查询。
+具体来说，时间信息应遵循格式（类似于ISO 8601）：<Year>[-Season|-Month][-Week][-Day]，以下是一些常用例子：
+- 查询某年：2025、2021
+- 查询某季：2025-Winter、2024-Autumn
+- 查询某月：2025-12、2024-08
+- 查询某周：2025-W44、2024-W25
+- 查询某月某日：2025-11-30、2024-08-25
+其他的一些更复杂的例子：
+- 查询某周某日：2025-W44-01、2024-W25-07
+- 查询某季某周：2025-Spring-W5、2024-Summer-W12[-03]（可以继续指定星期几）
+- 查询某月某周：2025-11-W1、2024-08-W3[-07]（可以继续指定星期几）
+
+提示，这里的季度划分具体来说为：
+- 春季：3月、4月、5月
+- 夏季：6月、7月、8月
+- 秋季：9月、10月、11月
+- 冬季：12月、1月、2月
+
+在面对以下示例问题时，适合指定检索summary类型记忆：
+- 想知道，我在今年（假设2025）十一月都做了什么：
   {
-    "search_string": "阿哲的工作状况如何？",
-    "memory_type": "reflective"
+    "search_string": "2025-11",
+    "memory_type": "summary"
   }''',
 }
 RM_MEMORY_TYPE_SUGGESTIONS = {
-    "original": "- 需要回忆过往经历的完整细节时，着重检索original类型的记忆。",
-    "episodic": "- 需要回忆过往发生过的事情时，着重检索episodic类型的记忆。",
-    "reflective": "- 需要查询从经历中思考得出的语义信息而非经历本身时，着重检索reflective类型的记忆。",
+    "episodic": "- 需要回忆过往发生过的事情时，指定检索episodic类型的记忆。",
+    "semantic": "- 需要查询从经历中思考得出的语义信息而非经历本身时，指定检索semantic类型的记忆。",
+    "summary": "- 需要获取按时间范围区分的经历的总结时，指定检索summary类型的记忆。",
 }
-rm_memory_types = get_activated_memory_types()
-rm_schema = {
-    # langchain在解析schema时会更倾向于使用工具的name而非schema中的title作为工具名
-    # 但对于某些情况，如果只提供schema而不是工具时，意味着此时无法获取工具的name
-    # 在这种情况下，schema顶层的title依然是有意义的
-    # 不过对于其他各个属性的title，langchain都会将其删除，所以没有必要填写（除了当title作为属性名时）
-    "title": RETRIEVE_MEMORIES,
-    "description": f'''从你自己的向量数据库中检索信息。
+def construct_retrieve_memories_schema(sprite_id: str) -> dict[str, Any]:
+    """根据激活的记忆类型构造检索记忆的schema"""
+    current_memory_types = store_manager.get_model(sprite_id, MemoryConfig).memory_types
+    rm_memory_types = []
+    if 'original' in current_memory_types or 'summary' in current_memory_types:
+        rm_memory_types.append('episodic')
+    if 'reflective' in current_memory_types:
+        rm_memory_types.append('semantic')
+    if 'summary' in current_memory_types:
+        rm_memory_types.append('summary')
+    states = store_manager.get_states(sprite_id)
+    settings = store_manager.get_settings(sprite_id)
+    rm_schema = {
+        # langchain在解析schema时会更倾向于使用工具的name而非schema中的title作为工具名
+        # 但对于某些情况，如果只提供schema而不是工具时，意味着此时无法获取工具的name
+        # 在这种情况下，schema顶层的title依然是有意义的
+        # 不过对于其他各个属性的title，langchain都会将其删除，所以没有必要填写（除了当title作为属性名时）
+        "title": RETRIEVE_MEMORIES,
+        "description": f'''从你自己的向量数据库中检索信息。
 你的向量数据库有一套自动从过往上下文中分析并存储信息的机制，而这个工具使你可以主动从这个数据库中检索信息。
 对于角色扮演来说，如果你所扮演的是类人（非机器人之类）的角色，可以将数据库理解为大脑，检索理解为回忆，信息理解为记忆。
 
@@ -2582,31 +2910,35 @@ rm_schema = {
 
 {'\n\n'.join([RM_MEMORY_TYPE_PROMPTS.get(t, '') for t in rm_memory_types if RM_MEMORY_TYPE_PROMPTS.get(t)])}
 
+# 可检索到的最早时间
+由于记忆是在运行时收集存储的，所以显而易见的，你一般不会拥有早于第一次初始化时间之前的记忆。
+该时间为 {format_time(Times.from_time_settings(settings.time_settings, states.born_at).sprite_world_datetime)}。
+
 # 重复检索
 这是一项额外功能，如果你使用了在之前的上下文中使用过的相同的该工具的工具调用参数，将触发重复检索。
 这有什么用？
 默认情况下，检索结果会自动剔除掉当前上下文已存在的检索到的记忆，避免被重复信息挤占上下文空间。
 而如果触发了重复检索，则不会剔除掉之前使用该工具调用参数时检索到的记忆。
 如果你因一些原因如遇到了「模糊的记忆」并想要重复检索以获得更完整的信息时，请尝试使用重复检索。''',
-    "type": "object",
-    "properties": {
-        "search_string": {
-            'type': 'string',
-            'description': '''用于检索对应记忆类型的查询字符串，一般来说应使用语义准确的疑问句，具体参考各记忆类型给出的示例。
+        "type": "object",
+        "properties": {
+            "search_string": {
+                'type': 'string',
+                'description': '''用于检索对应记忆类型的查询字符串，一般来说应使用语义准确的疑问句（除非是summary类型），具体参考各记忆类型给出的示例。
 除"我"以外，不要使用代词，请使用全称。举例：不应使用"他"这种人称代词，应为某人的全名如"李四"；但对于"我"来说，请保持"我"。'''
-        },
-        "memory_type": {
-            'type': 'string',
-            'default': '',
-            'description': f'''要着重检索的记忆类型。默认为空，表示所有记忆类型使用相同的权重进行检索。
-需要提醒的是，无论你选择检索哪种类型的记忆，其他类型的记忆仍会出现，你的选择只是提高了该记忆类型出现的比例而已。尽管如此，这仍然重要。
+            },
+            "memory_type": {
+                'type': 'string',
+                'default': '',
+                'description': f'''要指定检索的记忆类型。默认为空，表示会混合检索各种记忆。
 有{len(rm_memory_types)}种类型记忆可供选择，分别是：{'，'.join(rm_memory_types)}。''',
-            'enum': [''] + rm_memory_types
-        }
-    },
-    "required": ["search_string"]
-}
-@tool(RETRIEVE_MEMORIES, response_format="content_and_artifact", args_schema=rm_schema)
+                'enum': [''] + rm_memory_types
+            }
+        },
+        "required": ["search_string"]
+    }
+    return rm_schema
+@tool(RETRIEVE_MEMORIES, response_format="content_and_artifact")
 async def retrieve_memories_tool(
     runtime: ToolRuntime[CallSpriteRequest, MainState],
     search_string: str,
@@ -2614,7 +2946,8 @@ async def retrieve_memories_tool(
     #creation_time_range_start: str = '',
     #creation_time_range_end: str = ''
 ) -> tuple[str, MemoryMsgMeta]:
-    memory_types = get_activated_memory_types()
+    """placeholder"""
+    memory_types = store_manager.get_model(runtime.context.sprite_id, MemoryConfig).memory_types
     if not memory_types:
         raise ValueError("没有可检索的记忆类型，可能是配置错误，请不要继续使用此工具。")
     creation_time_range_start, creation_time_range_end = None, None # 目前取消了这个参数
@@ -2629,20 +2962,84 @@ async def retrieve_memories_tool(
         except ValueError:
             raise ValueError(f'无法解析输入中的 creation_time_range_end！请重新检查你的输入是否符合"2023-01-01 23:59:59"这样的格式！(也即%Y-%m-%d %H:%M:%S)。若不需要此功能请留空。')
 
+    if memory_type == 'summary':
+        time_settings = store_manager.get_settings(sprite_id).time_settings
+        try:
+            time_parts = search_string.split('-')
+            time_kwargs = {}
+            time_granularity = None
+            for i, p in enumerate(time_parts):
+                if i == 0:
+                    time_kwargs['year'] = int(p)
+                    time_granularity = 'year'
+                elif p.lower() in ('spring', 'summer', 'autumn', 'fall', 'winter'):
+                    time_kwargs['month'] = {'spring': 3, 'summer': 6, 'autumn': 9, 'fall': 9, 'winter': 12}[p.lower()]
+                    time_granularity = 'season'
+                elif p.upper().startswith('W'):
+                    time_kwargs['weeks'] = int(p[1:])
+                    time_granularity = 'week'
+                elif time_granularity == 'week':
+                    time_kwargs.pop('day', None)
+                    time_kwargs['weekday'] = int(p) - 1
+                    time_granularity = 'day'
+                elif time_granularity == 'month':
+                    time_kwargs.pop('weekday', None)
+                    time_kwargs['day'] = int(p)
+                    time_granularity = 'day'
+                else:
+                    time_kwargs['month'] = int(p)
+                    time_granularity = 'month'
+            summary_datetime = datetime(
+                time_kwargs.pop('year'),
+                time_kwargs.pop('month', 1),
+                time_kwargs.pop('day', 1),
+                tzinfo=time_settings.time_zone.tz()
+            )
+            if time_kwargs:
+                # 如果有周相关的参数，先回到周1再计算
+                # 这也使得可能会回到上一年/上个月的最后一周
+                # 就是这么设计的
+                summary_datetime -= timedelta(days=summary_datetime.weekday())
+                summary_datetime += relativedelta(**time_kwargs)
+            if not time_granularity:
+                raise ValueError(f'无法解析输入中的时间字符串 {search_string}！请重新检查你的输入是否符合格式！')
+        except Exception:
+            raise ValueError(f'无法解析输入中的时间字符串 {search_string}！请重新检查你的输入是否符合格式！')
+        summary_datetime = summary_datetime.astimezone(timezone.utc)
+        summary = await memory_manager.aget(
+            sprite_id,
+            memory_type,
+            where={
+                '$and': [
+                    {'summary_time_granularity': time_granularity},
+                    {'summary_date_iso': summary_datetime.date().isoformat()},
+                ]
+            }
+        )
+        if not summary['ids']:
+            return '没有找到该时间点的记忆总结，也许根本就不存在，又或许已经遗忘了。', None
+        summary = get_result_to_docs(summary)[0]
+        patch = recall_memory(summary.metadata, Times.from_time_settings(time_settings))
+        if patch.get('forgot'):
+            await memory_manager.adelete(sprite_id, memory_type, [summary.id])
+            return '没有找到该时间点的记忆总结，也许根本就不存在，又或许已经遗忘了。', None
+        await memory_manager.aupdate_metadatas([summary.id], [patch], memory_type, sprite_id)
+        return '主动记忆检索结果：\n\n' + summary.page_content, MemoryMsgMeta(
+            do_not_store=True,
+            retrieved_memory_ids=[summary.id],
+        )
+
+
     sprite_id = runtime.context.sprite_id
     messages = runtime.state.messages
 
-    # 本次循环中调用此工具次数越多，强度越高
-    invoke_count = 0
-    for m in reversed(messages):
-        if isinstance(m, HumanMessage):
-            break
-        elif isinstance(m, ToolMessage) and m.name == RETRIEVE_MEMORIES:
-            invoke_count += 1
-    strength = 1 + min(invoke_count * 0.5, 1) # 目前主动检索的强度固定初始为1
     store_settings = store_manager.get_settings(sprite_id)
-    retrieval_config = store_manager.get_model(sprite_id, MemoryConfig)
-    retrieval_config = retrieval_config.active_retrieval_config.model_copy(update={"strength": strength}, deep=True)
+    retrieval_configs = store_manager.get_model(sprite_id, MemoryConfig)
+    try:
+        retrieval_configs = getattr(retrieval_configs, f'active_{memory_type}_retrieval_configs') if memory_type else retrieval_configs.active_common_retrieval_configs
+    except AttributeError:
+        raise ValueError(f'无法找到指定的记忆类型 {memory_type} 的检索配置！请检查你输入的参数是否正确。')
+
 
     # 剔除已检索过的记忆
     message_ids = [m.id for m in messages if m.id]
@@ -2675,8 +3072,8 @@ async def retrieve_memories_tool(
 
     groups = await memory_manager.retrieve_memories(
         sprite_id=sprite_id,
-        retrieval_config=retrieval_config,
-        memory_type=memory_type if memory_type else None,
+        retrieval_configs=retrieval_configs,
+        #memory_type=memory_type if memory_type else None,
         search_string=search_string,
         creation_time_range_start=start_time,
         creation_time_range_end=end_time,
@@ -2697,6 +3094,7 @@ async def on_sprite_away_or_sleeping(sprite_id: str, new: Any) -> None:
         data_store = store_manager.get_model(sprite_id, MemoryData)
         # 目前就这样，在睡觉时清空字典，切断记忆连接
         data_store.last_added_memory_ids = {}
+        await recycle_summary_memories(sprite_id, sprite_manager.structured_model)
     elif not new.is_away():
         return
     messages = await sprite_manager.get_messages(sprite_id)
@@ -2712,7 +3110,7 @@ async def on_sprite_away_or_sleeping(sprite_id: str, new: Any) -> None:
         remove_messages = []
 
         # recycling
-        memory_types = get_activated_memory_types()
+        memory_types = config_store.memory_types
         recycles = {t: recycle_memories(t, sprite_id, not_extracted_messages, sprite_manager.structured_model) for t in memory_types}
         recycle_results = {}
         if len(recycles) > 0:
@@ -2761,11 +3159,18 @@ class MemoryPlugin(BasePlugin):
     dependencies = [PluginDependency(name='bh_presence')]
     config = MemoryConfig
     data = MemoryData
-    tools = [retrieve_memories_tool]
-    prompts = PluginPrompts(
-        secondary=PluginPrompt(
-            title='记忆系统',
-            content=f'''- **记忆存储**：
+    tools = [SpriteTool(retrieve_memories_tool, hide_by_default=True)]
+
+    @override
+    async def on_sprite_init(self, sprite_id: str, /) -> None:
+        await construct_default_memory_schedules(sprite_id)
+
+    @override
+    async def before_call_model(self, request: CallSpriteRequest, info: BeforeCallModelInfo, /) -> None:
+        self.prompts = PluginPrompts(
+            secondary=PluginPrompt(
+                title='记忆系统',
+                content=f'''- **记忆存储**：
 - 记忆是自动存储的（无需你主动存储），并且遵循“用进废退”原则。经常被检索的记忆会被强化，而很少被检索的记忆会被逐渐遗忘。
 - **被动检索（潜意识）**：
     - 每次你被调用时，系统会自动使用用户输入的消息检索相关记忆。这条消息是自动生成的，可以参考它来提供更准确的回答。
@@ -2784,12 +3189,10 @@ class MemoryPlugin(BasePlugin):
 但请注意，你检索到的记忆也可能会有问题，如：不相关、过时、又或者是你真正想要的记忆没有被检索到，也有可能是因为它已经被遗忘了。
 
 所以，一定要注意甄别记忆的内容，当意识到检索到的记忆有以上不靠谱的情况时，你可以选择再次尝试检索，又或者放弃检索，使用“我不知道”“我忘记了”“我不确定”等表达作解释，避免胡编乱造。'''
+            )
         )
-    )
+        self.tools[0].set_schema(request.sprite_id, construct_retrieve_memories_schema(request.sprite_id))
 
-    @override
-    async def on_sprite_init(self, sprite_id: str, /) -> None:
-        await construct_default_memory_schedules(sprite_id)
 
     @override
     async def on_call_sprite(self, request: CallSpriteRequest, info: OnCallSpriteInfo, /) -> None:
@@ -2815,7 +3218,7 @@ class MemoryPlugin(BasePlugin):
         config_store = store_manager.get_model(sprite_id, MemoryConfig)
         passive_retrieve_groups = await memory_manager.retrieve_memories(
             sprite_id=sprite_id,
-            retrieval_config=config_store.passive_retrieval_config,
+            retrieval_configs=config_store.passive_common_retrieval_configs,
             search_string=search_string,
             exclude_memory_ids=exclude_memory_ids
         )
@@ -2847,7 +3250,7 @@ class MemoryPlugin(BasePlugin):
             return
 
         config_store = store_manager.get_model(sprite_id, MemoryConfig)
-        memory_types = get_activated_memory_types()
+        memory_types = config_store.memory_types
         empty_meta = MemoryMsgMeta()
 
         # 没回收的滚去回收
@@ -2917,10 +3320,8 @@ class MemoryPlugin(BasePlugin):
 
     @override
     async def on_sprite_reset(self, sprite_id: str, /) -> None:
-        memory_manager.delete_collection(sprite_id, "original")
-        memory_manager.delete_collection(sprite_id, "episodic")
-        memory_manager.delete_collection(sprite_id, "reflective")
-
+        for t in MEMORY_TYPES:
+            memory_manager.delete_collection(sprite_id, t)
 
 
 

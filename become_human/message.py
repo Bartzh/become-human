@@ -24,6 +24,7 @@ from langgraph.graph.message import _add_messages_wrapper, _format_messages, Mes
 from become_human.times import Times, format_time
 from become_human.utils import to_json_like_string, deep_dict_update, exclude_none_in_dict
 from become_human.names import PROJECT_NAME
+from become_human.store.manager import store_manager
 
 SPRITES_MESSAGE_METADATA_KEY = PROJECT_NAME
 
@@ -880,6 +881,7 @@ def add_messages(
     right: Messages,
     *,
     format: Optional[Literal["langchain-openai"]] = None,
+    sprite_id: Optional[str] = None,
 ) -> Messages:
     """Merges two lists of messages, updating existing messages by ID.
 
@@ -1016,7 +1018,7 @@ def add_messages(
             remove_all_idx = idx
 
     # 修改处
-    messages_post_processing(right)
+    messages_post_processing(right, sprite_id)
 
     if remove_all_idx is not None:
         return right[remove_all_idx + 1 :]
@@ -1052,7 +1054,7 @@ def add_messages(
 
     return merged
 
-def messages_post_processing(messages: list[BaseMessage]):
+def messages_post_processing(messages: list[BaseMessage], sprite_id: Optional[str] = None):
     for m in messages:
         for key, value in m.additional_kwargs.get(MESSAGE_METADATAS_KEY, {}).items():
             if isinstance(value, BaseMsgMeta):
@@ -1061,6 +1063,13 @@ def messages_post_processing(messages: list[BaseMessage]):
                 dict_meta = value.model_dump()['value']
                 exclude_none_in_dict(dict_meta)
                 m.additional_kwargs[MESSAGE_METADATAS_KEY][key] = dict_meta
+    if sprite_id:
+        current_times = Times.from_time_settings(store_manager.get_settings(sprite_id).time_settings)
+        default_meta = SpritesMsgMeta(
+            creation_times=current_times
+        )
+        for m in messages:
+            default_meta.fill_to(m)
     return messages
 
 

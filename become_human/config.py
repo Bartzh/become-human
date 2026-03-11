@@ -26,7 +26,6 @@ DEFAULT_SPRITES = {
     'default_sprite_1': {
         'plugins': {
             'bh_presence': True,
-            'reminder': True,
             'bh_memory': True,
             'instruction': True
         },
@@ -41,7 +40,6 @@ DEFAULT_SPRITES = {
     'default_sprite_2': {
         'plugins': {
             'bh_presence': True,
-            'reminder': True,
             'bh_memory': True
         },
         'settings': {
@@ -60,18 +58,17 @@ DEFAULT_SPRITES = {
             'memory_max_words': 150,
             'cleanup_on_unavailable': True,
             'cleanup_target_size': 800,
-            'active_retrieval_config': {
-                'similarity_weight': 0.4,
-                'retrievability_weight': 0.35,
-                'diversity_weight': 0.25
-            },
+            # 'active_common_retrieval_config': {
+            #     'similarity_weight': 0.4,
+            #     'retrievability_weight': 0.35,
+            #     'diversity_weight': 0.25
+            # },
             'passive_retrieval_ttl': 1800_000_000
         }
     },
     'default_sprite_3': {
         'plugins': {
             'bh_presence': True,
-            'reminder': True,
             'bh_memory': True,
             'time_incrementer': True,
             'instruction': True
@@ -316,7 +313,7 @@ async def load_config(plugins_with_name: dict[str, BasePlugin], sprite_ids: Opti
             multi_line_comment(doc, '这是全局配置文件')
             multi_line_comment(doc, '作用是当sprite的store或config中不存在数据时，会尝试从这里获取数据，如果还没有，再返回到代码里定义的默认值')
             multi_line_comment(doc, '全局配置文件不会写入store，不存在在非force情况下被跳过')
-            multi_line_comment(doc, '\n\n[plugins]\nreminder = true')
+            multi_line_comment(doc, '\n\n[plugins]\nreminder = true\nnote = true')
             dump(doc, f)
     else:
         # 加载并验证全局配置

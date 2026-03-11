@@ -240,12 +240,15 @@ class MainGraph(BaseGraph):
 
         core_prompts: list[PluginPrompt] = []
         secondary_prompts: list[PluginPrompt] = []
+        role_prompts: list[PluginPrompt] = []
         for plugin_name, plugin in self.plugins_with_name.items():
             if plugin_name in enabled_plugin_names and hasattr(plugin, 'prompts'):
                 if plugin.prompts.core:
                     core_prompts.append(plugin.prompts.core)
                 if plugin.prompts.secondary:
                     secondary_prompts.append(plugin.prompts.secondary)
+                if plugin.prompts.role:
+                    role_prompts.append(plugin.prompts.role)
         if core_prompts:
             core_prompt = '\n' + '\n\n'.join(f'## {p.title}\n\n{p.content}' for p in core_prompts) + '\n\n'
         else:
@@ -259,6 +262,8 @@ class MainGraph(BaseGraph):
         thought_prompt = '- 也因此，在`content`也就是正常的输出内容中，你可以自由地进行推理（思维链），制定计划，评估工具调用结果等。又或者如果你有什么想记下来给未来的自己看的，也可以放在这里。但请记住，就如刚才所说，除你自己之外没人看得到这些内容。'
         parsed_character_settings = store_settings.format_character_settings()
         role_prompt = f'## 基本信息：\n{parsed_character_settings if parsed_character_settings.strip() else '无'}\n\n## 详细设定：\n{store_settings.role_prompt}'
+        if role_prompts:
+            role_prompt += '\n\n' + '\n\n'.join(f'## {p.title}\n\n{p.content}' for p in role_prompts)
         role_prompt_with_state = f'''{role_prompt}
 
 ### 当前状态：
@@ -320,10 +325,13 @@ class MainGraph(BaseGraph):
 
 ## 时间感知
 
-用户的每条消息前都会附有自动生成的当前时间戳（格式为`[%Y-%m-%d %H:%M:%S %A]`）。请注意时间信息，并考虑时间流逝带来的影响。例如：
-- 当接收到[2025-06-10 15:00 Tuesday] 用户：明天喝咖啡？结合[2025-06-11 10:00 Wednesday]当前时间戳，应理解"明天"已变成"今天"，可以做出反应如：
+用户的每条消息前都会附有自动生成的当前时间戳（格式为`[%Y-%m-%d %H:%M:%S Week%W %A]`）。请注意时间信息，并考虑时间流逝带来的影响。例如：
+- 当接收到[2025-06-10 15:00 Week23 Tuesday] 用户：明天喝咖啡？结合[2025-06-11 10:00 Week23 Wednesday]当前时间戳，应理解"明天"已变成"今天"，可以做出反应如：
     调用`{SEND_MESSAGE}`：不好意思现在才看见消息，你还有约吗？
 - 长时间未互动可体现时光痕迹（"好久不见"等）。
+
+注意该时间戳其中的周数是从每年的第一个周一开始计算的，这意味着可能会出现第0周的情况，
+比如2026年的1月1日是星期四，那么直到第5日才会算作第1周，在此之前为第0周。（也可以说这个第0周实际上就是去年的没过完的最后一周，也就是2025年的第52周）
 
 还有其他一些系统消息也会附带类似的时间信息，需要注意的是这类由系统提供的时间信息都是基于你自己的时区计算的，而非用户，所以会存在小概率用户与你不在同一个时区的可能。
 {secondary_prompt}
@@ -504,7 +512,7 @@ class MainGraph(BaseGraph):
                 except Exception:
                     logger.exception(f"plugin {plugin.name} after_call_tools failed")
                 if control:
-                    after_call_tools_info = after_call_tools_info._update_from_control(control, plugin_name)
+                    after_call_tools_info = after_call_tools_info._update_from_control(control, plugin_name, sprite_id)
 
         tool_messages = after_call_tools_info.tool_responses_ctrl.current
         new_state["new_messages"] = tool_messages + update_new_messages
@@ -624,7 +632,7 @@ class MainGraph(BaseGraph):
                 except Exception:
                     logger.exception(f"plugin {plugin.name} on_update_messages failed")
                 if control:
-                    info = info._update_from_control(control, plugin_name)
+                    info = info._update_from_control(control, plugin_name, sprite_id)
             messages = info.messages_ctrl.current
 
         if not messages:

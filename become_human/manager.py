@@ -617,7 +617,7 @@ class SpriteManager:
                     except Exception:
                         logger.exception(f"plugin {plugin.name} on_call_sprite failed")
                     if control:
-                        on_call_sprite_info = on_call_sprite_info._update_from_control(control, plugin_name)
+                        on_call_sprite_info = on_call_sprite_info._update_from_control(control, plugin_name, sprite_id)
                 input_messages = on_call_sprite_info.input_messages_ctrl.current
                 call_sprite_request.input_messages = input_messages
                 # 如果已有sprite运行，排队更新
@@ -703,7 +703,7 @@ class SpriteManager:
                     except Exception:
                         logger.exception(f"plugin {plugin.name} on_call_sprite failed")
                     if control:
-                        on_call_sprite_info = on_call_sprite_info._update_from_control(control, plugin_name)
+                        on_call_sprite_info = on_call_sprite_info._update_from_control(control, plugin_name, sprite_id)
 
                 current_state = await self.main_graph.graph.aget_state(config)
                 if (
@@ -786,7 +786,7 @@ class SpriteManager:
             except Exception:
                 logger.exception(f"plugin {plugin.name} on_call_sprite failed")
             if control:
-                on_call_sprite_info = on_call_sprite_info._update_from_control(control, plugin_name)
+                on_call_sprite_info = on_call_sprite_info._update_from_control(control, plugin_name, sprite_id)
 
         input_messages = on_call_sprite_info.input_messages_ctrl.current
         call_sprite_request.input_messages = input_messages

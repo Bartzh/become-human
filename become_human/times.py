@@ -20,6 +20,11 @@ def timedelta_to_microseconds(td: timedelta) -> int:
     """将timedelta转换为微秒数"""
     return td.days * 86400_000_000 + td.seconds * 1_000_000 + td.microseconds
 
+def get_week(dt: datetime) -> int:
+    """获取dt所在的周数，0~53，一年的第一个周一算作第一周"""
+    #days = (dt - dt.replace(month=1, day=1)).days + 1
+    #return (days // 7) + 1
+    return int(dt.strftime('%W'))
 
 EPOCH = datetime(1, 1, 1, tzinfo=timezone.utc)
 MAX_TIMESTAMP_US = timedelta_to_microseconds(datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc) - EPOCH)
@@ -263,7 +268,7 @@ def format_time(time: Optional[Union[datetime, TimestampUs]], time_zone: Optiona
         elif not isinstance(time, datetime):
             return "时间信息损坏"
         # TODO: 考虑再加上时区
-        return time.strftime("%Y-%m-%d %H:%M:%S %A")
+        return time.strftime(f"%Y-%m-%d %H:%M:%S Week%W %A")
     except (OverflowError, OSError, ValueError):
         return "时间信息损坏"
 

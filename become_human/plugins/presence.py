@@ -25,7 +25,7 @@ class PresenceConfig(StoreModel):
     always_available: bool = StoreField(default=False, title="保持可用", description="是否一直处于可用状态，也即不存在sprite因不活跃而away的情况。若是，则available_duration_range将仅用作回收消息等功能，且passive_call依然有效，只有wakeup_call会失效")
     available_duration_range: tuple[float, float] = StoreField(default=(1800.0, 7200.0), title='在线时长随机范围', description="在线时长随机范围（最小值和最大值），在这之后进入休眠状态")
     temporary_available_duration_range: tuple[float, float] = StoreField(default=(180.0, 1800.0), title='临时在线时长随机范围', description="在无新消息时self_call后sprite获得的临时在线时长的随机范围（最小值和最大值），单位为秒。")
-    passive_call_intervals: Union[tuple[tuple[float, float]], tuple[()]] = StoreField(default=(
+    passive_call_intervals: Union[tuple[tuple[float, float], ...], tuple[()]] = StoreField(default=(
         (1800.0, 32400.0),
         (16200.0, 97200.0),
         (97200.0, 388800.0)
@@ -55,6 +55,7 @@ class PresenceData(StoreModel):
     presence_state: PresenceState = StoreField(default=PresenceState.AVAILABLE, description="当前状态，available, away, sleeping, offline")
     set_away_schedule_id: str = StoreField(default='', description="设置为离线状态的计划ID")
     wakeup_call_schedule_id: str = StoreField(default='', description="唤醒调用计划ID")
+    sleep_schedule_id: str = StoreField(default='', description="睡眠计划ID")
     last_user_input: TimestampUs = StoreField(default_factory=TimestampUs.now, description="上次用户输入时间，为sprite_world时间")
     has_new_user_call: bool = StoreField(default=True, description="是否有新的用户调用")
 
@@ -109,6 +110,10 @@ async def self_call_job(sprite_id: str, is_wakeup: bool = False) -> None:
     if is_wakeup:
         data_store.wakeup_call_schedule_id = ''
 
+async def set_sleeping_job(sprite_id: str) -> None:
+    """如果当前状态是AWAY，那么就设置为SLEEPING"""
+    if PresencePlugin.get_presence(sprite_id).is_away():
+        await PresencePlugin.set_presence(sprite_id, PresenceState.SLEEPING)
 
 
 class PresencePlugin(BasePlugin):
@@ -163,6 +168,26 @@ class PresencePlugin(BasePlugin):
     @override
     async def on_manager_init(self) -> None:
         event_bus.register('bh_presence:on_presence_changed')
+
+    @override
+    async def on_sprite_init(self, sprite_id: str, /) -> None:
+        config_store = store_manager.get_model(sprite_id, self.config)
+        if config_store.sleep_time_range:
+            # TODO 暂时不支持中途修改
+            data_store = store_manager.get_model(sprite_id, self.data)
+            if not data_store.sleep_schedule_id:
+                schedule = Schedule(
+                    sprite_id=sprite_id,
+                    schedule_provider='bh_presence',
+                    schedule_type='set_sleeping',
+                    job=set_sleeping_job,
+                    job_args=(sprite_id,),
+                    scheduled_time_of_day=config_store.sleep_time_range[0],
+                    scheduled_every_day=True,
+                    scheduled_every_month=True,
+                )
+                await schedule.add_to_db()
+                data_store.sleep_schedule_id = schedule.schedule_id
 
     @override
     async def before_call_sprite(self, request: CallSpriteRequest, info: BeforeCallSpriteInfo, /) -> Optional[BeforeCallSpriteControl]:

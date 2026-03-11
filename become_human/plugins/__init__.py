@@ -6,13 +6,15 @@ if TYPE_CHECKING:
     from become_human.plugins.presence import PresencePlugin
     from become_human.plugins.memory import MemoryPlugin
     from become_human.plugins.instruction import InstructionPlugin
+    from become_human.plugins.note import NotePlugin
 
 __all__ = [
     'ReminderPlugin',
     'TimeIncrementerPlugin',
     'PresencePlugin',
     'MemoryPlugin',
-    'InstructionPlugin'
+    'InstructionPlugin',
+    'NotePlugin'
 ]
 
 def __getattr__(name):
@@ -31,4 +33,7 @@ def __getattr__(name):
     if name == 'InstructionPlugin':
         from become_human.plugins.instruction import InstructionPlugin
         return InstructionPlugin
+    if name == 'NotePlugin':
+        from become_human.plugins.note import NotePlugin
+        return NotePlugin
     raise AttributeError(f"module {__name__} has no attribute {name}")

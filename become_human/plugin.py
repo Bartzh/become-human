@@ -154,13 +154,14 @@ class OnCallSpriteInfo(BaseInfo):
 
     input_messages_ctrl: ChangeableField[list[BaseMessage]]
 
-    def _update_from_control(self, control: OnCallSpriteControl, plugin_name: str) -> Self:
+    def _update_from_control(self, control: OnCallSpriteControl, plugin_name: str, sprite_id: str) -> Self:
         new = {}
         if control.input_messages_patch is not UNSET:
             new['input_messages_ctrl'] = self.input_messages_ctrl._change(
                 add_messages(
                     self.input_messages_ctrl.current,
-                    control.input_messages_patch
+                    control.input_messages_patch,
+                    sprite_id=sprite_id
                 ),
                 plugin_name
             )
@@ -220,13 +221,13 @@ class AfterCallToolsInfo(BaseInfo):
     exit_loop_ctrl: ChangeableField[bool]
     tool_responses_ctrl: ChangeableField[list[ToolMessage]]
 
-    def _update_from_control(self, control: AfterCallToolsControl, plugin_name: str) -> Self:
+    def _update_from_control(self, control: AfterCallToolsControl, plugin_name: str, sprite_id: str) -> Self:
         new = {}
         if control.exit_loop is not UNSET:
             new['exit_loop_ctrl'] = self.exit_loop_ctrl._change(control.exit_loop, plugin_name)
         if control.tool_responses_patch is not UNSET:
             new['tool_responses_ctrl'] = self.tool_responses_ctrl._change(
-                add_messages(self.tool_responses_ctrl.current, control.tool_responses_patch),
+                add_messages(self.tool_responses_ctrl.current, control.tool_responses_patch, sprite_id=sprite_id),
                 plugin_name
             )
         # 只进行浅拷贝
@@ -242,11 +243,11 @@ class OnUpdateMessagesControl(BaseControl):
 class OnUpdateMessagesInfo(BaseInfo):
     messages_ctrl: ChangeableField[list[BaseMessage]]
 
-    def _update_from_control(self, control: OnUpdateMessagesControl, plugin_name: str) -> Self:
+    def _update_from_control(self, control: OnUpdateMessagesControl, plugin_name: str, sprite_id: str) -> Self:
         new = {}
         if control.messages_patch is not UNSET:
             new['messages_ctrl'] = self.messages_ctrl._change(
-                add_messages(self.messages_ctrl.current, control.messages_patch),
+                add_messages(self.messages_ctrl.current, control.messages_patch, sprite_id=sprite_id),
                 plugin_name
             )
         # 只进行浅拷贝
@@ -365,6 +366,8 @@ class PluginPrompts(BaseModel):
     """插件核心提示"""
     secondary: Optional[PluginPrompt] = None
     """插件次要提示"""
+    role: Optional[PluginPrompt] = None
+    """插件角色提示"""
 
 class BasePlugin:
     """插件基类

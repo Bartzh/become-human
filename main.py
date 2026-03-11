@@ -38,6 +38,7 @@ async def main():
         InstructionPlugin,
         ReminderPlugin,
         TimeIncrementerPlugin,
+        NotePlugin,
     ], heartbeat_interval=10)
     await sprite_manager.init_sprite(sprite_id)
 

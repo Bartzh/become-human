@@ -52,6 +52,7 @@ async def lifespan(app: FastAPI):
         InstructionPlugin,
         ReminderPlugin,
         TimeIncrementerPlugin,
+        NotePlugin,
     ])
     yield
     await sprite_manager.close_manager()
