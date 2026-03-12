@@ -5,7 +5,9 @@ from become_human.store.base import StoreModel, StoreField
 from become_human.store.manager import store_manager
 from become_human.manager import CallSpriteRequest
 from become_human.plugin import *
-from become_human.config import get_sprite_enabled_plugin_names
+from become_human.manager import sprite_manager
+from become_human.times import Times, format_time
+from become_human.message import DictMsgMeta
 
 NAME = 'note'
 
@@ -20,15 +22,21 @@ class NoteData(StoreModel):
     next_id: int = StoreField(default=0)
 
 
-@tool
+@tool(response_format='content_and_artifact')
 async def list_notes(runtime: ToolRuntime[CallSpriteRequest]) -> str:
     """列出所有笔记（的标题）"""
     notes = store_manager.get_model(runtime.context.sprite_id, NoteData).notes
     if not notes:
         return "暂无任何笔记"
-    return "\n".join([f"{note_id}. {note.title}" for note_id, note in notes.items()])
+    artifact = DictMsgMeta(
+        KEY='bh_memory',
+        value={
+            'do_not_store': True,
+        }
+    )
+    return "\n".join([f"{note_id}. {note.title}" for note_id, note in notes.items()]), artifact
 
-@tool
+@tool(response_format='content_and_artifact')
 async def read_note(runtime: ToolRuntime[CallSpriteRequest], id: Annotated[int, "笔记ID"]) -> str:
     """读取指定笔记"""
     notes = store_manager.get_model(runtime.context.sprite_id, NoteData).notes
@@ -37,7 +45,13 @@ async def read_note(runtime: ToolRuntime[CallSpriteRequest], id: Annotated[int, 
     note = notes.get(id)
     if note is None:
         return f"不存在ID为{id}的笔记"
-    return note.content
+    artifact = DictMsgMeta(
+        KEY='bh_memory',
+        value={
+            'do_not_store': True,
+        }
+    )
+    return f'笔记内容：{note.content}', artifact
 
 @tool
 async def write_note(
@@ -49,7 +63,8 @@ async def write_note(
     """写入笔记"""
     if not title.strip() or not content.strip():
         return "笔记标题或内容不能为空"
-    data = store_manager.get_model(runtime.context.sprite_id, NoteData)
+    sprite_id = runtime.context.sprite_id
+    data = store_manager.get_model(sprite_id, NoteData)
     if id or id == 0:
         try:
             id = int(id)
@@ -60,15 +75,33 @@ async def write_note(
         if id not in data.notes:
             return f"不存在ID为{id}的笔记" 
         else:
-            content = f"覆盖笔记成功"
+            output = f"覆盖笔记成功"
     else:
         id = data.next_id
         data.next_id += 1
-        content = "新增笔记成功"
+        output = "新增笔记成功"
     notes = data.notes.copy()
     notes[id] = Note(title, content)
     data.notes = notes
-    return content
+
+    if 'bh_memory' in sprite_manager.get_plugin_names(sprite_id):
+        plugin = sprite_manager.get_plugin('bh_memory', sprite_id)
+        content = content if len(content) <= 40 else content[:40] + "..."
+        times = Times.from_time_settings(store_manager.get_settings(sprite_id).time_settings)
+        await plugin.add_memory(
+            sprite_id=sprite_id,
+            type='original',
+            content=f'我于 {format_time(times.sprite_world_datetime)} 记下了笔记“{title}”，内容是：{content}',
+            lambd=0.6
+        )
+        await plugin.add_memory(
+            sprite_id=sprite_id,
+            type='reflective',
+            content=f'{title}：{content}',
+            lambd=0.4
+        )
+
+    return output
 
 @tool
 async def delete_note(runtime: ToolRuntime[CallSpriteRequest], id: Annotated[int, "笔记ID"]) -> str:
@@ -88,7 +121,7 @@ class NotePlugin(BasePlugin):
 
     @override
     async def before_call_model(self, request: CallSpriteRequest, info: BeforeCallModelInfo, /) -> None:
-        if 'bh_memory' in get_sprite_enabled_plugin_names(request.sprite_id):
+        if 'bh_memory' in sprite_manager.get_plugin_names(request.sprite_id):
             self.prompts = PluginPrompts(
                 secondary=PluginPrompt(
                     title="笔记系统",

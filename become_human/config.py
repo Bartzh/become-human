@@ -248,6 +248,7 @@ def write_default_sprite_comments() -> None:
 
 
 plugin_configs: dict[str, type[StoreModel]] = {}
+plugins: dict[str, BasePlugin] = {}
 async def load_config(plugins_with_name: dict[str, BasePlugin], sprite_ids: Optional[Union[list[str], str]] = None, force: bool = False) -> None:
     """载入config。需要先初始化store！
 
@@ -270,8 +271,9 @@ async def load_config(plugins_with_name: dict[str, BasePlugin], sprite_ids: Opti
         sprite_ids: 要加载的sprite id列表，默认加载所有sprite
         force: 是否强制加载，默认情况下会跳过已被写入过的顶层StoreModel（即BuiltinSettings和各插件的config）
     """
-    global sprite_configs, global_config, plugin_configs
+    global sprite_configs, global_config, plugin_configs, plugins
     plugin_configs = {name: plugin.config for name, plugin in plugins_with_name.items() if hasattr(plugin, 'config')}
+    plugins = plugins_with_name
 
     def _write_config_to_store(d: dict, namespace: tuple[str, ...], model: Type[StoreModel]) -> list[PutOp]:
         put_ops = []
@@ -454,7 +456,7 @@ def get_sprite_enabled_plugin_names(sprite_id: str) -> list[str]:
     sprite_config = get_sprite_config(sprite_id)
     enabled_plugins = global_config.get('plugins', {}).copy()
     enabled_plugins.update(sprite_config.get('plugins', {}))
-    return [plugin for plugin, enabled in enabled_plugins.items() if enabled]
+    return [plugin for plugin, enabled in enabled_plugins.items() if enabled and plugin in plugins]
 
 def get_init_on_startup_sprite_ids() -> list[str]:
     return [sprite_id for sprite_id, sprite_config in sprite_configs.items() if sprite_config.get('init_on_startup')]
