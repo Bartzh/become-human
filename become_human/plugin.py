@@ -8,6 +8,7 @@ from become_human.types.manager import CallSpriteRequest, DoubleTextingStrategy
 from become_human.tool import SpriteTool
 from become_human.store.base import StoreModel
 from become_human.message import add_messages
+from become_human.names import PROJECT_NAME
 
 __all__ = [
     'BasePlugin',
@@ -400,7 +401,7 @@ class BasePlugin:
             raise TypeError(f"Plugin name {cls.name} must be a string.")
         if not cls.name:
             raise TypeError(f"Plugin name cannot be empty.")
-        elif cls.name in ['settings', 'plugins', 'init_on_startup', 'prompts', 'log']:
+        elif cls.name in [PROJECT_NAME, 'plugins', 'init_on_startup', 'prompts', 'log']:
             raise TypeError(f"Plugin name {cls.name} is reserved.")
 
         if not hasattr(cls, 'version'):
@@ -425,6 +426,16 @@ class BasePlugin:
         if hasattr(cls, 'prompts'):
             if not isinstance(cls.prompts, PluginPrompts):
                 raise TypeError(f"Plugin prompts {cls.prompts} must be a PluginPrompts instance.")
+
+        if hasattr(cls, 'config'):
+            if not issubclass(cls.config, StoreModel):
+                raise TypeError(f"Plugin config {cls.config} must be a StoreModel subclass.")
+            cls.config._is_config = True
+
+        if hasattr(cls, 'data'):
+            if not issubclass(cls.data, StoreModel):
+                raise TypeError(f"Plugin data {cls.data} must be a StoreModel subclass.")
+            cls.data._is_config = False
 
 
     async def on_manager_init(self) -> None:

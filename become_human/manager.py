@@ -24,14 +24,16 @@ from become_human.message import (
     format_messages,
     extract_text_parts,
     construct_system_message,
-    SpritesMsgMeta,
-    SpritesMsgMetaOptionalTimes,
+    SpritedMsgMeta,
+    SpritedMsgMetaOptionalTimes,
     add_messages,
     DEFAULT_TOOL_MSG_TYPE,
     DEFAULT_USER_MSG_TYPE
 )
 from become_human.store.base import store_setup, store_stop_listener, store_adelete_namespace
-from become_human.store.manager import store_manager, BuiltinStore
+from become_human.store.settings import SpritedSettings
+from become_human.store.states import SpritedStates
+from become_human.store.manager import store_manager
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 from become_human.scheduler import get_schedules, tick_schedules, delete_schedules, init_schedules_db, Schedule, update_schedules
 from become_human.plugin import *
@@ -135,17 +137,18 @@ class SpriteManager:
 
         await load_config(self.plugins_with_name)
 
-        store_namespaces = set(BuiltinStore._namespace)
+        config_namespaces = set([SpritedSettings._namespace])
+        data_namespaces = set([SpritedStates._namespace])
         for name, plugin in self.plugins_with_name.items():
             if hasattr(plugin, 'config'):
-                if plugin.config._namespace not in store_namespaces:
-                    store_namespaces.add(plugin.config._namespace)
+                if plugin.config._namespace not in config_namespaces:
+                    config_namespaces.add(plugin.config._namespace)
                     await store_manager.register_model(plugin.config)
                 else:
                     raise ValueError(f"Plugin {name} config namespace {plugin.config._namespace} is duplicated.")
             if hasattr(plugin, 'data'):
-                if plugin.data._namespace not in store_namespaces:
-                    store_namespaces.add(plugin.data._namespace)
+                if plugin.data._namespace not in data_namespaces:
+                    data_namespaces.add(plugin.data._namespace)
                     await store_manager.register_model(plugin.data)
                 else:
                     raise ValueError(f"Plugin {name} data namespace {plugin.data._namespace} is duplicated.")
@@ -258,9 +261,8 @@ class SpriteManager:
 
         try:
             config = {"configurable": {"thread_id": sprite_id}}
-            sprite_store = store_manager.get_builtin(sprite_id)
-            sprite_settings = sprite_store.settings
-            sprite_states = sprite_store.states
+            sprite_settings = store_manager.get_settings(sprite_id)
+            sprite_states = store_manager.get_states(sprite_id)
 
             # 获取时间
             current_times = Times.from_time_settings(sprite_settings.time_settings)
@@ -447,7 +449,7 @@ class SpriteManager:
                     user_input[i] = new_content_block
         else:
             raise ValueError("Invalid input type")
-        graph_input = [SpritesMsgMeta(
+        graph_input = [SpritedMsgMeta(
             creation_times=current_times,
             message_type=DEFAULT_USER_MSG_TYPE
         ).set_to(HumanMessage(
@@ -533,7 +535,7 @@ class SpriteManager:
 
         time_settings = store_manager.get_settings(sprite_id).time_settings
         current_times = Times.from_time_settings(time_settings)
-        default_meta = SpritesMsgMetaOptionalTimes(creation_times=current_times)
+        default_meta = SpritedMsgMetaOptionalTimes(creation_times=current_times)
         for message in input_messages:
             default_meta.fill_to(message)
 
@@ -908,7 +910,7 @@ class SpriteManager:
                                         else:
                                             if tool_calls[tool_index].get('id'):
                                                 now_times = Times.from_time_settings(store_settings.time_settings)
-                                                streaming_tool_messages.append(SpritesMsgMeta(
+                                                streaming_tool_messages.append(SpritedMsgMeta(
                                                     creation_times=now_times,
                                                     message_type=DEFAULT_TOOL_MSG_TYPE
                                                 ).set_to(ToolMessage(
@@ -934,7 +936,7 @@ class SpriteManager:
                                             result = await method(tool_calls[tool_index]['args'])
                                             if tool_calls[tool_index].get('id'):
                                                 now_times = Times.from_time_settings(store_settings.time_settings)
-                                                streaming_tool_messages.append(SpritesMsgMeta(
+                                                streaming_tool_messages.append(SpritedMsgMeta(
                                                     creation_times=now_times,
                                                     message_type=DEFAULT_TOOL_MSG_TYPE
                                                 ).set_to(ToolMessage(
@@ -1295,7 +1297,7 @@ config: 仅重置配置（settings）
                     if len(splited_input) >= 2 and splited_input[1]:
                         reset_type = splited_input[1]
                         if reset_type == 'config':
-                            await store_adelete_namespace((sprite_id, 'model', 'settings'))
+                            await store_adelete_namespace(('sprites', sprite_id, 'configs'))
                             await store_manager.init_sprite(sprite_id)
                             return "已重置该sprite配置。"
                         elif reset_type == 'all':

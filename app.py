@@ -25,7 +25,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from become_human.plugins import *
 from become_human import sprite_manager
-from become_human.message import SpritesMsgMeta, convert_to_content_blocks, DEFAULT_AI_MSG_TYPE, DEFAULT_USER_MSG_TYPE
+from become_human.message import SpritedMsgMeta, convert_to_content_blocks, DEFAULT_AI_MSG_TYPE, DEFAULT_USER_MSG_TYPE
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT
 
 #from fastapi.middleware.cors import CORSMiddleware
@@ -169,7 +169,7 @@ async def init_endpoint(request: Request, token: str = Depends(oauth2_scheme)):
     human_message_pattern = re.compile(r'^\[.*?\]\n.*?: ')
     messages = []
     for message in main_messages:
-        metadata = SpritesMsgMeta.parse(message)
+        metadata = SpritedMsgMeta.parse(message)
         if (
             metadata.message_type != DEFAULT_USER_MSG_TYPE and
             metadata.message_type != DEFAULT_AI_MSG_TYPE

@@ -17,7 +17,7 @@ class Note:
     content: str
 
 class NoteData(StoreModel):
-    _namespace = NAME + '_data'
+    _namespace = NAME
     notes: dict[int, Note] = StoreField(default_factory=dict)
     next_id: int = StoreField(default=0)
 

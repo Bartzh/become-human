@@ -6,7 +6,7 @@ from become_human.store.base import StoreModel, StoreField
 
 
 class MemoryConfig(StoreModel):
-    _namespace = PLUGIN_NAME + '_config'
+    _namespace = PLUGIN_NAME
     _title = "memory设置"
     memory_types: tuple[AnyMemoryType, ...] = StoreField(default=('original', 'reflective', 'summary'), title='启用的记忆类型')
     memory_base_ttl: int = StoreField(default=259200_000_000, title='记忆稳定时长基值', description="记忆初始化时ttl的初始值")
@@ -93,7 +93,7 @@ class MemoryConfig(StoreModel):
 
 
 class MemoryData(StoreModel):
-    _namespace = PLUGIN_NAME + '_data'
+    _namespace = PLUGIN_NAME
     _title = "memory数据"
     last_added_memory_ids: dict[str, str] = StoreField(default_factory=dict, title='上次添加的记忆id')
     last_summarized_times: Optional[Times] = StoreField(default=None, title='上次总结过的时间')

@@ -26,7 +26,7 @@ from become_human.utils import to_json_like_string, deep_dict_update, exclude_no
 from become_human.names import PROJECT_NAME
 from become_human.store.manager import store_manager
 
-SPRITES_MESSAGE_METADATA_KEY = PROJECT_NAME
+SPRITED_MESSAGE_METADATA_KEY = PROJECT_NAME
 
 MESSAGE_METADATAS_KEY = PROJECT_NAME + '_msg_metas'
 
@@ -849,8 +849,8 @@ def _process_artifact(message: Any) -> None:
 
 
 
-class SpritesMsgMeta(BaseMsgMeta):
-    """Metadata for a Sprites message."""
+class SpritedMsgMeta(BaseMsgMeta):
+    """Metadata for a Sprited message."""
 
     creation_times: Times
     """消息创建时间"""
@@ -859,17 +859,17 @@ class SpritesMsgMeta(BaseMsgMeta):
     is_action_only_tool: Optional[bool] = Field(default=None)
     """sprite是否不用特意再看一遍此(工具)消息"""
 
-    KEY: ClassVar = SPRITES_MESSAGE_METADATA_KEY
+    KEY: ClassVar = SPRITED_MESSAGE_METADATA_KEY
 
 
-class SpritesMsgMetaOptionalTimes(SpritesMsgMeta):
-    """主要作用是使SpritesMsgMeta可以不填写时间，由之后的节点来添加时间信息。同时还有一个默认的消息类型
+class SpritedMsgMetaOptionalTimes(SpritedMsgMeta):
+    """主要作用是使SpritedMsgMeta可以不填写时间，由之后的节点来添加时间信息。同时还有一个默认的消息类型
 
     以及在parse时防止报错
 
-    最终还是会使用SpritesMsgMeta，这个结构只是方便输入
+    最终还是会使用SpritedMsgMeta，这个结构只是方便输入
 
-    目前支持的场景有BaseTool、InitalAIMessage、InitalToolCall、construct_system_message"""
+    目前支持的场景有call_sprite、BaseTool、InitalAIMessage、InitalToolCall、construct_system_message"""
     creation_times: Optional[Times] = Field(default=None)
 
 
@@ -1065,7 +1065,7 @@ def messages_post_processing(messages: list[BaseMessage], sprite_id: Optional[st
                 m.additional_kwargs[MESSAGE_METADATAS_KEY][key] = dict_meta
     if sprite_id:
         current_times = Times.from_time_settings(store_manager.get_settings(sprite_id).time_settings)
-        default_meta = SpritesMsgMeta(
+        default_meta = SpritedMsgMeta(
             creation_times=current_times
         )
         for m in messages:
@@ -1081,7 +1081,7 @@ def format_ai_message(message: AIMessage) -> str:
     message_string = "<AI>\n"
     if message.tool_calls:
         for tool_call in message.tool_calls:
-            message_string += f'''<action name="{tool_call['name']}" datetime="{format_time(SpritesMsgMeta.parse(message).creation_times.sprite_world_datetime)}">
+            message_string += f'''<action name="{tool_call['name']}" datetime="{format_time(SpritedMsgMeta.parse(message).creation_times.sprite_world_datetime)}">
 <args>
 {to_json_like_string(tool_call['args'])}
 </args>
@@ -1089,7 +1089,7 @@ def format_ai_message(message: AIMessage) -> str:
     return message_string.strip() + '\n</AI>'
 
 def format_tool_message(message: ToolMessage) -> str:
-    metadata = SpritesMsgMeta.parse(message)
+    metadata = SpritedMsgMeta.parse(message)
     feedback_content = '\n'.join(extract_text_parts(message.content))
     return f'''<action name="{message.name}" datetime="{format_time(metadata.creation_times.sprite_world_datetime)}>
 <feedback>
@@ -1148,7 +1148,7 @@ def construct_system_message(
     """sprites_msg_metas 默认包含 SpritesMsgMeta 中的 creation_times、message_type，以及 MemoryMsgMeta 中的 do_not_store
 
     extra_metas 可以包含刚才默认包含的meta，将会与默认值合并，默认包含的字段会被相应值覆盖（若有）"""
-    default_metadata = SpritesMsgMeta(
+    default_metadata = SpritedMsgMeta(
         message_type=message_type,
         creation_times=times
     )
@@ -1237,7 +1237,7 @@ class InitalAIMessage(BaseModel):
                 'type': 'function'
             } for i, tool_call in enumerate(tool_calls_with_id)]
         }
-        default_metadata = SpritesMsgMeta(
+        default_metadata = SpritedMsgMeta(
             message_type=DEFAULT_AI_MSG_TYPE,
             creation_times=times
         )
@@ -1263,7 +1263,7 @@ class InitalAIMessage(BaseModel):
         )]
 
 
-        default_tool_metadata = SpritesMsgMeta(
+        default_tool_metadata = SpritedMsgMeta(
             message_type=DEFAULT_TOOL_MSG_TYPE,
             creation_times=times
         )

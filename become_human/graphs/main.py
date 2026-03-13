@@ -28,7 +28,7 @@ import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from become_human.graphs.base import BaseGraph
-from become_human.message import add_messages, SpritesMsgMeta, SpritesMsgMetaOptionalTimes
+from become_human.message import add_messages, SpritedMsgMeta, SpritedMsgMetaOptionalTimes
 from become_human.types.main import MainState, StateEntry, InterruptData
 from become_human.types.manager import CallSpriteRequest
 from become_human.times import Times
@@ -369,7 +369,7 @@ class MainGraph(BaseGraph):
         ])
         response = await llm_with_tools.ainvoke(await use_system_prompt_template.ainvoke({"msgs": state.messages}))
         current_times = Times.from_time_settings(store_settings.time_settings)
-        SpritesMsgMeta(
+        SpritedMsgMeta(
             creation_times=current_times,
             message_type=DEFAULT_AI_MSG_TYPE
         ).set_to(response)
@@ -443,7 +443,7 @@ class MainGraph(BaseGraph):
         tool_messages = state.tool_messages[1:]
         settings = store_manager.get_settings(sprite_id)
         current_times = Times.from_time_settings(settings.time_settings)
-        default_meta = SpritesMsgMetaOptionalTimes(
+        default_meta = SpritedMsgMetaOptionalTimes(
             creation_times=current_times,
             message_type=DEFAULT_TOOL_MSG_TYPE
         )
@@ -456,7 +456,7 @@ class MainGraph(BaseGraph):
         direct_exit = True
         recorded_thoughts = False
         for message in tool_messages:
-            if not SpritesMsgMeta.parse(message).is_action_only_tool:
+            if not SpritedMsgMeta.parse(message).is_action_only_tool:
                 direct_exit = False
             if message.name == RECORD_THOUGHTS:
                 recorded_thoughts = True
@@ -615,7 +615,7 @@ class MainGraph(BaseGraph):
         state = await self.graph.aget_state(config)
         time_settings = store_manager.get_settings(sprite_id).time_settings
         current_times = Times.from_time_settings(time_settings)
-        default_meta = SpritesMsgMetaOptionalTimes(
+        default_meta = SpritedMsgMetaOptionalTimes(
             creation_times=current_times
         )
         for message in messages:
@@ -735,7 +735,7 @@ class MainGraph(BaseGraph):
             called_tool_message_ids = called_tool_messages_with_id.keys()
             # 用可获取到的最晚的tool_message的创建时间作为新的工具消息的创建时间，chunk的创建时间则作为兜底
             if called_tool_messages:
-                last_tool_message_metadata = SpritesMsgMeta.parse(called_tool_messages[-1])
+                last_tool_message_metadata = SpritedMsgMeta.parse(called_tool_messages[-1])
                 last_creation_times = last_tool_message_metadata.creation_times
             else:
                 #last_creation_times = interrupt_data.get('last_chunk_times', current_times)
@@ -749,7 +749,7 @@ class MainGraph(BaseGraph):
                         interrupt_messages.append(called_tool_messages_with_id[tool_call_id])
                     # 如果是send_message，被打断前的消息是依然存在的
                     elif tool_call["name"] == SEND_MESSAGE:
-                        interrupt_messages.append(SpritesMsgMeta(
+                        interrupt_messages.append(SpritedMsgMeta(
                             creation_times=last_creation_times,
                             message_type=DEFAULT_TOOL_MSG_TYPE,
                             is_action_only_tool=True
@@ -760,7 +760,7 @@ class MainGraph(BaseGraph):
                         )))
                     # 对于其他tool_call，则直接添加取消执行消息
                     else:
-                        interrupt_messages.append(SpritesMsgMeta(
+                        interrupt_messages.append(SpritedMsgMeta(
                             creation_times=last_creation_times,
                             message_type=DEFAULT_TOOL_MSG_TYPE
                         ).set_to(ToolMessage(

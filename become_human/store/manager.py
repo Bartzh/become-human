@@ -1,13 +1,7 @@
 from typing import TypeVar
 from become_human.store.base import StoreModel, store_asearch
-from become_human.store.settings import BuiltinSettings
-from become_human.store.states import BuiltinStates
-
-class BuiltinStore(StoreModel):
-    _namespace = ('builtin',)
-    _title = "builtin存储模型"
-    settings: BuiltinSettings
-    states: BuiltinStates
+from become_human.store.settings import SpritedSettings
+from become_human.store.states import SpritedStates
 
 StoreType = TypeVar('StoreType', bound=StoreModel)
 class StoreManager:
@@ -16,11 +10,10 @@ class StoreManager:
 
     def __init__(self) -> None:
         self.sprites = {}
-        self.models = [BuiltinStore]
+        self.models = [SpritedSettings, SpritedStates]
 
     async def _init_model(self, sprite_id: str, model: type[StoreModel]) -> None:
-        search_items = await store_asearch(('sprites', sprite_id, 'models') + model._namespace)
-        self.sprites[sprite_id][model] = model(items=search_items, sprite_id=sprite_id)
+        self.sprites[sprite_id][model] = await model.from_store(sprite_id)
 
     async def init_sprite(self, sprite_id: str) -> None:
         if sprite_id not in self.sprites.keys():
@@ -45,13 +38,10 @@ class StoreManager:
         if sprite_id in self.sprites.keys():
             del self.sprites[sprite_id]
 
-    def get_builtin(self, sprite_id: str) -> BuiltinStore:
-        return self.get_model(sprite_id, BuiltinStore)
+    def get_settings(self, sprite_id: str) -> SpritedSettings:
+        return self.get_model(sprite_id, SpritedSettings)
 
-    def get_settings(self, sprite_id: str) -> BuiltinSettings:
-        return self.get_builtin(sprite_id).settings
-
-    def get_states(self, sprite_id: str) -> BuiltinStates:
-        return self.get_builtin(sprite_id).states
+    def get_states(self, sprite_id: str) -> SpritedStates:
+        return self.get_model(sprite_id, SpritedStates)
 
 store_manager = StoreManager()

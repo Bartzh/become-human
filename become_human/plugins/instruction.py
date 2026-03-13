@@ -8,9 +8,10 @@ from become_human.times import format_time, Times
 from become_human.message import InitalAIMessage, construct_system_message
 from become_human.manager import sprite_manager
 
+NAME = 'instruction'
 
 class InstructionConfig(StoreModel):
-    _namespace = 'instruction_config'
+    _namespace = NAME
     _title = '引导提示词配置'
 
     instruction_prompt: str = StoreField(default="打个招呼吧。", title="引导提示词", description="作为sprite的第一条用户消息出现，对sprite进行引导。")
@@ -18,12 +19,12 @@ class InstructionConfig(StoreModel):
     react_instruction: bool = StoreField(default=False, title="反应引导", description="是否以instruction_prompt调用sprite，这会覆盖initial_ai_messages。")
 
 class InstructionData(StoreModel):
-    _namespace = 'instruction_data'
+    _namespace = NAME
     _title = '引导提示词数据'
     is_first_time: bool = StoreField(default=True, title="是否首次运行", description="是否首次运行，首次运行时会添加引导消息。")
 
 class InstructionPlugin(BasePlugin):
-    name = "instruction"
+    name = NAME
     config = InstructionConfig
     data = InstructionData
 

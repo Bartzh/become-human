@@ -4,7 +4,7 @@ from langchain.tools import tool, ToolRuntime
 from langgraph.types import Command
 
 from become_human.times import Times
-from become_human.message import SpritesMsgMeta, DEFAULT_TOOL_MSG_TYPE
+from become_human.message import SpritedMsgMeta, DEFAULT_TOOL_MSG_TYPE
 from become_human.store.manager import store_manager
 from become_human.types.manager import CallSpriteRequest
 
@@ -36,7 +36,7 @@ async def send_message(
     sprite_id = runtime.context.sprite_id
     time_settings = store_manager.get_settings(sprite_id).time_settings
     times = Times.from_time_settings(time_settings)
-    artifact = SpritesMsgMeta(
+    artifact = SpritedMsgMeta(
         creation_times=times,
         message_type=DEFAULT_TOOL_MSG_TYPE,
         is_action_only_tool=True

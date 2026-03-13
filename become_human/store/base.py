@@ -308,13 +308,13 @@ class StoreModel:
     - 实例的属性不能被改变
     - 不会存储数据到数据库中
     - 不会从全局配置中获取默认值
-    - 初始化时不能指定sprite_id
-    - _namespace不会有('sprites', self._sprite_id, 'models')的前缀"""
+    - 若没有指定sprite_id，_namespace不会有('sprites', self._sprite_id, 'datas'/'configs')的前缀"""
 
     _sprite_id: str
     _namespace: tuple[str, ...]
     _title: Optional[str] = None
     _description: Optional[str] = None
+    _is_config: bool = False
     _cache: dict[str, StoreItem]
     _frozen: bool
 
@@ -327,24 +327,32 @@ class StoreModel:
         elif not isinstance(cls._namespace, tuple):
             raise TypeError(f"StoreModel子类 {cls.__name__} 的_namespace 必须是 str 或 tuple[str, ...] 类型。")
 
+    @classmethod
+    async def from_store(cls, sprite_id: str, frozen: bool = False):
+        search_items = await store_asearch(
+            ('sprites', sprite_id, 'configs' if cls._is_config else 'datas') + cls._namespace
+        )
+        return cls(items=search_items, sprite_id=sprite_id, frozen=frozen)
+
     def __init__(
         self,
         items: list[Union[SearchItem, SimpleItem]],
         sprite_id: Optional[str] = None,
         namespace: Optional[tuple[str, ...]] = None,
         frozen: bool = False,
+        _is_config: Optional[bool] = None
     ):
+        if _is_config is not None:
+            self._is_config = _is_config
         self._frozen = frozen
         self_cls = self.__class__
         type_hints = self.get_type_hints()
         cached = {}
         not_cached = []
-        if not frozen:
-            if not sprite_id:
-                raise ValueError("非frozen下初始化StoreModel必须指定sprite_id")
+        if not frozen and sprite_id is None:
+            raise ValueError("非frozen下初始化StoreModel必须指定sprite_id")
+        if sprite_id is not None:
             self._sprite_id = sprite_id
-        elif sprite_id:
-            raise ValueError("frozen下初始化StoreModel不能指定sprite_id")
         if namespace:
             self._namespace = namespace + super().__getattribute__('_namespace')
         self_namespace = self._namespace
@@ -395,18 +403,16 @@ class StoreModel:
                     sprite_id=sprite_id,
                     namespace=super().__getattribute__('_namespace'),
                     frozen=frozen,
+                    _is_config=self._is_config if _is_config is None else _is_config
                 )
                 super().__setattr__(attr_name, nested_model)
 
     def __getattribute__(self, name: str):
         if name == '_namespace':
-            if self._frozen:
+            if (sprite_id := getattr(self, '_sprite_id', None)) is not None:
+                return ('sprites', sprite_id, 'configs' if self._is_config else 'datas') + super().__getattribute__('_namespace')
+            else:
                 return super().__getattribute__('_namespace')
-            return ('sprites', self._sprite_id, 'models') + super().__getattribute__('_namespace')
-        if name == '_sprite_id':
-            if self._frozen:
-                raise AttributeError(f"这是一个冻结的 {self.__class__.__name__} 实例，不存在sprite_id。")
-            return super().__getattribute__('_sprite_id')
         attr = super().__getattribute__(name)
         if not isinstance(attr, StoreField):
             return attr
@@ -519,8 +525,8 @@ class StoreModel:
                 elif isinstance(field, StoreModel):
                     result[field_name] = field.to_dict()
         result['_frozen'] = self._frozen
-        if not self._frozen:
-            result['_sprite_id'] = self._sprite_id
+        if (sprite_id := getattr(self, '_sprite_id', None)) is not None:
+            result['_sprite_id'] = sprite_id
         result['_namespace'] = self._namespace
         result['_title'] = self._title
         result['_description'] = self._description

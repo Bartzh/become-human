@@ -11,7 +11,7 @@ from become_human.types.manager import CallSpriteRequest
 from become_human.scheduler import Schedule, get_schedules, delete_schedules
 from become_human.tool import SpriteTool
 from become_human.store.manager import store_manager
-from become_human.message import SpritesMsgMeta, extract_text_parts, construct_system_message
+from become_human.message import SpritedMsgMeta, extract_text_parts, construct_system_message
 from become_human.times import Times
 from become_human.plugin import *
 from become_human.plugins.memory.types import PLUGIN_NAME, AnyMemoryType
@@ -86,7 +86,7 @@ async def clean_passive_retrieval_messages_job(sprite_id: str) -> None:
         passive_retrieval_messages_to_remove = []
         for m in await sprite_manager.get_messages(sprite_id):
             try:
-                sp_message_metadata = SpritesMsgMeta.parse(m)
+                sp_message_metadata = SpritedMsgMeta.parse(m)
             except KeyError:
                 continue
             if (

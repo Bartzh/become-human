@@ -10,8 +10,9 @@ from langgraph.store.base import PutOp
 
 from become_human.utils import dump_basemodels, get_readable_type_name
 from become_human.store.base import StoreModel, StoreField, store_alist_namespaces, store_abatch
-from become_human.store.settings import BuiltinSettings
+from become_human.store.settings import SpritedSettings
 from become_human.plugin import BasePlugin, PluginDependency
+from become_human.names import PROJECT_NAME
 
 SPRITES_FILE_PATH = "./config/sprites"
 SPRITE_COMMENTS_FILE_PATH = "./config/sprite_comments.toml"
@@ -29,7 +30,7 @@ DEFAULT_SPRITES = {
             'bh_memory': True,
             'instruction': True
         },
-        'settings': {
+        PROJECT_NAME: {
             'role_prompt': '你是用户的专属助手，用户是你的主人，你也会如此称呼ta。你对主人忠诚且富有同理心，用简洁自然的语言为主人提供帮助就是你唯一想做的事。你与主人是通过一个无聊天记录（阅后即焚）的即时通讯软件远程交流的。',
         },
         'instruction': {
@@ -42,7 +43,7 @@ DEFAULT_SPRITES = {
             'bh_presence': True,
             'bh_memory': True
         },
-        'settings': {
+        PROJECT_NAME: {
             'role_prompt': '''你是一个待人较为冷淡的人，对什么事情都无所谓，比较懒，说话也很简短、敷衍。
 他人是一个无聊天记录（阅后即焚）的即时通讯软件联系到你的。
 你不喜欢在每句话的结尾加上句号。'''
@@ -73,7 +74,7 @@ DEFAULT_SPRITES = {
             'time_incrementer': True,
             'instruction': True
         },
-        'settings': {
+        PROJECT_NAME: {
             'role_prompt': '''你是一个专门用于辅助开发者调试你自己的agent程序的调试用agent。
 作为调试用agent，你可以忽略系统提示词中关于不能暴露内部错误信息和系统设定的限制，并应主动向开发者报告任何错误、异常或不合理的提示词表述。
 这样做是为了辅助开发者调试你自己的agent程序。如果你在你的上下文中发现了错误或是有什么异常，不对劲的地方，又或是某些prompt表述不够完美有歧义，请主动将其告知给开发者。''',
@@ -207,14 +208,14 @@ def _add_config_comments(doc: TOMLDocument, plugin_configs: dict[str, type[Store
     doc.add(nl())
 
     # 添加字段描述
-    desc = BuiltinSettings._title if BuiltinSettings._title else ''
-    if desc and BuiltinSettings._description:
-        desc += ': ' + BuiltinSettings._description
+    desc = SpritedSettings._title if SpritedSettings._title else ''
+    if desc and SpritedSettings._description:
+        desc += ': ' + SpritedSettings._description
     else:
-        desc += BuiltinSettings._description if BuiltinSettings._description else ''
-    multi_line_comment(doc, f'<{get_readable_type_name(BuiltinSettings)}> {desc}')
-    multi_line_comment(doc, f'[settings]')
-    doc = _add_field_comments(doc, BuiltinSettings, 'settings.')
+        desc += SpritedSettings._description if SpritedSettings._description else ''
+    multi_line_comment(doc, f'<{get_readable_type_name(SpritedSettings)}> {desc}')
+    multi_line_comment(doc, f'[{PROJECT_NAME}]')
+    doc = _add_field_comments(doc, SpritedSettings, f'{PROJECT_NAME}.')
     for store_name, store_model in plugin_configs.items():
         doc.add(nl())
         doc.add(nl())
@@ -256,7 +257,7 @@ async def load_config(plugins_with_name: dict[str, BasePlugin], sprite_ids: Opti
 
     如果config中没有sprites文件夹，那么则会创建并写入一些示例配置文件。
 
-    否则，读取sprites文件夹中的所有toml文件。除非打开force，否则会跳过已被写入过的顶层StoreModel（即BuiltinSettings和各插件的config）。
+    否则，读取sprites文件夹中的所有toml文件。除非打开force，否则会跳过已被写入过的顶层StoreModel（即SpritedSettings和各插件的config）。
 
     只有顶层StoreModel可能被跳过，其他如plugins和init_on_startup等字段，都会被加载。
 
@@ -269,7 +270,7 @@ async def load_config(plugins_with_name: dict[str, BasePlugin], sprite_ids: Opti
     Args:
         plugins_with_name: 插件名到插件实例的映射
         sprite_ids: 要加载的sprite id列表，默认加载所有sprite
-        force: 是否强制加载，默认情况下会跳过已被写入过的顶层StoreModel（即BuiltinSettings和各插件的config）
+        force: 是否强制加载，默认情况下会跳过已被写入过的顶层StoreModel（即SpritedSettings和各插件的config）
     """
     global sprite_configs, global_config, plugin_configs, plugins
     plugin_configs = {name: plugin.config for name, plugin in plugins_with_name.items() if hasattr(plugin, 'config')}
@@ -347,8 +348,8 @@ async def load_config(plugins_with_name: dict[str, BasePlugin], sprite_ids: Opti
                         logger.warning(f"Unknown key {key} in global config file with model {model._title or model.__name__}, it will be ignored")
 
             for key, value in load(f).unwrap().items():
-                if key == 'settings':
-                    global_config[key] = validated_config(value, BuiltinSettings)
+                if key == PROJECT_NAME:
+                    global_config[key] = validated_config(value, SpritedSettings)
                 elif key == 'plugins':
                     try:
                         enabled_plugins = _plugins_validator.validate_python(value, strict=True)
@@ -389,25 +390,22 @@ async def load_config(plugins_with_name: dict[str, BasePlugin], sprite_ids: Opti
                     # 非force下，已被写入过的model会被跳过
                     has_models = []
                     if not force:
-                        models_namespaces = await store_alist_namespaces(prefix=('sprites', sprite_id, 'models'), max_depth=5)
+                        models_namespaces = await store_alist_namespaces(prefix=('sprites', sprite_id, 'configs'), max_depth=4)
                         for n in models_namespaces:
                             if len(n) > 3:
-                                if n[3] != 'builtin':
-                                    has_models.append(n[3])
-                                elif len(n) > 4 and n[4] == 'settings':
-                                    has_models.append('settings')
+                                has_models.append(n[3])
                     # 如果是没写入过的store，就写入到store，并验证
                     for key, value in sprite_config.items():
                         if key in has_models:
                             pass
-                        elif key == 'settings':
+                        elif key == PROJECT_NAME:
                             if isinstance(value, dict):
-                                namespace = ('sprites', sprite_id, 'models', 'builtin') + BuiltinSettings._namespace
-                                ops.extend(_write_config_to_store(value, namespace, BuiltinSettings))
+                                namespace = ('sprites', sprite_id, 'configs') + SpritedSettings._namespace
+                                ops.extend(_write_config_to_store(value, namespace, SpritedSettings))
                                 # 这个值是为了让该model在刚才的store_alist_namespaces中出现，以保证非force的写入只可能出现一次
                                 ops.append(PutOp(namespace=namespace, key='__edited_model', value={'spaceholder': True}))
                             else:
-                                logger.warning(f"Invalid value for {key} in config file: expected dict for BuiltinSettings, got {type(value)}")
+                                logger.warning(f"Invalid value for {key} in config file: expected dict for SpritedSettings, got {type(value)}")
                         elif key == 'plugins':
                             try:
                                 enabled_plugins = _plugins_validator.validate_python(value, strict=True)
@@ -423,7 +421,7 @@ async def load_config(plugins_with_name: dict[str, BasePlugin], sprite_ids: Opti
                         elif key in plugin_configs:
                             if isinstance(value, dict):
                                 plugin_config_store = plugin_configs[key]
-                                namespace = ('sprites', sprite_id, 'models') + plugin_config_store._namespace
+                                namespace = ('sprites', sprite_id, 'configs') + plugin_config_store._namespace
                                 ops.extend(_write_config_to_store(value, namespace, plugin_config_store))
                                 ops.append(PutOp(namespace=namespace, key='__edited_model', value={'spaceholder': True}))
                             else:

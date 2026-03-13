@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage, BaseMessage
 from become_human.plugin import *
 from become_human.store.base import StoreModel, StoreField
 from become_human.types.manager import CallSpriteRequest
-from become_human.message import SpritesMsgMeta, DEFAULT_USER_MSG_TYPE
+from become_human.message import SpritedMsgMeta, DEFAULT_USER_MSG_TYPE
 from become_human.times import TimestampUs, Times, format_duration, format_time
 from become_human.store.manager import store_manager
 from become_human.scheduler import Schedule, get_schedules, delete_schedules, add_schedules
@@ -17,8 +17,10 @@ from become_human.tools.send_message import SEND_MESSAGE
 from become_human.manager import sprite_manager
 from become_human.event import event_bus
 
+NAME = 'bh_presence'
+
 class PresenceConfig(StoreModel):
-    _namespace = 'presence_config'
+    _namespace = NAME
     _title = '在线状态配置'
 
     user_message_types: tuple[str, ...] = StoreField(default=(DEFAULT_USER_MSG_TYPE,), title='用户消息类型', description="哪些消息类型被认为是用户消息，从而触发相关操作")
@@ -50,8 +52,9 @@ class PresenceState(StrEnum):
     #    return self == PresenceState.OFFLINE
 
 class PresenceData(StoreModel):
-    _namespace = 'presence_data'
+    _namespace = NAME
     _title = '在线状态数据'
+
     presence_state: PresenceState = StoreField(default=PresenceState.AVAILABLE, description="当前状态，available, away, sleeping, offline")
     set_away_schedule_id: str = StoreField(default='', description="设置为离线状态的计划ID")
     wakeup_call_schedule_id: str = StoreField(default='', description="唤醒调用计划ID")
@@ -118,7 +121,7 @@ async def set_sleeping_job(sprite_id: str) -> None:
 
 class PresencePlugin(BasePlugin):
     """在线状态插件"""
-    name = 'bh_presence'
+    name = NAME
     config: type[PresenceConfig] = PresenceConfig
     data: type[PresenceData] = PresenceData
 #     prompts = PluginPrompts(
@@ -152,7 +155,7 @@ class PresencePlugin(BasePlugin):
     async def get_away_time(sprite_id: str) -> Union[TimestampUs, int]:
         schedules = await get_schedules([
             Schedule.Condition(key='sprite_id', value=sprite_id),
-            Schedule.Condition(key='schedule_provider', value='bh_presence'),
+            Schedule.Condition(key='schedule_provider', value=NAME),
             Schedule.Condition(key='schedule_type', value='set_offline'),
         ])
         if not schedules:
@@ -167,7 +170,7 @@ class PresencePlugin(BasePlugin):
 
     @override
     async def on_manager_init(self) -> None:
-        event_bus.register('bh_presence:on_presence_changed')
+        event_bus.register(NAME+':on_presence_changed')
 
     @override
     async def on_sprite_init(self, sprite_id: str, /) -> None:
@@ -178,7 +181,7 @@ class PresencePlugin(BasePlugin):
             if not data_store.sleep_schedule_id:
                 schedule = Schedule(
                     sprite_id=sprite_id,
-                    schedule_provider='bh_presence',
+                    schedule_provider=NAME,
                     schedule_type='set_sleeping',
                     job=set_sleeping_job,
                     job_args=(sprite_id,),
@@ -247,7 +250,7 @@ async def _set_presence(sprite_id: str, config_store: PresenceConfig, data_store
             new = PresenceState.SLEEPING
     data_store.presence_state = new
     await event_bus.publish(
-        'bh_presence:on_presence_changed',
+        NAME+':on_presence_changed',
         sprite_id,
         new=new,
         old=old,
@@ -270,7 +273,7 @@ async def _update_away_time(sprite_id: str, config_store: PresenceConfig, data_s
             await delete_schedules(schedules)
     new_schedule = Schedule(
         sprite_id=sprite_id,
-        schedule_provider='bh_presence',
+        schedule_provider=NAME,
         schedule_type='set_offline',
         job=set_away_job,
         job_kwargs={'sprite_id': sprite_id},
@@ -289,7 +292,7 @@ def _is_user_input(messages: Union[CallSpriteRequest, list[BaseMessage], BaseMes
         if not isinstance(message, HumanMessage):
             continue
         try:
-            metadata = SpritesMsgMeta.parse(message)
+            metadata = SpritedMsgMeta.parse(message)
         except KeyError:
             pass
         if metadata.message_type in config_store.user_message_types:
@@ -309,7 +312,7 @@ async def generate_new_self_calls(sprite_id: str, current_time: datetime, is_wak
         data_store.has_new_user_call = False
         current_schedules = await get_schedules([
             Schedule.Condition(key='sprite_id', value=sprite_id),
-            Schedule.Condition(key='schedule_provider', value='bh_presence')
+            Schedule.Condition(key='schedule_provider', value=NAME)
         ])
         if current_schedules:
             await delete_schedules(current_schedules)
@@ -370,7 +373,7 @@ async def generate_new_self_calls(sprite_id: str, current_time: datetime, is_wak
 
     schedules = [Schedule(
         sprite_id=sprite_id,
-        schedule_provider='bh_presence',
+        schedule_provider=NAME,
         schedule_type='wakeup_call' if is_wakeup else 'passive_call',
         job=self_call_job,
         job_kwargs={

@@ -11,6 +11,8 @@ from become_human.types.manager import CallSpriteRequest
 from become_human.plugin import BasePlugin
 from become_human.manager import sprite_manager
 
+NAME = 'reminder'
+
 async def sprite_schedule_job(schedule: Schedule, sprite_id: str, title: str, description: str) -> None:
     """
     sprite提醒事项任务。
@@ -209,7 +211,7 @@ async def add_reminder(
     content = f"添加“{title}”提醒事项成功。"
     schedule = Schedule(
         sprite_id=sprite_id,
-        schedule_provider='reminder',
+        schedule_provider=NAME,
         job=sprite_schedule_job,
         job_kwargs={
             'sprite_id': sprite_id,
@@ -243,7 +245,7 @@ async def list_reminders(
     sprite_id = runtime.context.sprite_id
     schedules = await get_schedules([
         Schedule.Condition(key='sprite_id', value=sprite_id),
-        Schedule.Condition(key='schedule_provider', value='reminder'),
+        Schedule.Condition(key='schedule_provider', value=NAME),
         Schedule.Condition(key='schedule_type', value='reminder')
     ])
     time_settings = store_manager.get_settings(sprite_id).time_settings
@@ -274,7 +276,7 @@ async def delete_reminder(
             ),
             Schedule.Condition(
                 key='schedule_provider',
-                value='reminder'
+                value=NAME
             ),
             Schedule.Condition(
                 key='schedule_type',
@@ -291,7 +293,7 @@ async def delete_reminder(
     return content
 
 class ReminderPlugin(BasePlugin):
-    name = 'reminder'
+    name = NAME
     tools = [
         add_reminder,
         list_reminders,

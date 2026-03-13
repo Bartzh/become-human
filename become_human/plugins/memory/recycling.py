@@ -18,10 +18,10 @@ from become_human.store.manager import store_manager
 from become_human.event import event_bus
 from become_human.message import (
     construct_system_message,
-    SpritesMsgMeta,
+    SpritedMsgMeta,
     InitalAIMessage,
     InitalToolCall,
-    SpritesMsgMetaOptionalTimes,
+    SpritedMsgMetaOptionalTimes,
 )
 from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT, SEND_MESSAGE_TOOL_CONTENT
 from become_human.tools.record_thoughts import RECORD_THOUGHTS, RECORD_THOUGHTS_CONTENT, RECORD_THOUGHTS_TOOL_CONTENT
@@ -451,7 +451,7 @@ async def recycle_original_memories(sprite_id: str, input_messages: list[AnyMess
             content=message['content'],
             ttl=int(stable_mult * base_ttl),
             type="original",
-            creation_times=SpritesMsgMeta.parse(message['kwargs']).creation_times,
+            creation_times=SpritedMsgMeta.parse(message['kwargs']).creation_times,
             id=message_ids[i],
             previous_memory_id=last_id if i == 0 else message_ids[i-1],
             next_memory_id=None if i == messages_len - 1 else message_ids[i+1]
@@ -563,7 +563,7 @@ async def recycle_reflective_memories(sprite_id: str, input_messages: list[AnyMe
                 args={RECORD_THOUGHTS_CONTENT: extracted_reflective_memories["reflection_process"]},
                 result_content=RECORD_THOUGHTS_TOOL_CONTENT,
                 result_msg_metas=[
-                    SpritesMsgMetaOptionalTimes(
+                    SpritedMsgMetaOptionalTimes(
                         is_action_only_tool=True
                     )
                 ]

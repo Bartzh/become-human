@@ -6,7 +6,7 @@ from become_human.times import format_time
 from become_human.utils import to_json_like_string
 from become_human.message import (
     extract_text_parts,
-    SpritesMsgMeta,
+    SpritedMsgMeta,
     BaseMsgMeta,
 )
 from become_human.plugins.memory.types import PLUGIN_NAME
@@ -72,7 +72,7 @@ def format_ai_message_for_ai(message: AIMessage) -> str:
     message_string = "<me>\n"
     if message.tool_calls:
         for tool_call in message.tool_calls:
-            message_string += f'''<action name="{tool_call['name']}" datetime="{format_time(SpritesMsgMeta.parse(message).creation_times.sprite_world_datetime)}">
+            message_string += f'''<action name="{tool_call['name']}" datetime="{format_time(SpritedMsgMeta.parse(message).creation_times.sprite_world_datetime)}">
 <args>
 {to_json_like_string(tool_call['args'])}
 </args>
@@ -102,7 +102,7 @@ def format_ai_messages_for_ai(messages: list[Union[AIMessage, ToolMessage]]) -> 
                 feedback_content = feedback_memory_message_metadata.do_not_store_tool_message or DO_NOT_STORE_MESSAGE
             else:
                 feedback_content = '\n'.join(extract_text_parts(feedback_message.content))
-            feedback_message_metadata = SpritesMsgMeta.parse(feedback_message)
+            feedback_message_metadata = SpritedMsgMeta.parse(feedback_message)
             message_string += f'''<action name="{tool_call['name']}" datetime="{format_time(feedback_message_metadata.creation_times.sprite_world_datetime)}">
 <args>
 {to_json_like_string(tool_call['args'])}
@@ -123,7 +123,7 @@ def format_tool_message_for_ai(message: ToolMessage) -> str:
         feedback_content = memory_metadata.do_not_store_tool_message or DO_NOT_STORE_MESSAGE
     else:
         feedback_content = '\n'.join(extract_text_parts(message.content))
-    metadata = SpritesMsgMeta.parse(message)
+    metadata = SpritedMsgMeta.parse(message)
     return f'''<action name="{message.name}" datetime="{format_time(metadata.creation_times.sprite_world_datetime)}>
 <feedback>
 {feedback_content}
