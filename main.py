@@ -21,15 +21,17 @@ user_name = os.getenv('MAIN_USER_NAME')
 
 last_message = ''
 @sprite_manager.on_sprite_output
-def print_message(name: str, args: dict, not_completed: bool = False):
+def print_message(method: str, params: dict, not_completed: bool = False, log: str = ''):
     global last_message
-    if name == SEND_MESSAGE or name == 'log':
+    if method == SEND_MESSAGE:
         if not_completed:
-            print(args[SEND_MESSAGE_CONTENT].replace(last_message, '', 1), end='', flush=True)
-            last_message = args[SEND_MESSAGE_CONTENT]
+            print(params[SEND_MESSAGE_CONTENT].replace(last_message, '', 1), end='', flush=True)
+            last_message = params[SEND_MESSAGE_CONTENT]
         else:
-            print(args[SEND_MESSAGE_CONTENT].replace(last_message, '', 1), flush=True)
+            print(params[SEND_MESSAGE_CONTENT].replace(last_message, '', 1), flush=True)
             last_message = ''
+    if log:
+        print(log, flush=True)
 
 async def main():
     await sprite_manager.init_manager(plugins=[

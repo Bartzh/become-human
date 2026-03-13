@@ -1,4 +1,4 @@
-from typing import Optional, Union, Any, Literal, Callable
+from typing import Optional, Union, Any, Callable
 from collections.abc import Coroutine
 import os
 import asyncio
@@ -9,13 +9,12 @@ import random
 from langchain_qwq import ChatQwen, ChatQwQ
 from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage, BaseMessage, AIMessage, AnyMessage, ToolMessage, ContentBlock
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages.utils import count_tokens_approximately, trim_messages
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langchain_core.messages.utils import count_tokens_approximately
 
 from langchain_dev_utils.chat_models import load_chat_model
 
 from become_human.types.main import InterruptData, MainState
-from become_human.types.manager import CallSpriteRequest, DoubleTextingStrategy
+from become_human.types.manager import CallSpriteRequest, DoubleTextingStrategy, SpriteOutput
 from become_human.graphs.base import StateMerger
 from become_human.graphs.main import MainGraph, SEND_MESSAGE_TOOL_CONTENT
 from become_human.config import load_config, get_init_on_startup_sprite_ids, get_sprite_enabled_plugin_names
@@ -386,10 +385,13 @@ class SpriteManager:
                 await self.command_processing(sprite_id, extracted_message[0])
             else:
                 await self.publish_sprite_output(
-                    sprite_id=sprite_id,
-                    name='log', 
-                    args={'content': "无权限执行此命令"},
-                    id="command-" + str(uuid4())
+                    SpriteOutput(
+                        sprite_id=sprite_id,
+                        id="command-" + str(uuid4()),
+                        extra_kwargs={
+                            'log': '无权限执行此命令'
+                        }
+                    )
                 )
         else:
             await self.call_sprite_for_user(
@@ -898,11 +900,11 @@ class SpriteManager:
                                     if new_message:
                                         # 对于event来说名字固定为send_message
                                         #await self.event_queue.put({"sprite_id": sprite_id, "name": "send_message", "args": {"content": new_message.replace(last_message, '', 1)}, "not_completed": True})
-                                        event_item = {"sprite_id": sprite_id, "name": "send_message", "args": {"content": new_message}, "id": tool_call_id}
+                                        event_item = SpriteOutput(sprite_id=sprite_id, method="send_message", params={"content": new_message}, id=tool_call_id)
                                         # 暂时用来给app的通知服务使用，如果是自我调用就推送通知
-                                        event_item["is_self_call"] = kwargs.get("is_self_call", False)
+                                        event_item.extra_kwargs["is_self_call"] = kwargs.get("is_self_call", False)
                                         if not chunk_completed:
-                                            event_item["not_completed"] = True
+                                            event_item.extra_kwargs["not_completed"] = True
                                         else:
                                             if tool_calls[tool_index].get('id'):
                                                 now_times = Times.from_time_settings(store_settings.time_settings)
@@ -916,7 +918,7 @@ class SpriteManager:
                                                 )))
                                                 self._sprite_interrupt_datas[sprite_id]["called_tool_messages"] = streaming_tool_messages
                                             last_message = ''
-                                        await self.publish_sprite_output(**event_item)
+                                        await self.publish_sprite_output(event_item)
                                         #print(new_message.replace(last_message, '', 1), end="", flush=True)
                                         last_message = new_message
 
@@ -944,12 +946,12 @@ class SpriteManager:
                                         except Exception:
                                             logger.exception(f"calling streaming_tool {tool_calls[tool_index]['name']} failed")
                                     if tool_calls[tool_index]['name'] != SEND_MESSAGE:
-                                        await self.publish_sprite_output(
+                                        await self.publish_sprite_output(SpriteOutput(
                                             sprite_id=sprite_id,
-                                            name=tool_calls[tool_index]['name'],
-                                            args=tool_calls[tool_index]['args'],
+                                            method=tool_calls[tool_index]['name'],
+                                            params=tool_calls[tool_index]['args'],
                                             id=tool_call_id
-                                        )
+                                        ))
                                         #print(await method(tool_calls[tool_index]['args']), flush=True)
                                     tool_index += 1
                                     loop_once = True
@@ -1126,20 +1128,16 @@ class SpriteManager:
 
     @staticmethod
     async def publish_sprite_output(
-        sprite_id: str,
-        name: str,
-        args: dict[str, Any],
-        id: str,
-        **kwargs
+        output: SpriteOutput
     ):
         """发布sprite输出事件"""
         await event_bus.publish(
             ON_SPRITE_OUTPUT_EVENT,
-            sprite_id=sprite_id,
-            name=name,
-            args=args,
-            id=id,
-            **kwargs
+            sprite_id=output.sprite_id,
+            method=output.method,
+            params=output.params,
+            id=output.id,
+            **output.extra_kwargs
         )
 
 
@@ -1370,12 +1368,14 @@ config: 仅重置配置（settings）
             return '无效命令。'
 
         message = await _command_processing(sprite_id, user_input)
-        # TODO 这可能与某个工具名冲突
         await self.publish_sprite_output(
-            sprite_id=sprite_id,
-            name='log', 
-            args={'content': message},
-            id='command-' + str(uuid4())
+            SpriteOutput(
+                sprite_id=sprite_id,
+                id='command-' + str(uuid4()),
+                extra_kwargs={
+                    'log': message
+                }
+            )
         )
 
 

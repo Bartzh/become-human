@@ -400,7 +400,7 @@ class BasePlugin:
             raise TypeError(f"Plugin name {cls.name} must be a string.")
         if not cls.name:
             raise TypeError(f"Plugin name cannot be empty.")
-        elif cls.name in ['settings', 'plugins', 'init_on_startup', 'prompts']:
+        elif cls.name in ['settings', 'plugins', 'init_on_startup', 'prompts', 'log']:
             raise TypeError(f"Plugin name {cls.name} is reserved.")
 
         if not hasattr(cls, 'version'):
