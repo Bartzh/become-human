@@ -226,6 +226,7 @@ class SpriteManager:
             await self.init_sprite(sprite_id)
         if self.heartbeat_task is None:
             self.heartbeat_task = asyncio.create_task(self.start_heartbeat_task())
+            self.heartbeat_task.add_done_callback(lambda future: future.result())
 
 
     async def start_heartbeat_task(self):
@@ -244,10 +245,10 @@ class SpriteManager:
         """trigger所有sprite，如果上一次trigger_sprites正在运行则跳过"""
         if self.on_trigger_sprites_finished.is_set():
             self.on_trigger_sprites_finished.clear()
-            await tick_schedules(self.activated_sprite_id_datas.keys())
             # 这里暂时看起来有些奇怪，之后会考虑把trigger_sprite放到tick_schedules中
             tasks = [self.trigger_sprite(sprite_id) for sprite_id in self.activated_sprite_id_datas.keys()]
             await asyncio.gather(*tasks)
+            await tick_schedules(self.activated_sprite_id_datas.keys())
             self.on_trigger_sprites_finished.set()
 
     async def trigger_sprite(self, sprite_id: str):
@@ -308,8 +309,8 @@ class SpriteManager:
             "created_at": TimestampUs.now(),
             "on_trigger_finished": asyncio.Event()
         }
-        self.activated_sprite_id_datas[sprite_id]["on_trigger_finished"].set()
         await store_manager.init_sprite(sprite_id)
+        self.activated_sprite_id_datas[sprite_id]["on_trigger_finished"].set()
 
         await self.trigger_sprite(sprite_id)
 
@@ -1123,7 +1124,7 @@ class SpriteManager:
         event_bus.subscribe(ON_SPRITE_OUTPUT_EVENT, callback)
 
     @staticmethod
-    def on_sprite_output(callback: Callable) -> None:
+    def on_sprite_output(callback: Callable) -> Callable:
         """订阅sprite输出事件"""
         event_bus.subscribe(ON_SPRITE_OUTPUT_EVENT, callback)
         return callback

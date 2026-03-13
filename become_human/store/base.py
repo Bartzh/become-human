@@ -171,6 +171,7 @@ def store_run_listener():
     listener_task_is_running = True
     if listener_task is None or listener_task.done():
         listener_task = asyncio.create_task(store_queue_listener())
+        listener_task.add_done_callback(lambda future: future.result())
 
 async def store_stop_listener():
     global listener_task
