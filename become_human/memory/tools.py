@@ -6,15 +6,15 @@ import random
 from langchain_core.messages import ToolMessage, AIMessage
 from langchain.tools import ToolRuntime, tool
 
-from become_human.times import format_time, Times
-from become_human.store.manager import store_manager
-from become_human.types.manager import CallSpriteRequest
-from become_human.types.main import MainState
+from sprited.times import format_time, Times
+from sprited.store.manager import store_manager
+from sprited.types.manager import CallSpriteRequest
+from sprited.types.main import MainState
 
-from become_human.plugins.memory.base import memory_manager, InitialMemory, format_retrieved_memory_groups
-from become_human.plugins.memory.message import MemoryMsgMeta, get_all_retrieved_memory_ids
-from become_human.plugins.memory.store import MemoryConfig
-from become_human.plugins.memory.recycling import connect_last_memory
+from become_human.memory.base import memory_manager, InitialMemory, format_retrieved_memory_groups
+from become_human.memory.message import MemoryMsgMeta, get_all_retrieved_memory_ids
+from become_human.memory.store import MemoryConfig
+from become_human.memory.recycling import connect_last_memory
 
 
 RETRIEVE_MEMORIES = 'retrieve_memories'

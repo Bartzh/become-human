@@ -6,21 +6,21 @@ from loguru import logger
 from langchain_core.messages import RemoveMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 
-from become_human.utils import gather_safe
-from become_human.types.manager import CallSpriteRequest
-from become_human.scheduler import Schedule, get_schedules, delete_schedules
-from become_human.tool import SpriteTool
-from become_human.store.manager import store_manager
-from become_human.message import SpritedMsgMeta, extract_text_parts, construct_system_message
-from become_human.times import Times
-from become_human.plugin import *
-from become_human.plugins.memory.types import PLUGIN_NAME, AnyMemoryType
-from become_human.plugins.memory.store import MemoryConfig, MemoryData
-from become_human.plugins.memory.base import memory_manager, validated_where, MEMORY_TYPES, format_retrieved_memory_groups, InitialMemory
-from become_human.plugins.memory.message import MemoryMsgMeta, get_all_retrieved_memory_ids
-from become_human.plugins.memory.recycling import recycle_memories, connect_last_memory
-from become_human.plugins.memory.tools import RETRIEVE_MEMORIES, retrieve_memories_tool, add_memory_tool, construct_retrieve_memories_schema
-from become_human.manager import sprite_manager
+from sprited.utils import gather_safe
+from sprited.types.manager import CallSpriteRequest
+from sprited.scheduler import Schedule, get_schedules, delete_schedules
+from sprited.tool import SpriteTool
+from sprited.store.manager import store_manager
+from sprited.message import SpritedMsgMeta, extract_text_parts, construct_system_message
+from sprited.times import Times
+from sprited.plugin import *
+from become_human.memory.types import PLUGIN_NAME, AnyMemoryType
+from become_human.memory.store import MemoryConfig, MemoryData
+from become_human.memory.base import memory_manager, validated_where, MEMORY_TYPES, format_retrieved_memory_groups, InitialMemory
+from become_human.memory.message import MemoryMsgMeta, get_all_retrieved_memory_ids
+from become_human.memory.recycling import recycle_memories, connect_last_memory
+from become_human.memory.tools import RETRIEVE_MEMORIES, retrieve_memories_tool, add_memory_tool, construct_retrieve_memories_schema
+from sprited.manager import sprite_manager
 
 
 

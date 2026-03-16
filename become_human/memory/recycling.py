@@ -13,27 +13,27 @@ from langchain.chat_models import BaseChatModel
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from become_human.utils import gather_safe
-from become_human.times import format_time, Times, TimestampUs, get_week
-from become_human.store.manager import store_manager
-from become_human.event import event_bus
-from become_human.message import (
+from sprited.utils import gather_safe
+from sprited.times import format_time, Times, TimestampUs, get_week
+from sprited.store.manager import store_manager
+from sprited.event import event_bus
+from sprited.message import (
     construct_system_message,
     SpritedMsgMeta,
     InitalAIMessage,
     InitalToolCall,
     SpritedMsgMetaOptionalTimes,
 )
-from become_human.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT, SEND_MESSAGE_TOOL_CONTENT
-from become_human.tools.record_thoughts import RECORD_THOUGHTS, RECORD_THOUGHTS_CONTENT, RECORD_THOUGHTS_TOOL_CONTENT
-from become_human.manager import sprite_manager
-from become_human.plugins.memory.base import (
+from sprited.tools.send_message import SEND_MESSAGE, SEND_MESSAGE_CONTENT, SEND_MESSAGE_TOOL_CONTENT
+from sprited.tools.record_thoughts import RECORD_THOUGHTS, RECORD_THOUGHTS_CONTENT, RECORD_THOUGHTS_TOOL_CONTENT
+from sprited.manager import sprite_manager
+from become_human.memory.base import (
     AnyMemoryType,
     memory_manager,
     InitialMemory,
 )
-from become_human.plugins.memory.store import MemoryConfig, MemoryData
-from become_human.plugins.memory.message import filtering_messages, format_messages_for_ai, MemoryMsgMeta, format_messages_for_ai_as_list
+from become_human.memory.store import MemoryConfig, MemoryData
+from become_human.memory.message import filtering_messages, format_messages_for_ai, MemoryMsgMeta, format_messages_for_ai_as_list
 
 
 rmprompt = '0. 这份记录实际上来自一个AI，但请把它当作人类来撰写你提取到的信息，不要暴露这个人是一个AI的事实'

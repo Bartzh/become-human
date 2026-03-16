@@ -42,11 +42,11 @@ from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_core.documents import Document
 from langchain_dev_utils.embeddings import load_embeddings
 
-from become_human.times import format_time, Times, TimestampUs, AnyTz, get_week
-from become_human.store.manager import store_manager
+from sprited.times import format_time, Times, TimestampUs, AnyTz, get_week
+from sprited.store.manager import store_manager
 
-from become_human.plugins.memory.types import AnyMemoryType, MEMORY_TYPES, MemoryRetrievalConfig
-from become_human.plugins.memory.store import MemoryConfig
+from become_human.memory.types import AnyMemoryType, MEMORY_TYPES, MemoryRetrievalConfig
+from become_human.memory.store import MemoryConfig
 
 from langchain_core.runnables.config import run_in_executor
 

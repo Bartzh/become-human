@@ -9,7 +9,6 @@ wheels/
 # Virtual environments
 .venv
 .env
-node_modules
 
 # ide
 .trae
@@ -18,16 +17,12 @@ node_modules
 *.code-workspace
 .idea
 
-deno.exe
-
 /test_*
 .pytest_cache
 
 config
 data
 logs
-
-app_*.py
 
 applicationServerKey
 private_key.pem

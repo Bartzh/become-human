@@ -6,16 +6,16 @@ from loguru import logger
 
 from langchain_core.messages import HumanMessage, BaseMessage
 
-from become_human.plugin import *
-from become_human.store.base import StoreModel, StoreField
-from become_human.types.manager import CallSpriteRequest
-from become_human.message import SpritedMsgMeta, DEFAULT_USER_MSG_TYPE
-from become_human.times import TimestampUs, Times, format_duration, format_time
-from become_human.store.manager import store_manager
-from become_human.scheduler import Schedule, get_schedules, delete_schedules, add_schedules
-from become_human.tools.send_message import SEND_MESSAGE
-from become_human.manager import sprite_manager
-from become_human.event import event_bus
+from sprited.plugin import *
+from sprited.store.base import StoreModel, StoreField
+from sprited.types.manager import CallSpriteRequest
+from sprited.message import SpritedMsgMeta, DEFAULT_USER_MSG_TYPE
+from sprited.times import TimestampUs, Times, format_duration, format_time
+from sprited.store.manager import store_manager
+from sprited.scheduler import Schedule, get_schedules, delete_schedules, add_schedules
+from sprited.tools.send_message import SEND_MESSAGE
+from sprited.manager import sprite_manager
+from sprited.event import event_bus
 
 NAME = 'bh_presence'
 

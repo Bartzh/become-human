@@ -1,8 +1,8 @@
 from typing import Literal, Optional
 
-from become_human.plugins.memory.types import PLUGIN_NAME, MemoryRetrievalConfig, AnyMemoryType
-from become_human.times import Times
-from become_human.store.base import StoreModel, StoreField
+from become_human.memory.types import PLUGIN_NAME, MemoryRetrievalConfig, AnyMemoryType
+from sprited.times import Times
+from sprited.store.base import StoreModel, StoreField
 
 
 class MemoryConfig(StoreModel):

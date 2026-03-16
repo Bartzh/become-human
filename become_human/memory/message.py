@@ -2,14 +2,14 @@ from typing import Optional, Union
 from pydantic import Field
 from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage, AIMessage, RemoveMessage, BaseMessage
 
-from become_human.times import format_time
-from become_human.utils import to_json_like_string
-from become_human.message import (
+from sprited.times import format_time
+from sprited.utils import to_json_like_string
+from sprited.message import (
     extract_text_parts,
     SpritedMsgMeta,
     BaseMsgMeta,
 )
-from become_human.plugins.memory.types import PLUGIN_NAME
+from become_human.memory.types import PLUGIN_NAME
 
 
 DO_NOT_STORE_MESSAGE = '该动作将自己的反馈标记为不必记录，故将其省略。'
