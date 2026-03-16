@@ -1,6 +1,7 @@
-import os
+import os, sys
 from typing import TYPE_CHECKING
 from dotenv import load_dotenv
+from loguru import logger
 from langchain_dev_utils.chat_models import batch_register_model_provider
 from langchain_dev_utils.embeddings import batch_register_embeddings_provider
 from langchain_anthropic import ChatAnthropic
@@ -18,6 +19,17 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__} has no attribute {name}")
 
 load_dotenv()
+
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logger.remove()
+logger.add(sys.stdout, level=log_level)
+logger.add(
+    "logs/app.log",
+    rotation="1 day",
+    retention="2 weeks",
+    enqueue=True,
+    level=log_level
+)
 
 provider_names = [
     'openai',

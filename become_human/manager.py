@@ -1,6 +1,7 @@
 from typing import Optional, Union, Any, Callable
 from collections.abc import Coroutine
 import os
+import signal
 import asyncio
 from loguru import logger
 from uuid import uuid4
@@ -18,7 +19,7 @@ from become_human.types.manager import CallSpriteRequest, DoubleTextingStrategy,
 from become_human.graphs.base import StateMerger
 from become_human.graphs.main import MainGraph, SEND_MESSAGE_TOOL_CONTENT
 from become_human.config import load_config, get_init_on_startup_sprite_ids, get_sprite_enabled_plugin_names
-from become_human.utils import is_valid_json
+from become_human.utils import is_valid_json, gather_safe
 from become_human.times import format_time, format_duration, Times, parse_timedelta, SpriteTimeSettings, timedelta_to_microseconds, TimestampUs
 from become_human.message import (
     format_messages,
@@ -77,6 +78,79 @@ class SpriteManager:
     _merging_messages: dict[str, list[BaseMessage]]
     _not_streamed_graph_runs: list[str]
 
+    standalone_loop: asyncio.AbstractEventLoop
+
+    def run_standalone(self, plugins: Optional[list[Union[type[BasePlugin], BasePlugin]]] = None, heartbeat_interval: float = 5.0):
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is not None:
+            raise RuntimeError("Standalone event loop cannot be run in an existing event loop")
+
+        self.standalone_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.standalone_loop)
+
+        # event或run_forever到底哪个更安全？call_soon到底有没有用？
+        # 又或者轮询是最好的
+        # 不知道，先这么用着
+        shutdown_event = asyncio.Event()
+        def shutdown(sig, frame):
+            logger.info(f"Received signal {sig}, shutting down...")
+            #self.standalone_loop.call_soon_threadsafe(self.standalone_loop.stop)
+            self.standalone_loop.call_soon_threadsafe(shutdown_event.set)
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            # Windows用不了add_signal_handler，只能用signal.signal
+            #self.standalone_loop.add_signal_handler(sig, shutdown, sig)
+            signal.signal(sig, shutdown)
+
+        self.standalone_loop.create_task(self.init_manager(plugins, heartbeat_interval))
+        try:
+            #self.standalone_loop.run_forever()
+            self.standalone_loop.run_until_complete(shutdown_event.wait())
+        # 靠捕获KeyboardInterrupt是不靠谱的
+        # 或者说在我这里不止是不靠谱，是会百分百报错的
+        # 需要用signal，只不过Windows用不了事件循环提供的接口
+        except KeyboardInterrupt:
+            logger.warning("在接管了SIGINT信号不应该出现KeyboardInterrupt")
+        finally:
+            try:
+                self.standalone_loop.run_until_complete(self.close_manager())
+            except Exception:
+                logger.exception(f"Error while closing standalone event loop")
+
+            # 获取所有待处理的任务
+            pending = asyncio.all_tasks(self.standalone_loop)
+            if pending:
+                logger.info(f"正在取消 {len(pending)} 个未完成的任务...")
+                for task in pending:
+                    task.cancel()
+
+                # 等待取消操作完成
+                # 使用 run_until_complete 等待 gather，如果列表为空则立即返回
+                if pending:
+                    results = self.standalone_loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    # 打印取消结果
+                    for i, result in enumerate(results):
+                        if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+                            logger.opt(exception=result).error(f"任务 {i} 取消时出错")
+
+            try:
+                self.standalone_loop.run_until_complete(self.standalone_loop.shutdown_asyncgens())
+            except Exception:
+                logger.exception(f"Error while shutting down async generators")
+            self.standalone_loop.close()
+            del self.standalone_loop
+
+    def close_standalone(self):
+        if getattr(self, "standalone_loop", None) is not None:
+            if self.standalone_loop.is_running():
+                self.standalone_loop.call_soon_threadsafe(self.standalone_loop.stop)
+        else:
+            raise RuntimeError("Standalone event loop is not existing")
+
+
     def __init__(self):
         """
         不要直接实例化此类。
@@ -133,7 +207,7 @@ class SpriteManager:
         self.plugins_with_name = plugins_with_name
 
         # 检查依赖
-        PluginDependency.check_dependencies(self.plugins_with_name)
+        PluginRelation.check_relations(self.plugins_with_name)
 
         await load_config(self.plugins_with_name)
 
@@ -221,35 +295,49 @@ class SpriteManager:
 
         event_bus.set_initialized()
 
-        # 启动heartbeat
         for sprite_id in get_init_on_startup_sprite_ids():
             await self.init_sprite(sprite_id)
+
+        # 启动heartbeat
         if self.heartbeat_task is None:
             self.heartbeat_task = asyncio.create_task(self.start_heartbeat_task())
-            self.heartbeat_task.add_done_callback(lambda future: future.result())
+            def on_heartbeat_task_done(future: asyncio.Task):
+                try:
+                    future.result()
+                except asyncio.CancelledError:
+                    pass
+            self.heartbeat_task.add_done_callback(on_heartbeat_task_done)
+
+        logger.info("sprite manager initialized.")
 
 
     async def start_heartbeat_task(self):
         if self.heartbeat_is_running and self.heartbeat_task is not None:
             return
         self.heartbeat_is_running = True
-        while self.heartbeat_is_running:
-            self.on_heartbeat_finished.clear()
-            await self.trigger_sprites()
+        try:
+            while self.heartbeat_is_running:
+                self.on_heartbeat_finished.clear()
+                await self.trigger_sprites()
+                self.on_heartbeat_finished.set()
+                await asyncio.sleep(self.heartbeat_interval)
+        finally:
+            self.heartbeat_is_running = False
             self.on_heartbeat_finished.set()
-            await asyncio.sleep(self.heartbeat_interval)
-        logger.info("Heartbeat task stopped.")
+            logger.info("Heartbeat task stopped.")
 
 
     async def trigger_sprites(self):
         """trigger所有sprite，如果上一次trigger_sprites正在运行则跳过"""
         if self.on_trigger_sprites_finished.is_set():
             self.on_trigger_sprites_finished.clear()
-            # 这里暂时看起来有些奇怪，之后会考虑把trigger_sprite放到tick_schedules中
-            tasks = [self.trigger_sprite(sprite_id) for sprite_id in self.activated_sprite_id_datas.keys()]
-            await asyncio.gather(*tasks)
-            await tick_schedules(self.activated_sprite_id_datas.keys())
-            self.on_trigger_sprites_finished.set()
+            try:
+                # 这里暂时看起来有些奇怪，之后会考虑把trigger_sprite放到tick_schedules中
+                tasks = [self.trigger_sprite(sprite_id) for sprite_id in self.activated_sprite_id_datas.keys()]
+                await gather_safe(*tasks)
+                await tick_schedules(self.activated_sprite_id_datas.keys())
+            finally:
+                self.on_trigger_sprites_finished.set()
 
     async def trigger_sprite(self, sprite_id: str):
         """trigger单一sprite，如果上一次trigger_sprite正在运行则跳过"""
@@ -345,7 +433,7 @@ class SpriteManager:
             self.heartbeat_task = None
 
         if self._tasks:
-            await asyncio.gather(*self._tasks)
+            await gather_safe(*self._tasks)
 
         for plugin in self.plugins_with_name.values():
             try:
@@ -355,6 +443,15 @@ class SpriteManager:
 
         await self.main_graph.conn.close()
         await store_stop_listener()
+
+        try:
+            standalone_loop = self.standalone_loop
+        except AttributeError:
+            standalone_loop = None
+        self.__dict__.clear()
+        if standalone_loop is not None:
+            self.standalone_loop = standalone_loop
+
         logger.info("sprite manager closed")
 
 

@@ -13,7 +13,7 @@ from become_human.names import PROJECT_NAME
 __all__ = [
     'BasePlugin',
     'PluginPriority',
-    'PluginDependency',
+    'PluginRelation',
     'PluginPrompt',
     'PluginPrompts',
 
@@ -283,7 +283,7 @@ class PluginPriority(BaseModel):
         """根据插件优先级排序，优先级越低=越早=越靠前"""
         return sorted(plugins, key=lambda plugin: plugin.priority.get_priority())
 
-class PluginDependency(BaseModel):
+class PluginRelation(BaseModel):
     name: str
     """依赖插件名称"""
     specifiers: str = Field(default='')
@@ -305,12 +305,15 @@ class PluginDependency(BaseModel):
             raise ValueError(f"Plugin version specifiers {v} is invalid.") from e
         return v
 
-    def is_dependency_met(self, plugins_with_name: dict[str, 'BasePlugin']) -> bool:
-        """检查插件依赖是否满足"""
+    def is_relation_met(self, plugins_with_name: dict[str, 'BasePlugin'], is_conflict: bool = False) -> bool:
+        """检查插件关系是否满足"""
         if self.name not in plugins_with_name:
             return False
         plugin = plugins_with_name[self.name]
-        return SpecifierSet(self.specifiers).contains(plugin.version)
+        result = SpecifierSet(self.specifiers).contains(plugin.version)
+        if is_conflict:
+            result = not result
+        return result
 
     @staticmethod
     def check_dependencies(plugins_with_name: dict[str, 'BasePlugin']) -> None:
@@ -322,23 +325,33 @@ class PluginDependency(BaseModel):
         for plugin in plugins_with_name.values():
             if hasattr(plugin, 'dependencies'):
                 for dep in plugin.dependencies:
-                    if not dep.is_dependency_met(plugins_with_name):
+                    if not dep.is_relation_met(plugins_with_name):
                         raise ValueError(f"Plugin {plugin.name} depends on {dep.name}{dep.specifiers} but "
                                          "it is not found." if dep.name not in plugins_with_name else
                                          f"found {dep.name}{plugins_with_name[dep.name].version}")
 
     @staticmethod
-    def check_enbaled_plugins_dependencies(enabled_plugins: list[str], plugins_with_name: dict[str, 'BasePlugin']) -> None:
-        """检查启用的插件的依赖是否满足
-
-        Args:
-            enabled_plugins: 启用的插件名称列表
-            plugins_with_name: 所有插件名称到插件实例的映射
+    def check_conflicts(plugins_with_name: dict[str, 'BasePlugin']) -> None:
+        """检查所有插件是否存在冲突
 
         Raises:
-            ValueError: 插件依赖不满足
+            ValueError: 插件存在冲突
         """
-        PluginDependency.check_dependencies({name: plugins_with_name[name] for name in set(enabled_plugins) if name in plugins_with_name})
+        for plugin in plugins_with_name.values():
+            if hasattr(plugin, 'conflicts'):
+                for conf in plugin.conflicts:
+                    if not conf.is_relation_met(plugins_with_name, is_conflict=True):
+                        raise ValueError(f"Plugin {plugin.name} conflicts with {conf.name}{conf.specifiers}")
+
+    @staticmethod
+    def check_relations(plugins_with_name: dict[str, 'BasePlugin']) -> None:
+        """检查所有插件的依赖和冲突是否满足
+
+        Raises:
+            ValueError: 插件依赖或冲突不满足
+        """
+        PluginRelation.check_dependencies(plugins_with_name)
+        PluginRelation.check_conflicts(plugins_with_name)
 
 class PluginPrompt(BaseModel):
     """插件提示"""
@@ -380,8 +393,10 @@ class BasePlugin:
     """插件版本，必须为类属性"""
     priority: PluginPriority = PluginPriority()
     """插件优先级，数值越大，优先级越高。必须为类属性，如无特殊需求请保持默认"""
-    dependencies: list[PluginDependency]
+    dependencies: list[PluginRelation]
     """插件依赖列表，必须为类属性，可选，也可手动检查依赖"""
+    conflicts: list[PluginRelation]
+    """插件冲突列表，必须为类属性，可选，也可手动检查冲突"""
     tools: list[Union[Callable, BaseTool, SpriteTool]]
     """插件提供的工具列表"""
     config: type[StoreModel]
@@ -399,9 +414,9 @@ class BasePlugin:
             raise TypeError(f"Plugin {cls.__name__} must have a name.")
         if not isinstance(cls.name, str):
             raise TypeError(f"Plugin name {cls.name} must be a string.")
-        if not cls.name:
+        if not cls.name.strip():
             raise TypeError(f"Plugin name cannot be empty.")
-        elif cls.name in [PROJECT_NAME, 'plugins', 'init_on_startup', 'prompts', 'log']:
+        elif cls.name in (PROJECT_NAME, 'plugins', 'init_on_startup', 'prompts', 'log'):
             raise TypeError(f"Plugin name {cls.name} is reserved.")
 
         if not hasattr(cls, 'version'):
@@ -420,8 +435,15 @@ class BasePlugin:
             if not isinstance(cls.dependencies, list):
                 raise TypeError(f"Plugin dependencies {cls.dependencies} must be a list.")
             for dep in cls.dependencies:
-                if not isinstance(dep, PluginDependency):
-                    raise TypeError(f"Plugin dependency {dep} must be a PluginDependency instance.")
+                if not isinstance(dep, PluginRelation):
+                    raise TypeError(f"Plugin dependency {dep} must be a PluginRelation instance.")
+
+        if hasattr(cls, 'conflicts'):
+            if not isinstance(cls.conflicts, list):
+                raise TypeError(f"Plugin conflicts {cls.conflicts} must be a list.")
+            for conf in cls.conflicts:
+                if not isinstance(conf, PluginRelation):
+                    raise TypeError(f"Plugin conflict {conf} must be a PluginRelation instance.")
 
         if hasattr(cls, 'prompts'):
             if not isinstance(cls.prompts, PluginPrompts):
@@ -431,11 +453,15 @@ class BasePlugin:
             if not issubclass(cls.config, StoreModel):
                 raise TypeError(f"Plugin config {cls.config} must be a StoreModel subclass.")
             cls.config._is_config = True
+            if not hasattr(cls.config, '_namespace'):
+                cls.config._namespace = (cls.name,)
 
         if hasattr(cls, 'data'):
             if not issubclass(cls.data, StoreModel):
                 raise TypeError(f"Plugin data {cls.data} must be a StoreModel subclass.")
             cls.data._is_config = False
+            if not hasattr(cls.data, '_namespace'):
+                cls.data._namespace = (cls.name,)
 
 
     async def on_manager_init(self) -> None:

@@ -321,12 +321,12 @@ class StoreModel:
 
     def __init_subclass__(cls):
         super().__init_subclass__()
-        if not hasattr(cls, '_namespace'):
-            raise TypeError(f"StoreModel子类 {cls.__name__} 必须定义类属性 '_namespace'")
-        if isinstance(cls._namespace, str):
-            cls._namespace = (cls._namespace,)
-        elif not isinstance(cls._namespace, tuple):
-            raise TypeError(f"StoreModel子类 {cls.__name__} 的_namespace 必须是 str 或 tuple[str, ...] 类型。")
+        # 在作为插件的config或data时，允许没有_namespace（自动设置为插件名）
+        if hasattr(cls, '_namespace'):
+            if isinstance(cls._namespace, str):
+                cls._namespace = (cls._namespace,)
+            elif not isinstance(cls._namespace, tuple):
+                raise TypeError(f"StoreModel子类 {cls.__name__} 的_namespace 必须是 str 或 tuple[str, ...] 类型。")
 
     @classmethod
     async def from_store(cls, sprite_id: str, frozen: bool = False):

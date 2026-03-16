@@ -1,5 +1,9 @@
 import json
 from typing import Union, Optional, Any, Callable
+from collections.abc import Coroutine
+import textwrap
+import asyncio
+from loguru import logger
 from typing_inspect import get_args, get_origin
 from copy import deepcopy
 from inspect import signature, Parameter
@@ -81,20 +85,37 @@ def parse_env_array(env_array: Optional[str]) -> list[str]:
     else:
         return []
 
-def to_json_like_string(a: Any) -> str:
+def to_json_like_string(a: Any, support_multiline_str: bool = False) -> str:
     """将任意对象转换为JSON-like字符串
 
     具体来说，实现了对字符串、布尔值、None、元组、列表、字典的转换"""
     if isinstance(a, str):
+        if support_multiline_str and '\n' in a:
+            return f'"""{a}"""'
         return f'"{a}"'
     elif isinstance(a, bool):
         return str(a).lower()
     elif a is None:
         return 'null'
-    elif isinstance(a, (tuple, list)):
-        return '[' + ', '.join([to_json_like_string(i) for i in a]) + ']'
-    elif isinstance(a, dict):
-        return '{' + ', '.join([f'"{k}": {to_json_like_string(v)}' for k, v in a.items()]) + '}'
+    elif isinstance(a, (tuple, list, set)):
+        if len(a) >= 3:
+            return '[\n' + textwrap.indent(
+                ',\n'.join([to_json_like_string(i) for i in a]),
+                '    ',
+                predicate=lambda line: line.strip() != ''
+            ) + '\n]'
+        else:
+            return '[' + ', '.join([to_json_like_string(i) for i in a]) + ']'
+    elif isinstance(a, (BaseModel, dict)):
+        if isinstance(a, BaseModel):
+            a = a.model_dump()
+        if not a:
+            return '{}'
+        return '{\n' + textwrap.indent(
+            ',\n'.join(f'"{k}": {to_json_like_string(v)}' for k, v in a.items()),
+            '    ',
+            predicate=lambda line: line.strip() != ''
+        ) + '\n}'
     else:
         return str(a)
 
@@ -202,3 +223,22 @@ def filter_kwargs(kwargs: dict[str, Any], handler: Callable) -> dict[str, Any]:
         elif param_name in kwargs:
             filtered_kwargs[param_name] = kwargs[param_name]
     return filtered_kwargs
+
+async def gather_safe(*coros_or_futures: Coroutine | asyncio.Future, return_exceptions: bool = False) -> list[Any]:
+    """
+    并行执行多个异步任务，捕获记录所有异常并返回结果列表。
+
+    Args:
+        *coros_or_futures: 要执行的异步任务或Future对象
+        return_exceptions: 是否返回异常对象而不是None，默认False
+
+    Returns:
+        包含所有任务结果的列表，异常位置为None或异常对象（根据return_exceptions）
+    """
+    results = await asyncio.gather(*coros_or_futures, return_exceptions=True)
+    for idx, result in enumerate(results):
+        if isinstance(result, BaseException):
+            logger.opt(exception=result, depth=1).error(f"任务 {idx} 执行出错")
+            if not return_exceptions:
+                results[idx] = None
+    return results

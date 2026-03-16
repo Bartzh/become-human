@@ -13,6 +13,7 @@ from langchain.chat_models import BaseChatModel
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
+from become_human.utils import gather_safe
 from become_human.times import format_time, Times, TimestampUs, get_week
 from become_human.store.manager import store_manager
 from become_human.event import event_bus
@@ -855,7 +856,7 @@ async def recycle_summary_memories(sprite_id: str, model: BaseChatModel) -> None
         )
 
     tasks = [_extract(g) for g in time_granularities]
-    memories = await asyncio.gather(*tasks)
+    memories = await gather_safe(*tasks)
     memories = [m for m in memories if m is not None]
     await memory_manager.add_memories(memories, sprite_id)
 
@@ -902,7 +903,7 @@ async def on_sprite_away_or_sleeping(sprite_id: str, new: Any) -> None:
         recycles = {t: recycle_memories(t, sprite_id, not_extracted_messages, sprite_manager.structured_model) for t in memory_types}
         recycle_results = {}
         if len(recycles) > 0:
-            graph_results = await asyncio.gather(*recycles.values())
+            graph_results = await gather_safe(*recycles.values())
             recycle_results = {k: graph_results[i] for i, k in enumerate(recycles.keys())}
 
         # cleanup

@@ -8,10 +8,10 @@ from loguru import logger
 
 from langgraph.store.base import PutOp
 
-from become_human.utils import dump_basemodels, get_readable_type_name
+from become_human.utils import dump_basemodels, get_readable_type_name, to_json_like_string
 from become_human.store.base import StoreModel, StoreField, store_alist_namespaces, store_abatch
 from become_human.store.settings import SpritedSettings
-from become_human.plugin import BasePlugin, PluginDependency
+from become_human.plugin import BasePlugin, PluginRelation
 from become_human.names import PROJECT_NAME
 
 SPRITES_FILE_PATH = "./config/sprites"
@@ -102,26 +102,6 @@ DEFAULT_SPRITES = {
 }
 
 
-def to_toml_like_string(a: Any) -> str:
-    """将任意对象转换为TOML-like字符串
-
-    具体来说，实现了对字符串、布尔值、None、元组、列表、集合的转换"""
-    if isinstance(a, str):
-        if '\n' in a:
-            return f'"""{a}"""'
-        return f'"{a}"'
-    elif isinstance(a, bool):
-        return str(a).lower()
-    elif a is None:
-        return 'null'
-    elif isinstance(a, (tuple, list, set)):
-        if len(a) >= 3:
-            return '[\n' + ''.join(['    ' + to_toml_like_string(i) + ',\n' for i in a]) + ']'
-        else:
-            return '[' + ', '.join([to_toml_like_string(i) for i in a]) + ']'
-    else:
-        return str(a)
-
 
 def multi_line_comment(doc: TOMLDocument, text: str) -> None:
     """
@@ -134,24 +114,24 @@ def multi_line_comment(doc: TOMLDocument, text: str) -> None:
 
 def _add_field_comments(doc: TOMLDocument, model: Type[Union[StoreModel, BaseModel]], prefix: str = "") -> TOMLDocument:
     """递归地将模型字段的描述添加为TOML文档的注释"""
+    def parse_desc(title: Optional[str], description: Optional[str]) -> str:
+        desc = title if title else ''
+        if desc and description:
+            desc += ': ' + description
+        else:
+            desc += description if description else ''
+        return desc
+
     if issubclass(model, StoreModel):
         hints = get_type_hints(model)
         for key, hint_type in hints.items():
             if isinstance(hint_type, type) and issubclass(hint_type, (StoreModel, BaseModel)):
                 if issubclass(hint_type, StoreModel):
-                    desc = hint_type._title if hint_type._title else ''
-                    if desc and hint_type._description:
-                        desc += ': ' + hint_type._description
-                    else:
-                        desc += hint_type._description if hint_type._description else ''
+                    desc = parse_desc(hint_type._title, hint_type._description)
                 else:
                     field = model.__dict__.get(key)
                     if field is not None and isinstance(field, StoreField):
-                        desc = field.title if field.title else ''
-                        if field.title and field.description:
-                            desc += '：' + field.description
-                        else:
-                            desc += field.description if field.description else ''
+                        desc = parse_desc(field.title, field.description)
                     else:
                         continue
                 desc = f'<{get_readable_type_name(hint_type)}> ' + desc
@@ -165,18 +145,14 @@ def _add_field_comments(doc: TOMLDocument, model: Type[Union[StoreModel, BaseMod
                 if field is not None and isinstance(field, StoreField):
                     doc.add(nl())
                     desc = f'<{get_readable_type_name(hint_type)}> '
-                    desc += field.title if field.title else ''
-                    if field.title and field.description:
-                        desc += '：' + field.description
-                    else:
-                        desc += field.description if field.description else ''
+                    desc += parse_desc(field.title, field.description)
                     multi_line_comment(doc, desc)
                     default = field.get_default_value()
-                    multi_line_comment(doc, f'{key}{" = " + to_toml_like_string(default)}')
+                    multi_line_comment(doc, f'{key}{" = " + to_json_like_string(default, support_multiline_str=True)}')
     else:
         for field_name, field_info in model.model_fields.items():
             desc = f'<{get_readable_type_name(field_info.annotation)}> '
-            desc += field_info.description if field_info.description else ''
+            desc += parse_desc(field_info.title, field_info.description)
             if isinstance(field_info.annotation, type) and issubclass(field_info.annotation, (StoreModel, BaseModel)):
                 doc.add(nl())
                 doc.add(nl())
@@ -192,7 +168,7 @@ def _add_field_comments(doc: TOMLDocument, model: Type[Union[StoreModel, BaseMod
                     v = field_info.default
                 else:
                     v = None
-                multi_line_comment(doc, f'{field_name}{" = " + to_toml_like_string(v)}')
+                multi_line_comment(doc, f'{field_name}{" = " + to_json_like_string(v, support_multiline_str=True)}')
     return doc
 
 def _add_config_comments(doc: TOMLDocument, plugin_configs: dict[str, type[StoreModel]]):
@@ -239,7 +215,7 @@ def _add_config_sprite_comments(doc: TOMLDocument, config: dict, prefix: str = '
             doc.add(nl())
             doc = _add_config_sprite_comments(doc, value, prefix+'.'+key if prefix else key)
         else:
-            multi_line_comment(doc, f'{key} = {to_toml_like_string(value)}')
+            multi_line_comment(doc, f'{key} = {to_json_like_string(value, support_multiline_str=True)}')
     return doc
 
 def write_default_sprite_comments() -> None:
@@ -353,15 +329,17 @@ async def load_config(plugins_with_name: dict[str, BasePlugin], sprite_ids: Opti
                 elif key == 'plugins':
                     try:
                         enabled_plugins = _plugins_validator.validate_python(value, strict=True)
-                        PluginDependency.check_enbaled_plugins_dependencies(
-                            [k for k, v in enabled_plugins.items() if v],
-                            plugins_with_name
+                        PluginRelation.check_relations(
+                            {k: v for k, v in plugins_with_name.items() if enabled_plugins.get(k)}
                         )
                         global_config[key] = enabled_plugins
                     except ValidationError:
                         logger.warning(f"Invalid value for {key} in global config file: expected dict[str, bool] for plugins, got {type(value)}")
                 elif key == 'init_on_startup':
-                    logger.warning(f"init_on_startup in global config file is not supported, it will be ignored")
+                    if not isinstance(value, bool):
+                        logger.warning(f"Invalid value for {key} in global config file: expected bool for init_on_startup, got {type(value)}")
+                    else:
+                        global_config[key] = value
                 elif key in plugin_configs:
                     global_config[key] = validated_config(value, plugin_configs[key])
                 else:
@@ -408,10 +386,10 @@ async def load_config(plugins_with_name: dict[str, BasePlugin], sprite_ids: Opti
                                 logger.warning(f"Invalid value for {key} in config file: expected dict for SpritedSettings, got {type(value)}")
                         elif key == 'plugins':
                             try:
-                                enabled_plugins = _plugins_validator.validate_python(value, strict=True)
-                                PluginDependency.check_enbaled_plugins_dependencies(
-                                    [k for k, v in enabled_plugins.items() if v],
-                                    plugins_with_name
+                                enabled_plugins = global_config.get('plugins', {}).copy()
+                                enabled_plugins.update(_plugins_validator.validate_python(value, strict=True))
+                                PluginRelation.check_relations(
+                                    {k: v for k, v in plugins_with_name.items() if enabled_plugins.get(k)}
                                 )
                             except ValidationError:
                                 logger.warning(f"Invalid value for {key} in config file: expected dict[str, bool] for plugins, got {type(value)}")
@@ -457,7 +435,8 @@ def get_sprite_enabled_plugin_names(sprite_id: str) -> list[str]:
     return [plugin for plugin, enabled in enabled_plugins.items() if enabled and plugin in plugins]
 
 def get_init_on_startup_sprite_ids() -> list[str]:
-    return [sprite_id for sprite_id, sprite_config in sprite_configs.items() if sprite_config.get('init_on_startup')]
+    global_init = global_config.get('init_on_startup', False)
+    return [sprite_id for sprite_id, sprite_config in sprite_configs.items() if sprite_config.get('init_on_startup', global_init)]
 
 def get_plugin_global_config(plugin_name: str) -> BaseModel:
     """获取插件的全局配置模型（frozen）

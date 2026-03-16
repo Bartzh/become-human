@@ -1,12 +1,12 @@
 from typing import override
 from uuid import uuid4
 import random
-import asyncio
 from loguru import logger
 
 from langchain_core.messages import RemoveMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 
+from become_human.utils import gather_safe
 from become_human.types.manager import CallSpriteRequest
 from become_human.scheduler import Schedule, get_schedules, delete_schedules
 from become_human.tool import SpriteTool
@@ -110,7 +110,7 @@ async def update_memories_job(sprite_id: str, ttl_range: list[dict[str, int]]) -
 
 class MemoryPlugin(BasePlugin):
     name = PLUGIN_NAME
-    dependencies = [PluginDependency(name='bh_presence')]
+    dependencies = [PluginRelation(name='bh_presence')]
     config = MemoryConfig
     data = MemoryData
     tools = [SpriteTool(retrieve_memories_tool, hide_by_default=True), add_memory_tool]
@@ -292,7 +292,7 @@ class MemoryPlugin(BasePlugin):
             recycles = [recycle_memories('original', sprite_id, recycle_messages)]
             if overflow_messages:
                 recycles.append(recycle_memories('episodic', sprite_id, overflow_messages, sprite_manager.structured_model))
-            await asyncio.gather(*recycles)
+            await gather_safe(*recycles)
 
         return
 

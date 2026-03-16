@@ -7,6 +7,8 @@ if TYPE_CHECKING:
     from become_human.plugins.memory import MemoryPlugin
     from become_human.plugins.instruction import InstructionPlugin
     from become_human.plugins.note import NotePlugin
+    from become_human.plugins.cli import SimpleCLI
+    from become_human.plugins.api import SimpleAPI
 
 __all__ = [
     'ReminderPlugin',
@@ -14,7 +16,9 @@ __all__ = [
     'PresencePlugin',
     'MemoryPlugin',
     'InstructionPlugin',
-    'NotePlugin'
+    'NotePlugin',
+    'SimpleCLI',
+    'SimpleAPI',
 ]
 
 def __getattr__(name):
@@ -36,4 +40,10 @@ def __getattr__(name):
     if name == 'NotePlugin':
         from become_human.plugins.note import NotePlugin
         return NotePlugin
+    if name =='SimpleCLI':
+        from become_human.plugins.cli import SimpleCLI
+        return SimpleCLI
+    if name == 'SimpleAPI':
+        from become_human.plugins.api import SimpleAPI
+        return SimpleAPI
     raise AttributeError(f"module {__name__} has no attribute {name}")
