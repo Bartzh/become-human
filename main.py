@@ -10,5 +10,6 @@ if __name__ == "__main__":
         ReminderPlugin,
         TimeIncrementerPlugin,
         NotePlugin,
+        PlanningPlugin,
         SimpleCLI,
     ])
