@@ -12,7 +12,7 @@
 
 原本叫aimemory。
 
-在代码里已经将agent称为sprite了，具体项目名还没想好。
+基于[sprited](https://github.com/Bartzh/sprited)。
 
 *[虽然不是同一个理想。](https://www.bilibili.com/video/BV1xH8oz8Eda)*
 
