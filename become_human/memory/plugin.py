@@ -136,7 +136,8 @@ class MemoryPlugin(BasePlugin):
                 ttl=int(random.expovariate(lambd) * store_manager.get_model(sprite_id, MemoryConfig).memory_base_ttl),
                 id=new,
                 previous_memory_id=last
-            )
+            ),
+            sprite_id
         ])
 
     @override
