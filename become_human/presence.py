@@ -115,7 +115,7 @@ async def self_call_job(sprite_id: str, is_wakeup: bool = False) -> None:
 
 async def set_sleeping_job(sprite_id: str) -> None:
     """如果当前状态是AWAY，那么就设置为SLEEPING"""
-    if PresencePlugin.get_presence(sprite_id).is_away():
+    if PresencePlugin.get_presence(sprite_id).is_away() or store_manager.get_model(sprite_id, PresenceConfig).always_available:
         await PresencePlugin.set_presence(sprite_id, PresenceState.SLEEPING)
 
 

@@ -878,8 +878,14 @@ async def recycle_memories(memory_type: AnyMemoryType, sprite_id: str, input_mes
 
 
 @event_bus.on('bh_presence:on_presence_changed')
-async def on_sprite_away_or_sleeping(sprite_id: str, new: Any) -> None:
-    if new.is_sleeping():
+async def on_sprite_away_or_sleeping(sprite_id: str, new: Any, original: Any) -> None:
+    if (
+        new.is_sleeping() or
+        (
+            original.is_sleeping() and
+            store_manager.get_model(sprite_id, sprite_manager.get_plugin('bh_presence').config).always_available
+        )
+    ):
         data_store = store_manager.get_model(sprite_id, MemoryData)
         # 目前就这样，在睡觉时清空字典，切断记忆连接
         data_store.last_added_memory_ids = {}
