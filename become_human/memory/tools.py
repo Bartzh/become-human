@@ -241,12 +241,12 @@ async def retrieve_memories_tool(
     creation_time_range_start, creation_time_range_end = None, None # 目前取消了这个参数
     if creation_time_range_start:
         try:
-            start_time = datetime.strptime(creation_time_range_start.strip(), "%Y-%m-%d %H:%M:%S")
+            creation_time_range_start = datetime.strptime(creation_time_range_start.strip(), "%Y-%m-%d %H:%M:%S")
         except ValueError:
             raise ValueError(f'无法解析输入中的 creation_time_range_start！请重新检查你的输入是否符合"2021-01-01 00:00:00"这样的格式！(也即%Y-%m-%d %H:%M:%S)。若不需要此功能请留空。')
     if creation_time_range_end:
         try:
-            end_time = datetime.strptime(creation_time_range_end.strip(), "%Y-%m-%d %H:%M:%S")
+            creation_time_range_end = datetime.strptime(creation_time_range_end.strip(), "%Y-%m-%d %H:%M:%S")
         except ValueError:
             raise ValueError(f'无法解析输入中的 creation_time_range_end！请重新检查你的输入是否符合"2023-01-01 23:59:59"这样的格式！(也即%Y-%m-%d %H:%M:%S)。若不需要此功能请留空。')
 
@@ -358,8 +358,8 @@ async def retrieve_memories_tool(
         retrieval_configs=retrieval_configs,
         #memory_type=memory_type if memory_type else None,
         search_string=search_string,
-        creation_time_range_start=start_time,
-        creation_time_range_end=end_time,
+        creation_time_range_start=creation_time_range_start,
+        creation_time_range_end=creation_time_range_end,
         exclude_memory_ids=exclude_memory_ids
     )
     content = repeat_content + format_retrieved_memory_groups(groups, store_settings.time_settings.time_zone)
