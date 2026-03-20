@@ -186,9 +186,9 @@ class ChromaResults:
 
 
     def _parse_result(self, result: Union[QueryResult, GetResult]) -> list[ChromaResult]:
-        if not result or not result['ids']:
+        if not result or not result['ids'] or not result['ids'][0]:
             return []
-        is_query = isinstance(result['ids'], list)
+        is_query = isinstance(result['ids'][0], list)
         included = result["included"]
         if is_query:
             ids = result["ids"][0]
