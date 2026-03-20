@@ -337,12 +337,12 @@ async def retrieve_memories_tool(
             continue
         for tool_call in m.tool_calls:
             if (
-                tool_call.name == RETRIEVE_MEMORIES and
-                tool_call.args.get("search_string") == search_string and
-                tool_call.args.get("memory_type") == memory_type and
-                tool_call.id
+                tool_call['name'] == RETRIEVE_MEMORIES and
+                tool_call['args'].get("search_string") == search_string and
+                tool_call['args'].get("memory_type") == memory_type and
+                tool_call['id']
             ):
-                repeated_tool_call_ids.append(tool_call.id)
+                repeated_tool_call_ids.append(tool_call['id'])
                 repeat_content = '由于你使用了之前上下文中使用过的该工具的调用参数，触发了重复检索，该次检索不会剔除掉之前使用该工具调用参数时检索到的记忆。\n\n'
     if repeated_tool_call_ids:
         include_memory_ids = set(get_all_retrieved_memory_ids([
