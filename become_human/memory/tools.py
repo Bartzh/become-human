@@ -389,7 +389,6 @@ async def add_memory_tool(
             ttl=int(random.expovariate(0.4) * base_ttl),
             id=new,
             previous_memory_id=last
-        ),
-        sprite_id
-    ])
+        )
+    ], sprite_id)
     return "记忆添加成功"
