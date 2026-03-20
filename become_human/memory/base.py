@@ -145,7 +145,7 @@ class ChromaResults:
             raise ValueError("Cannot convert to docs without documents and metadatas")
 
     def __getattribute__(self, name: str):
-        if name in super().__getattribute__('included'):
+        if name in super().__getattribute__('included') or name == "ids":
             if name in ["ids", "documents", "metadatas", "uris", "data", "distances"]:
                 return [getattr(r, name[:-1] if name != 'data' else name) for r in self._results]
             elif name == "embeddings":
