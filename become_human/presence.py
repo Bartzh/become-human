@@ -1,5 +1,6 @@
-from typing import Union, Optional, override
+from typing import Union, Optional, override, Any
 from enum import StrEnum
+import asyncio
 import random
 from datetime import timedelta, datetime
 from loguru import logger
@@ -19,6 +20,30 @@ from sprited.event import event_bus
 
 NAME = 'bh_presence'
 
+def sleep_time_range_reduer(left: Any, right: Any, sprite_id: str) -> tuple[float, float]:
+    if not isinstance(right, (tuple, list, set)):
+        raise ValueError(f"sleep_time_range must be a tuple, list, or set, but got {type(right)}")
+    if right:
+        if len(right) != 2:
+            raise ValueError(f"sleep_time_range length must be 2 or 0, but got {len(right)}")
+        for i, item in enumerate(right):
+            try:
+                right[i] = float(item)
+            except Exception:
+                raise ValueError(f"sleep_time_range must be a tuple, list, or set of float, but got {type(item)}")
+            if right[i] < 0 or right[i] > 86400:
+                raise ValueError(f"sleep_time_range must be in range [0, 86400], but got {right[i]}")
+        task = asyncio.create_task(update_sleeping_schedule(sprite_id, right[0]))
+    else:
+        task = asyncio.create_task(update_sleeping_schedule(sprite_id, False))
+    def callback(t: asyncio.Task):
+        try:
+            t.result()
+        except Exception:
+            logger.exception("update_sleeping_schedule failed")
+    task.add_done_callback(callback)
+    return tuple(right)
+
 class PresenceConfig(StoreModel):
     _namespace = NAME
     _title = '在线状态配置'
@@ -33,7 +58,12 @@ class PresenceConfig(StoreModel):
         (97200.0, 388800.0)
     ), title='被动自我调用时间间隔随机范围', description="在离线状态时sprite被动自我调用的时间间隔的随机范围（最小值和最大值），单位为秒，睡觉期间不算时间")
     wakeup_call_interval: Union[tuple[float, float], tuple[()]] = StoreField(default=(1.0, 10800.0), title='唤醒调用时间间隔随机范围', description="在进入离线状态后，通过发送用户消息唤醒sprite需要的时间随机范围（最小值和最大值），单位为秒")
-    sleep_time_range: Union[tuple[float, float], tuple[()]] = StoreField(default=(79200.0, 18000.0), title='睡眠时间段', description="sprite进入睡眠的时间段，单位为秒。目前的作用是self_call的时间生成会跳过这个时间段。")
+    sleep_time_range: Union[tuple[float, float], tuple[()]] = StoreField(
+        default=(79200.0, 18000.0),
+        title='睡眠时间段',
+        description="sprite进入睡眠的时间段，单位为秒。目前的作用是self_call的时间生成会跳过这个时间段。",
+        reducer=sleep_time_range_reduer
+    )
 
 class PresenceState(StrEnum):
     AVAILABLE = 'available'
@@ -118,6 +148,53 @@ async def set_sleeping_job(sprite_id: str) -> None:
     if PresencePlugin.get_presence(sprite_id).is_away() or store_manager.get_model(sprite_id, PresenceConfig).always_available:
         await PresencePlugin.set_presence(sprite_id, PresenceState.SLEEPING)
 
+async def update_sleeping_schedule(sprite_id: str, sleep_time_start: Optional[Union[float, bool]] = None) -> None:
+    """添加或更新一个休眠的schedule
+
+    如果sleep_time_start为None，那么就从store中获取当前值。
+
+    如果sleep_time_start为False，那么就删除当前的休眠schedule。"""
+    data_store = store_manager.get_model(sprite_id, PresenceData)
+    if sleep_time_start is None:
+        config_store = store_manager.get_model(sprite_id, PresenceConfig)
+        if config_store.sleep_time_range:
+            sleep_time_start = config_store.sleep_time_range[0]
+        else:
+            sleep_time_start = False
+    if sleep_time_start == False:
+        if data_store.sleep_schedule_id:
+            schedules = await get_schedules([
+                Schedule.Condition(key='schedule_id', value=data_store.sleep_schedule_id),
+            ])
+            await delete_schedules(schedules)
+        return
+    if data_store.sleep_schedule_id:
+        schedules = await get_schedules([
+            Schedule.Condition(key='schedule_id', value=data_store.sleep_schedule_id),
+        ])
+        if schedules:
+            schedule = schedules[0]
+            schedule.scheduled_time_of_day = sleep_time_start
+            try:
+                current_times = Times.from_time_settings(store_manager.get_settings(sprite_id).time_settings)
+                new_values = await schedule.calc_trigger_time(current_times)
+                await schedule.update_to_db(new_values)
+            except Schedule.SameTimeError:
+                pass
+            return
+    schedule = Schedule(
+        sprite_id=sprite_id,
+        schedule_provider=NAME,
+        schedule_type='set_sleeping',
+        job=set_sleeping_job,
+        job_args=(sprite_id,),
+        scheduled_time_of_day=sleep_time_start,
+        scheduled_every_day=True,
+        scheduled_every_month=True,
+    )
+    await schedule.add_to_db()
+    data_store.sleep_schedule_id = schedule.schedule_id
+
 
 class PresencePlugin(BasePlugin):
     """在线状态插件"""
@@ -176,21 +253,9 @@ class PresencePlugin(BasePlugin):
     async def on_sprite_init(self, sprite_id: str, /) -> None:
         config_store = store_manager.get_model(sprite_id, self.config)
         if config_store.sleep_time_range:
-            # TODO 暂时不支持中途修改
             data_store = store_manager.get_model(sprite_id, self.data)
             if not data_store.sleep_schedule_id:
-                schedule = Schedule(
-                    sprite_id=sprite_id,
-                    schedule_provider=NAME,
-                    schedule_type='set_sleeping',
-                    job=set_sleeping_job,
-                    job_args=(sprite_id,),
-                    scheduled_time_of_day=config_store.sleep_time_range[0],
-                    scheduled_every_day=True,
-                    scheduled_every_month=True,
-                )
-                await schedule.add_to_db()
-                data_store.sleep_schedule_id = schedule.schedule_id
+                await update_sleeping_schedule(sprite_id)
 
     @override
     async def before_call_sprite(self, request: CallSpriteRequest, info: BeforeCallSpriteInfo, /) -> Optional[BeforeCallSpriteControl]:
