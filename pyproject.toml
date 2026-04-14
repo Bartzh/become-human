@@ -10,12 +10,9 @@ dependencies = [
     "sprited",
 ]
 
-[dependency-groups]
+[project.optional-dependencies]
 dev = [
-    "ipykernel>=7.1.0",
-    "ipympl>=0.9.8",
-    "matplotlib>=3.10.8",
-    "pytest>=9.0.2",
+    "sprited[dev]"
 ]
 
 [tool.uv.sources]

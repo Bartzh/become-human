@@ -889,7 +889,7 @@ async def on_sprite_away_or_sleeping(sprite_id: str, new: Any, original: Any) ->
         data_store = store_manager.get_model(sprite_id, MemoryData)
         # 目前就这样，在睡觉时清空字典，切断记忆连接
         data_store.last_added_memory_ids = {}
-        await recycle_summary_memories(sprite_id, sprite_manager.structured_model)
+        await recycle_summary_memories(sprite_id, sprite_manager.plus_model)
     elif not new.is_away():
         return
     messages = await sprite_manager.get_messages(sprite_id)
@@ -906,7 +906,7 @@ async def on_sprite_away_or_sleeping(sprite_id: str, new: Any, original: Any) ->
 
         # recycling
         memory_types = config_store.memory_types
-        recycles = {t: recycle_memories(t, sprite_id, not_extracted_messages, sprite_manager.structured_model) for t in memory_types}
+        recycles = {t: recycle_memories(t, sprite_id, not_extracted_messages, sprite_manager.plus_model) for t in memory_types}
         recycle_results = {}
         if len(recycles) > 0:
             graph_results = await gather_safe(*recycles.values())

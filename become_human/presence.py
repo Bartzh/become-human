@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage, BaseMessage
 
 from sprited.plugin import *
 from sprited.store.base import StoreModel, StoreField
-from sprited.types.manager import CallSpriteRequest
+from sprited.types import CallSpriteRequest
 from sprited.message import SpritedMsgMeta, DEFAULT_USER_MSG_TYPE
 from sprited.times import TimestampUs, Times, format_duration, format_time
 from sprited.store.manager import store_manager

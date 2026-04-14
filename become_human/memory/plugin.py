@@ -1,4 +1,4 @@
-from typing import override
+from typing import override, Optional, Literal, Union
 from uuid import uuid4
 import random
 from loguru import logger
@@ -7,7 +7,7 @@ from langchain_core.messages import RemoveMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 
 from sprited.utils import gather_safe
-from sprited.types.manager import CallSpriteRequest
+from sprited.types import CallSpriteRequest
 from sprited.scheduler import Schedule, get_schedules, delete_schedules
 from sprited.tool import SpriteTool
 from sprited.store.manager import store_manager
@@ -115,7 +115,22 @@ class MemoryPlugin(BasePlugin):
     data = MemoryData
     tools = [SpriteTool(retrieve_memories_tool, hide_by_default=True), add_memory_tool]
 
-    async def add_memory(self, sprite_id: str, type: AnyMemoryType, content: str, lambd: float = 1.0) -> None:
+    async def add_memory(
+        self,
+        sprite_id: str,
+        type: AnyMemoryType,
+        content: str,
+        *,
+        id: Optional[str] = None,
+        creation_times: Optional[Times] = None,
+        ttl: Optional[Union[int, Literal['max']]] = None,
+        retrievability: float = 1.0,
+        lambd: float = 1.0,
+        previous_memory_id: Optional[str] = None,
+        next_memory_id: Optional[str] = None,
+        similarity_threshold: Optional[float] = None,
+        **kwargs: dict
+    ) -> None:
         """添加记忆"""
         if type not in MEMORY_TYPES:
             raise ValueError(f'Invalid memory type: {type}')
@@ -125,20 +140,33 @@ class MemoryPlugin(BasePlugin):
             raise ValueError('Memory content cannot be empty.')
         if not sprite_id.strip():
             raise ValueError('Sprite ID cannot be empty.')
-        new = str(uuid4())
-        times = Times.from_time_settings(store_manager.get_settings(sprite_id).time_settings)
-        last = await connect_last_memory(sprite_id, type, [new])
+        if id is None:
+            id = str(uuid4())
+        if creation_times is None:
+            creation_times = Times.from_time_settings(store_manager.get_settings(sprite_id).time_settings)
+        if ttl is None:
+            ttl = int(random.expovariate(lambd) * store_manager.get_model(sprite_id, MemoryConfig).memory_base_ttl)
+        max_ttl = store_manager.get_model(sprite_id, MemoryConfig).memory_max_ttl
+        if ttl == 'max':
+            ttl = max_ttl
+        else:
+            ttl = min(ttl, max_ttl)
+        if previous_memory_id is None:
+            previous_memory_id = await connect_last_memory(sprite_id, type, [id])
         await memory_manager.add_memories([
             InitialMemory(
                 content=content,
                 type=type,
-                creation_times=times,
-                ttl=int(random.expovariate(lambd) * store_manager.get_model(sprite_id, MemoryConfig).memory_base_ttl),
-                id=new,
-                previous_memory_id=last
-            ),
-            sprite_id
-        ])
+                creation_times=creation_times,
+                ttl=ttl,
+                id=id,
+                retrievability=retrievability,
+                previous_memory_id=previous_memory_id,
+                next_memory_id=next_memory_id,
+                similarity_threshold=similarity_threshold,
+                extra=kwargs
+            )
+        ], sprite_id)
 
     @override
     async def on_sprite_init(self, sprite_id: str, /) -> None:
@@ -292,7 +320,7 @@ class MemoryPlugin(BasePlugin):
         if recycle_messages:
             recycles = [recycle_memories('original', sprite_id, recycle_messages)]
             if overflow_messages:
-                recycles.append(recycle_memories('episodic', sprite_id, overflow_messages, sprite_manager.structured_model))
+                recycles.append(recycle_memories('episodic', sprite_id, overflow_messages, sprite_manager.plus_model))
             await gather_safe(*recycles)
 
         return

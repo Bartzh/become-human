@@ -4,7 +4,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterator, Self, Union, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from uuid import uuid4
 import numpy as np
 from numpy.typing import NDArray
@@ -219,6 +219,22 @@ class ChromaResults:
     def __setitem__(self, index, value: ChromaResult) -> None:
         self._results[index] = value
 
+    def __delitem__(self, index) -> None:
+        del self._results[index]
+        if not self._results:
+            self.included = []
+
+    def remove(self, value: ChromaResult) -> None:
+        self._results.remove(value)
+        if not self._results:
+            self.included = []
+
+    def pop(self, index: int = -1) -> ChromaResult:
+        result = self._results.pop(index)
+        if not self._results:
+            self.included = []
+        return result
+
     def __contains__(self, item: ChromaResult) -> bool:
         return item.id in self.ids
 
@@ -242,9 +258,25 @@ class InitialMemory(BaseModel):
     creation_times: Times = Field(description="The creation times of the memory")
     ttl: int = Field(description="The ttl of the memory", gt=0)
     id: str = Field(default_factory=lambda: str(uuid4()), description="The id of the memory")
+    retrievability: float = Field(default=1.0, ge=0, le=1, description="The retrievability of the memory")
     previous_memory_id: Optional[str] = Field(default=None, description="The previous memory id")
     next_memory_id: Optional[str] = Field(default=None, description="The next memory id")
-    extra: Optional[dict] = Field(default=None, description="额外信息")
+    similarity_threshold: Optional[float] = Field(default=None, description="The similarity threshold of the memory")
+    extra: dict[str, Any] = Field(default_factory=dict, description="额外信息")
+
+    @field_validator('previous_memory_id', mode='after')
+    @classmethod
+    def validate_previous_memory_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
+            return None
+        return v
+
+    @field_validator('next_memory_id', mode='after')
+    @classmethod
+    def validate_next_memory_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
+            return None
+        return v
 
 class RetrievedMemory(BaseModel):
     doc: Document = Field(description="The memory document")
@@ -331,12 +363,12 @@ class MemoryManager():
             creation_times = memory.creation_times
             memory_of_day = calculate_memory_of_day(creation_times.sprite_world_datetime)
             ttl = int(memory.ttl * (1 - difficulty) * memory_of_day) # 稳定性，决定了可检索性的衰减速度
-            metadata = memory.extra or {}
+            metadata = memory.extra.copy()
             metadata.update(generate_time_metadatas(creation_times, 'creation'))
             metadata.update(generate_time_metadatas(creation_times, 'last_accessed'))
             metadata.update({
                 "ttl": ttl, # 稳定ticks
-                "retrievability": 1.0, # 可检索性，决定了检索的概率
+                "retrievability": memory.retrievability, # 可检索性，决定了检索的概率
                 "difficulty": difficulty, # 难度，决定了稳定性基数增长的多少。可能会出现无法长期保留的记忆，如整本书的内容。
                 "memory_type": memory.type,
                 "memory_id": memory.id, # 用于在检索时剔除记忆，由于chroma的限制，只能使用元数据来实现
@@ -390,6 +422,7 @@ class MemoryManager():
         if not retrieval_config.retrievals:
             return []
 
+        max_ttl = store_manager.get_model(sprite_id, MemoryConfig).memory_max_ttl
 
         filters = []
 
@@ -438,6 +471,7 @@ class MemoryManager():
                     patched_metadata = recall_memory(
                         metadata=doc.metadata,
                         current_times=current_times,
+                        max_ttl=max_ttl,
                         strength=retrieval_config.strength
                     )
                     if patched_metadata.get("forgot"):
@@ -517,6 +551,7 @@ class MemoryManager():
                     patched_metadata = recall_memory(
                         metadata=doc.metadata,
                         current_times=current_times,
+                        max_ttl=max_ttl,
                         strength=strength
                     )
                     if patched_metadata.get("forgot"):
@@ -575,6 +610,7 @@ class MemoryManager():
                                     patched_metadata = recall_memory(
                                         metadata=get_result["metadatas"][0],
                                         current_times=current_times,
+                                        max_ttl=max_ttl,
                                         strength=strength * weight
                                     )
                                     if patched_metadata.get("forgot"):
@@ -683,7 +719,12 @@ class MemoryManager():
         update_metas = []
         docs = get_result_to_docs(get_result)
         for index, metadata in enumerate(get_result['metadatas']):
-            patch = recall_memory(metadata, current_times, strength)
+            patch = recall_memory(
+                metadata=metadata,
+                current_times=current_times,
+                max_ttl=store_manager.get_model(sprite_id, MemoryConfig).memory_max_ttl,
+                strength=strength
+            )
             if patch.get('forgot'):
                 remove_ids.append(get_result['ids'][index])
                 remove_idx.append(index)
@@ -792,7 +833,7 @@ class MemoryManager():
                 "ef_search": max(n_results, 100)
             }
         })
-        return await run_in_executor(None, collection.query,
+        results = await run_in_executor(None, collection.query,
             query_embeddings=query_embeddings,
             query_texts=query_texts,
             query_images=query_images,
@@ -803,6 +844,10 @@ class MemoryManager():
             where_document=where_document,
             include=include
         )
+        #对于chroma的cosine来说，输出的score范围是0~1，越小越相似。这里统一反转为越大越相似
+        for i, sim in enumerate(results["distances"][0]):
+            results["distances"][0][i] = 1 - sim
+        return results
 
 
     async def add_documents(
@@ -862,7 +907,7 @@ class MemoryManager():
         return results
 
 
-    async def similarity_search_by_vector_with_score(
+    async def similarity_search_by_vector(
         self,
         sprite_id: str,
         memory_type: str,
@@ -870,19 +915,51 @@ class MemoryManager():
         k: int = 5,
         filter: Optional[dict[str, Any]] = None,
         where_document: Optional[dict[str, Any]] = None,
+        with_highest_retrievability: bool = True,
+        exclude_low_similarity: Optional[bool] = None,
         **kwargs: Any,
-    ) -> list[tuple[Document, float]]:
-        result = await self.query(
+    ) -> ChromaResults:
+        if with_highest_retrievability:
+            k = k // 2
+        results = ChromaResults(await self.query(
             sprite_id=sprite_id,
             memory_type=memory_type,
             query_embeddings=embedding,
             n_results=k,
             where=filter if filter else None,
             where_document=where_document if where_document else None,
+            include=["metadatas", "documents", "distances", "embeddings"],
             **kwargs,
-        )
-        #对于chroma的cosine来说，输出的score范围是0~1，越小越相似。这里统一反转为越大越相似
-        return [(doc, 1 - score) for doc, score in query_result_to_docs_and_scores(result)]
+        ))
+        if with_highest_retrievability:
+            h_results = await self.get_by_highest_retrievability(
+                sprite_id=sprite_id,
+                memory_type=memory_type,
+                k=k,
+                filter=filter if filter else None,
+                where_document=where_document if where_document else None,
+            )
+            s_embedding = np.array(embedding, dtype=np.float32)
+            s_embedding = np.expand_dims(s_embedding, axis=0)
+            h_embeddings = h_results.embeddings
+            h_sims = self.cosine_similarity(s_embedding, h_embeddings)[0]
+            h_results.distances = h_sims
+            results.extend(h_results)
+        if exclude_low_similarity is None:
+            exclude_low_similarity = store_manager.get_model(sprite_id, MemoryConfig).exclude_low_similarity
+        exclude_indices = []
+        for i, result in enumerate(results):
+            similarity_threshold = result.metadata.get('similarity_threshold')
+            if similarity_threshold is None:
+                if exclude_low_similarity:
+                    similarity_threshold = 0.2
+                else:
+                    continue
+            if result.distance < similarity_threshold:
+                exclude_indices.append(i)
+        if exclude_indices:
+            results = ChromaResults([result for i, result in enumerate(results) if i not in exclude_indices])
+        return results
 
 
 
@@ -899,35 +976,17 @@ class MemoryManager():
         where_document: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> list[tuple[Document, float]]:
-        docs_and_scores = await self.similarity_search_by_vector_with_score(
+        docs_and_scores = (await self.similarity_search_by_vector(
             sprite_id=sprite_id,
             memory_type=memory_type,
             embedding=embedding,
-            k=int(fetch_k / 2),
-            filter=filter,
-            where_document=where_document,
-            **kwargs)
-        if not docs_and_scores:
-            return []
-        current_ids = [doc.id for doc, _ in docs_and_scores if doc.id]
-        r_get_results = await self.get_by_highest_retrievability(
-            sprite_id=sprite_id,
-            memory_type=memory_type,
-            k=int(fetch_k / 2),
+            k=fetch_k,
             filter=filter,
             where_document=where_document,
             **kwargs
-        )
-        r_get_results = ChromaResults([r for r in r_get_results if r.id not in current_ids])
-        s_embedding = np.array(embedding, dtype=np.float32)
-        s_embedding = np.expand_dims(s_embedding, axis=0)
-        r_embeddings = r_get_results.embeddings
-        r_sims = self.cosine_similarity(s_embedding, r_embeddings)[0]
-        r_docs = r_get_results.to_docs()
-        docs_and_scores.extend([
-            (r_docs[i], float(r_sims[i]))
-            for i in range(len(r_get_results))
-        ])
+        )).to_docs_and_scores()
+        if not docs_and_scores:
+            return []
 
         docs_and_scores_with_retrievability = [
             (doc, score * similarity_weight + doc.metadata["retrievability"] * retrievability_weight)
@@ -1035,24 +1094,16 @@ class MemoryManager():
         search_embedding = np.array(embedding, dtype=np.float32)
         search_embedding = np.expand_dims(search_embedding, axis=0)
 
-        results = ChromaResults(await self.query(
+        results = await self.similarity_search_by_vector(
             sprite_id=sprite_id,
             memory_type=memory_type,
-            query_embeddings=embedding,
-            n_results=int(fetch_k / 2),
-            where=filter if filter else None,
-            where_document=where_document if where_document else None,
-            include=["metadatas", "documents", "embeddings"],
+            embedding=embedding,
+            k=fetch_k,
+            filter=filter,
+            where_document=where_document,
+            #include=["metadatas", "documents", "embeddings"],
             **kwargs,
-        ))
-        results.extend(await self.get_by_highest_retrievability(
-            sprite_id=sprite_id,
-            memory_type=memory_type,
-            k=int(fetch_k / 2),
-            filter=filter if filter else None,
-            where_document=where_document if where_document else None,
-            **kwargs,
-        ))
+        )
 
         if not results:
             return []
@@ -1285,7 +1336,7 @@ def tick_memory(metadata: dict, current_sprite_subjective_tick: Union[int, Times
 
     return {"retrievability": retrievability}
 
-def recall_memory(metadata: dict, current_times: Times, strength: float = 1.0) -> dict:
+def recall_memory(metadata: dict, current_times: Times, max_ttl: int, strength: float = 1.0) -> dict:
     """
     调用记忆时重置可检索性并增强稳定性
     """
@@ -1298,9 +1349,12 @@ def recall_memory(metadata: dict, current_times: Times, strength: float = 1.0) -
     memory_of_day = calculate_memory_of_day(current_times.sprite_world_datetime)
     stable_strength = calculate_stability_curve(updated_metadata["retrievability"])
     current_ttl = int(metadata["ttl"])
+
+    max_ttl_ratio = ((max(max_ttl - current_ttl, 0)) / max_ttl) ** 0.4
+
     ttl_diff = int(current_ttl * stable_strength) - current_ttl
     if ttl_diff >= 0:
-        ttl_diff = int(ttl_diff * reversed_difficulty * strength * memory_of_day)
+        ttl_diff = int(ttl_diff * reversed_difficulty * strength * memory_of_day * max_ttl_ratio)
     new_ttl = current_ttl + ttl_diff
 
     retrievability = min(1.0, updated_metadata["retrievability"] + strength * memory_of_day)
@@ -1322,21 +1376,21 @@ def recall_memory(metadata: dict, current_times: Times, strength: float = 1.0) -
 def calculate_stability_curve(retrievability: float) -> float:
     r = retrievability
 
-    #r1=0, r0.4≈1, r0=-1
-    #x = (1 - r) ** 2 + 2 * (1 - r) * r * 0.1
-    #y = (1 - r) ** 2 * -1 + 2 * (1 - x) * x * 2.815
+    # r1=0, r0.4≈1, r0=-1
+    # x = (1 - r) ** 2 + 2 * (1 - r) * r * 0.1
+    # y = (1 - r) ** 2 * -1 + 2 * (1 - x) * x * 2.815
 
-    #r1=1, r0.4≈2, r0=0
-    #x = (1 - r) ** 2 + 2 * (1 - r) * r * 0.2
-    #y = 2 * (1 - x) * x * 3.7 + r ** 2
-
-    #r1=1, r0.4≈3, r0=0
-    #x = (1 - r) ** 2 + 2 * (1 - r) * r * 0.2
-    #y = 2 * (1 - x) * x * 5.72 + r ** 2
-
-    #r1=1, r0.4≈2.5, r0=0
+    # r1=1, r0.4≈2, r0=0
     x = (1 - r) ** 2 + 2 * (1 - r) * r * 0.2
-    y = 2 * (1 - x) * x * 4.71 + r ** 2
+    y = 2 * (1 - x) * x * 3.7 + r ** 2
+
+    # r1=1, r0.4≈3, r0=0
+    # x = (1 - r) ** 2 + 2 * (1 - r) * r * 0.2
+    # y = 2 * (1 - x) * x * 5.72 + r ** 2
+
+    # r1=1, r0.4≈2.5, r0=0
+    # x = (1 - r) ** 2 + 2 * (1 - r) * r * 0.2
+    # y = 2 * (1 - x) * x * 4.71 + r ** 2
     return y
 
 
