@@ -129,7 +129,7 @@ class MemoryPlugin(BasePlugin):
         previous_memory_id: Optional[str] = None,
         next_memory_id: Optional[str] = None,
         similarity_threshold: Optional[float] = None,
-        **kwargs: dict
+        **kwargs
     ) -> None:
         """添加记忆"""
         if type not in MEMORY_TYPES:
