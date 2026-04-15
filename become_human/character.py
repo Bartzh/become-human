@@ -599,7 +599,7 @@ NAME = "bh_character"
 
 class CharacterConfig(StoreModel):
     gen_prompt: str = StoreField(title="角色设定初始提示", description="角色整体描述（作为接下来所有要生产的详细设定的初始提示）", default='一个有用的AI助手')
-    gen_model: Literal['max', 'plus', 'flash'] = StoreField(title="角色设定生成模型", description="用于生成角色详细设定的模型", default='plus')
+    gen_model: Literal['max', 'plus', 'flash'] = StoreField(title="角色设定生成模型", description="用于生成角色详细设定的模型", default='max')
     gen_model_thinking: bool = Field(default=False, title="角色设定生成模型是否开启思考模式")
 
 class CharacterData(StoreModel):
