@@ -3250,7 +3250,7 @@ wheels = [
 [[package]]
 name = "sprited"
 version = "0.1.0"
-source = { git = "https://github.com/Bartzh/sprited.git#e3120b7e15d952eb6247c8e28a9918fc41d48071" }
+source = { git = "https://github.com/Bartzh/sprited.git#962b9d21c8882a0fa4d2671eff2fbdb704b5b934" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "bcrypt" },
