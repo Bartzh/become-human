@@ -6,6 +6,7 @@ if __name__ == '__main__':
     sprite_manager.run_standalone([
         PresencePlugin,
         MemoryPlugin,
+        CharacterPlugin,
         InstructionPlugin,
         ReminderPlugin,
         TimeIncrementerPlugin,
