@@ -898,7 +898,7 @@ async def on_sprite_away_or_sleeping(sprite_id: str, new: Any, original: Any) ->
         default = MemoryMsgMeta()
         not_extracted_messages = [m for m in messages if not default.parse_with_default(m).extracted]
         # 再次判断是否有来自用户的新消息
-        if sprite_manager.get_plugin('bh_presence').is_user_input(not_extracted_messages):
+        if sprite_manager.get_plugin('bh_presence').is_user_input(sprite_id, not_extracted_messages):
             return
 
         config_store = store_manager.get_model(sprite_id, MemoryConfig)
