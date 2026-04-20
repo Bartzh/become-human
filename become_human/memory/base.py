@@ -82,7 +82,7 @@ class ChromaResults:
         if result is None or isinstance(result, list):
             if result:
                 first_included = result[0].included
-                if all([r.included == first_included for r in result]):
+                if all([set(r.included) == set(first_included) for r in result]):
                     self.included = first_included
                     self._results = result
                 else:
@@ -99,7 +99,7 @@ class ChromaResults:
             result = result._results
         if isinstance(result, list):
             if result:
-                if all([r.included == self.included for r in result]):
+                if all([set(r.included) == set(self.included) for r in result]):
                     included = result[0].included
                 else:
                     raise ValueError("Cannot create ChromaResults from mixed included types")
