@@ -109,7 +109,7 @@ class ChromaResults:
         if result:
             if not self.included:
                 self.included = included
-            elif included != self.included:
+            elif set(included) != set(self.included):
                 raise ValueError("Cannot add results with different included types")
             self._results += [r for r in result if r not in self]
 
@@ -118,7 +118,7 @@ class ChromaResults:
             return
         if not self.included:
             self.included = result.included
-        elif result.included != self.included:
+        elif set(result.included) != set(self.included):
             raise ValueError("Cannot add results with different included types")
         self._results.append(result)
 
